@@ -1,0 +1,383 @@
+<!doctype html>
+<!--
+  The embedded deck. Loaded in an iframe inside the user's YouTube page by
+  content.js, which is the only reason this is a separate document at all: it is
+  an extension page, so it keeps chrome.runtime, ES modules and the design
+  tokens, and YouTube's stylesheet cannot reach into it.
+
+  ONE DECK. There is no crossfader, no assign row, no deck B and no hop control
+  — the whole point of this build is the six faders under the video you are
+  already watching. The DJ console (ui/console-full.html in the other build) is
+  where the two-deck surface lives; do not grow it back in here.
+-->
+<html lang="en" data-theme="dark" data-density="compact">
+<head>
+<meta charset="utf-8">
+<title>Stem Splitter Live — stem deck</title>
+<link rel="stylesheet" href="tokens.css">
+<link rel="stylesheet" href="embed.css">
+</head>
+<body>
+
+<!-- Stem glyphs, the same six the console uses, lifted from console-full.html.
+     Inline: no network, ever (P1). Six symbols rather than the console's full
+     sprite, because these are the only icons on this surface — the glyph is the
+     non-colour half of stem identity (DESIGN §2.4), so it travels with the
+     name and the fixed position.
+
+     ALL SIX STRIPS NOW CARRY THE FULL FOUR-WAY REDUNDANCY DESIGN §2.4 asks for
+     — glyph, name, fixed position and digit. Guitar and piano ran on three of
+     the four until 2026-08-17, when the `Digit5`-`Digit8` carve-out was retired
+     and they got `5` and `6`; the glyphs stay load-bearing regardless, because
+     colour is never the sole carrier and none of the four may be dropped at any
+     width. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false"><defs>
+<symbol id="i-mic" viewBox="0 0 16 16"><rect x="6" y="1.8" width="4" height="7.4" rx="2"/><path d="M3.8 7.4a4.2 4.2 0 0 0 8.4 0"/><path d="M8 11.6v2.6M5.6 14.2h4.8"/></symbol>
+<symbol id="i-drum" viewBox="0 0 16 16"><circle cx="8" cy="10.5" r="4.2"/><circle cx="8" cy="10.5" r="1.1"/><path d="M4.2 4.2 6.6 8M11.8 4.2 9.4 8"/></symbol>
+<symbol id="i-bass" viewBox="0 0 16 16"><path d="M1 8c1-6 2.5-6 3.5 0S7 14 8 8s2.5-6 3.5 0S14 11 15 8"/></symbol>
+<symbol id="i-other" viewBox="0 0 16 16"><path d="M4 2v12M8 2v12M12 2v12"/><rect x="2.2" y="4.2" width="3.6" height="2.4" rx="1"/><rect x="6.2" y="9" width="3.6" height="2.4" rx="1"/><rect x="10.2" y="5.6" width="3.6" height="2.4" rx="1"/></symbol>
+<symbol id="i-guitar" viewBox="0 0 16 16"><path d="M12.9 1.4 14.6 3.1l-1.3 1.3-1.7-1.7z"/><path d="M12 3.5 8.9 6.6"/><path d="M9.4 6.1a3.2 3.2 0 0 0-4 .4l-.9.9a2.6 2.6 0 0 0 0 3.7l1.4 1.4a2.6 2.6 0 0 0 3.7 0l.9-.9a3.2 3.2 0 0 0 .4-4z"/><circle cx="7" cy="9.1" r=".9"/></symbol>
+<symbol id="i-piano" viewBox="0 0 16 16"><rect x="1.4" y="3.2" width="13.2" height="9.6" rx="1.2"/><path d="M5.8 3.2v9.6M10.2 3.2v9.6"/><path d="M4.4 3.2v3.8M7.2 3.2v3.8M11.6 3.2v3.8"/></symbol>
+</defs></svg>
+
+<!--
+  NO TRANSPORT BUTTON. YouTube's play button is the only one, and this header
+  reports rather than offers: a second play control on the same audio is two
+  sources of truth and the user has to work out which one wins.
+
+  The chip sits where the button was, because that is where the eye already
+  goes for "is this thing on".
+-->
+<header class="bar">
+  <span class="chip chip--lead" id="stat-chip">Not armed</span>
+  <!-- NO TITLE AND NO URL. This deck is injected into the watch page it is
+       playing, directly under the player: the title is an inch above this line
+       and the URL is in the address bar. Printing both again bought nothing and
+       cost a second text line in the header on every deck, always — which is
+       what made the strip two rows tall.
+
+       WHAT SURVIVES is the one thing the page does NOT say: how to arm a tab
+       that is not armed. It is a single line, shorter than the chip, so it
+       costs no height. Armed, it is empty and this element is pure spacer. -->
+  <span class="hint" id="src-sub"></span>
+  <div class="stat">
+    <span class="num" id="stat-num"></span>
+  </div>
+  <button class="ic" id="eject" type="button" title="Stop and release this tab" aria-label="Stop and release this tab">⏏</button>
+  <button class="ic" id="close" type="button" title="Hide the deck — the audio keeps playing" aria-label="Hide the deck">✕</button>
+</header>
+
+<div class="banner" id="banner" hidden>
+  <div class="banner__txt"><b id="err-t"></b><p id="err-p"></p></div>
+  <button class="btn" id="err-rx" type="button" hidden>Restart</button>
+  <button class="ic" id="err-x" type="button" title="Dismiss" aria-label="Dismiss this message" hidden>✕</button>
+</div>
+
+<!--
+  THE AUTOPLAY ADVISORY, and it is a SECOND banner rather than a second state on
+  the one above. That one is driven by `err`, whose every raise site latches
+  `halted` and stops the deck; this failure stops nothing — the audio is fine,
+  YouTube may simply roll on to the next video at the end. Folding them together
+  would mean either a halt this does not deserve or a shared slot where an arm
+  refusal and this can hide each other.
+-->
+<div class="banner banner--adv" id="nav-banner" role="status" hidden>
+  <div class="banner__txt"><b>Autoplay</b><p id="nav-p"></p></div>
+  <button class="ic" id="nav-x" type="button" title="Dismiss" aria-label="Dismiss this message">✕</button>
+</div>
+
+<!--
+  THE BAND: six vertical channel strips and the master, as on the console and
+  as on hardware, on ONE line — the wrap and scroll-rail alternatives and why
+  they lose are in embed.css's `.rack` header. The strips are built in embed.js:
+  six hand-written copies of the same markup is six places to fix the next time
+  one of them changes.
+-->
+<div class="rack">
+  <div class="strips" id="strips"></div>
+  <div class="mstr">
+    <span class="lbl">Master</span>
+    <!-- The same .fader component as the six stems, not a second widget:
+         one law (audio-math faderDb/dbToFader), one set of gestures. -->
+    <div class="fader" id="master" role="slider" tabindex="0" aria-label="Master gain"
+         aria-valuemin="-60" aria-valuemax="6" aria-valuenow="0"
+         aria-valuetext="0.0 decibels, unity" style="--pos:.8">
+      <div class="fader__track"></div><div class="fader__fill"></div>
+      <div class="fader__detent"></div><div class="fader__cap"></div>
+    </div>
+    <span class="db" id="master-db">0.0</span>
+  </div>
+</div>
+
+<!--
+  THE PLAY-ALONG ROW: what key is this in, and can I move it.
+
+  It sits UNDER the mixer because it is read, not driven — the six faders are
+  the gesture this build exists for and nothing goes above them. Two controls
+  and one readout, in the order a horn player uses them: what is it, what do I
+  read it as, and (if that is an awkward key) move it.
+-->
+<div class="tools">
+  <!-- THE KEY. Both keys, always labelled — an unlabelled key name on this
+       screen is a bug, not a shorter string (chroma.js displayKey). -->
+  <!-- `aria-live="polite"`: the key changes on a TRANSITION only — the engine's
+       hysteresis gate is what makes that true (chroma.js createKeyDisplay) — and
+       on a control the user just moved. Both are worth announcing; a per-frame
+       value here would be noise, which is what DESIGN §13.5 bars. -->
+  <div class="key" id="keybox" data-show="none" aria-live="polite">
+    <div class="key__hd">
+      <span class="lbl">Key</span>
+      <span class="key__st" id="key-state"></span>
+    </div>
+    <div class="key__names">
+      <b class="key__written" id="key-written"></b>
+      <span class="key__concert" id="key-concert"></span>
+    </div>
+    <!-- The notes they finger, in the spelling that matches the key signature
+         (chroma.js scaleLine). This is the line a player actually uses. -->
+    <div class="key__scale" id="key-scale"></div>
+  </div>
+
+
+  <!--
+    BPM. A number and a pulse, from the isolated drums stem. There is no sync, no
+    beat grid and no nudge — this REPORTS the tempo, it does not lock anything to
+    it. It sits beside the key because both are readouts: what is this, not
+    change it.
+
+    A CONFIDENT-LOOKING WRONG TEMPO IS WORSE THAN A BLANK, and that is the whole
+    design of the box. Every state but `locked` renders an em dash and NOT ONE of
+    them renders a digit — there is no "low-confidence number in grey", because a
+    grey number is read as a number and the person reading it is about to play
+    along with it. `bpmPlan()` in embed-state.js owns that and is asserted on it.
+
+    `aria-live="polite"` is licensed by TWO gates and by nothing else, and both
+    have to hold or this attribute has to go:
+      1. the ENGINE only leaves `listening` on a hysteresis lock, exactly as
+         chroma.js's createKeyDisplay does — so a transition is rare and worth
+         announcing;
+      2. the number is rendered as an INTEGER through `text()`, which compares
+         before it writes, so a payload jittering 127.6/128.4 rewrites nothing.
+    The PULSE is aria-hidden: it moves at up to 3 Hz and it is a picture of the
+    number beside it, which is the alternative DESIGN §7.4 asks for.
+  -->
+  <div class="bpm" id="bpmbox" data-show="none" data-pulse="off" aria-live="polite">
+    <div class="bpm__hd">
+      <span class="lbl">BPM</span>
+      <span class="bpm__pulse" id="bpm-pulse" aria-hidden="true"></span>
+      <span class="bpm__st" id="bpm-state"></span>
+    </div>
+    <div class="bpm__names">
+      <b class="bpm__v" id="bpm-v"></b>
+      <span class="bpm__src" id="bpm-src"></span>
+    </div>
+    <div class="bpm__fine" id="bpm-fine"></div>
+  </div>
+
+  <div class="tools__ctl">
+    <!--
+      TRANSPOSE. Semitone steps only: there is no continuous knob, because the
+      shifter has thirteen ratios and nothing in between, and a knob that snaps
+      is a knob that lies.
+
+      The label names the drums EXCLUSION rather than "shifts everything":
+      drums are deliberately left unshifted — `engine/pitchbank.js` lane 0,
+      "ALWAYS. Never shifted. product ruling", asserted as
+      `drums-lane-is-never-shifted` — which is what keeps them free of
+      phase-vocoder artefacts, and a control that promised to move the whole
+      track would be promising something this does not do.
+
+      IT USED TO READ "bass, other, vocals". That was the four-stem lane list
+      and it under-promised by two whole stems: lanes 1-5 are bass, other,
+      vocals, GUITAR and PIANO, and all five shift. A list is not worth
+      re-breaking on the next stem — the exclusion is the stable half of the
+      sentence, and it is the half a player needs before pressing the button.
+    -->
+    <div class="tr" role="group" aria-labelledby="tr-lbl">
+      <span class="lbl" id="tr-lbl">Transpose</span>
+      <div class="tr__row">
+        <button class="tr__b" id="tr-dn" type="button" aria-label="Transpose down one semitone">−</button>
+        <button class="tr__v" id="tr-v" type="button" data-home="true"
+                aria-label="Transpose: 0 semitones, the recording's own key. Press to reset"
+                title="Back to the recording's own key">0</button>
+        <button class="tr__b" id="tr-up" type="button" aria-label="Transpose up one semitone">+</button>
+      </div>
+      <span class="tr__fine">semitones · all stems except drums</span>
+    </div>
+
+
+    <!--
+      SPEED. KEY-LOCKED: it changes the tempo and nothing else, exactly as
+      YouTube's own speed menu does. Nothing here resamples anything of ours —
+      the page's own player does the work — which is why this is nowhere near
+      CONTRIBUTING.md's capture-clock/model-clock prohibition.
+
+      SPEED IS KEY-LOCKED, reversing an earlier varispeed design. This block used
+      to read "Varispeed — the pitch follows, like a turntable", and the build
+      did exactly that: it cleared `preservesPitch` on every rate write, so the
+      element transposed the audio BEFORE the capture tap and every stem came out
+      in the wrong key. TRANSPOSE is now the only control that moves the key, at
+      any speed, and the two compose — 0.75x with TRANSPOSE +5 is a fourth UP
+      from the original, not back at it.
+
+      IT IS A SET-AND-FORGET CONTROL AND IT IS SHAPED LIKE ONE (product ruling). The
+      deck runs ~3.4 s behind the source, so a press is heard three and a half
+      seconds later. Nudge buttons, 29 discrete rungs, no fader, no drag, no
+      wheel and no auto-repeat: a control you can sweep invites a gesture, and a
+      gesture at this latency is ten changes you cannot hear.
+
+      THE STEP IS GEOMETRIC, NOT A PERCENTAGE. A third of a semitone's ratio
+      inside ±1 semitone (which displays as the 2 % grid), a whole semitone's
+      outside it, ending exactly on ±1 octave at 0.50x and 2.00x. Shift halves or
+      doubles. `SPEED_RATES` in embed-state.js is the specification; there is no
+      step constant, because the step is not constant.
+
+      IT IS A STEP SIZE, NOT AN INTERVAL ANYONE HEARS. This paragraph used to end
+      "that is why every rung composes with TRANSPOSE" — true under varispeed,
+      meaningless under key lock. The ratios stay because they give ~29 rungs with
+      a usable feel at both ends, and for no musical reason at all. Nothing on
+      this control prints a semitone.
+
+      THE VALUE IS THE ELEMENT'S, NOT OURS. YouTube's own menu writes the same
+      `playbackRate` we do — and its slider is off our ladder — so a readout of
+      our last request would lie the moment the user opened it. This reports; the
+      buttons write. One truth.
+    -->
+    <div class="sp" id="spbox" role="group" aria-labelledby="sp-lbl"
+         aria-describedby="sp-fine" data-state="ok" data-pending="false" data-far="false">
+      <span class="lbl" id="sp-lbl">Speed</span>
+      <div class="sp__row">
+        <button class="sp__b" id="sp-dn" type="button" aria-label="Slower">−</button>
+        <button class="sp__v" id="sp-v" type="button" data-home="true" aria-live="polite"
+                aria-label="Speed: 1.00 times, the video's own speed. Press to reset"
+                title="Back to the video's own speed">1.00×</button>
+        <button class="sp__b" id="sp-up" type="button" aria-label="Faster">+</button>
+      </div>
+      <!-- ONE slot, four jobs, in this order: the lockout reason, the far
+           statement, the in-flight countdown, the standing fact. Mutually
+           exclusive by construction. Far outranks pending because PENDING IS
+           ALREADY DRAWN TWICE — the value goes outlined and then fills — and the
+           far statement is drawn nowhere else. A second slot would be 12 px of
+           empty row in the common case.
+
+           `aria-describedby` points here BECAUSE THE REASON IS RENDERED HERE. A
+           description that lives only in a `title` is a reason a screen-reader
+           user does not get, and "a greyed knob with a reason" has to mean the
+           same thing on both. -->
+      <!-- The static default must match paintSpeed()'s HOME branch exactly: this
+           is what the user reads before the first repaint, and a second wording
+           here would be a second claim about the same control. -->
+      <span class="sp__fine" id="sp-fine">speed · key stays</span>
+    </div>
+
+    <label class="inst">
+      <span class="lbl">Read as</span>
+      <select id="inst">
+        <!-- Concert FIRST because it is the default (embed.js `instrument`). A
+             <select> with no `selected` shows its first option, and that is the
+             one entry point applyPrefs cannot cover: if the storage.local read
+             rejects it never runs, and the picker must still agree with the
+             variable. -->
+        <option value="concert">Concert (C)</option>
+        <option value="alto">Alto / bari (E♭)</option>
+        <option value="tenor">Tenor / soprano (B♭)</option>
+      </select>
+    </label>
+  </div>
+</div>
+
+<!--
+  THE ONE-TIME MODEL DOWNLOAD, asked for rather than done.
+
+  It is 172 MiB and it is the only network request this product ever makes, so
+  it is the one thing the user must be told about before it happens. A real
+  <dialog> + showModal(): focus trap, Esc, inert background, no library.
+-->
+<dialog class="dlg" id="modeldlg" aria-labelledby="mdl-t">
+  <h2 id="mdl-t">One-time download</h2>
+  <p>Separating stems runs a model on your own machine. It has to be fetched
+     once — <b id="mdl-size">…</b> — and is then kept on this computer and reused.</p>
+  <p class="dlg__fine">This is the only thing this extension ever downloads. Nothing
+     you play is uploaded, and no audio leaves the machine.</p>
+  <div class="progress" id="mdl-bar" hidden><i></i></div>
+  <div class="dlg__row">
+    <span class="note" id="mdl-note"></span>
+    <button class="btn" id="mdl-no" type="button">Not now</button>
+    <button class="tp" id="mdl-go" type="button">Download</button>
+  </div>
+</dialog>
+
+<!--
+  THE SHORTCUT OVERLAY, ported from console-full.html:285-323 and cut to the
+  bindings this build actually has. The rows that are gone are gone because the
+  controls are: no deck B, no assign matrix, no crossfader, no transport.
+
+  THE HANDLER IS THE TRUTH AND THIS TABLE IS A DRAWING OF IT, so it is checked
+  rather than trusted: `ui/embed-state.js`'s own check reads every single-digit
+  <span class="kbd"> in `.keytbl` and requires that set to BE the set of digits
+  `shortcut()` acts on. Advertise a 7 and it goes red; widen KEYED_STEMS without
+  touching this table and it goes red the other way. Keep the first row's digits
+  written out one span each — a "1–6" range would hide 2 3 4 5 from that check.
+
+  EVERY MODIFIER CHIP CARRIES `data-mod`, and the word inside it is the NON-MAC
+  spelling. `relabel()` in embed.js rewrites them to `⌥ ⇧ ⌃` on an Apple
+  keyboard at boot, so this file is authored once and read correctly on both —
+  the Option key is what sets `event.altKey`, so only the LETTERING was ever
+  wrong on a Mac. The same embed-state.js check pins the set of `data-mod`
+  values in this file to the modifiers `shortcut()` actually gives a stem digit
+  a different meaning under: a chip naming a modifier the handler refuses (or a
+  `data-mod` nothing can spell) is a red, not a wrong label in the browser.
+-->
+<dialog class="dlg dlg--keys" id="keysdlg" aria-labelledby="keys-t">
+  <h2 id="keys-t">Keyboard</h2>
+  <table class="keytbl"><tbody>
+    <tr><td><span class="kbd">1</span> <span class="kbd">2</span> <span class="kbd">3</span>
+            <span class="kbd">4</span> <span class="kbd">5</span> <span class="kbd">6</span></td>
+        <td>Toggle <b>mute</b> — vocals / drums / bass / other / guitar / piano,
+          left to right. <span class="kbd">7</span>–<span class="kbd">9</span> stay
+          YouTube's jump-to-70–90&nbsp;%</td></tr>
+    <tr><td><span class="kbd" data-mod="shift">Shift</span>+ a stem digit</td><td>Toggle <b>solo</b></td></tr>
+    <tr><td><span class="kbd" data-mod="alt">Alt</span>+ a stem digit</td><td>Reset that fader to unity</td></tr>
+    <tr><td><span class="kbd">0</span></td><td>Unmute all + clear solo</td></tr>
+    <tr><td><span class="kbd">↑</span> <span class="kbd">↓</span></td>
+        <td>Focused fader ±0.5 dB · <span class="kbd" data-mod="shift">Shift</span> ±0.1</td></tr>
+    <tr><td><span class="kbd" data-mod="alt">Alt</span>+<span class="kbd">↑</span> / <span class="kbd" data-mod="alt">Alt</span>+<span class="kbd">↓</span></td>
+        <td>Focused fader to unity / to −∞ &nbsp;·&nbsp; <span class="kbd">Home</span> /
+          <span class="kbd">End</span> do the same where the keyboard has them</td></tr>
+    <tr><td><span class="kbd" data-mod="shift">Shift</span>+<span class="kbd" data-mod="alt">Alt</span>+<span class="kbd">↑</span> /
+            <span class="kbd" data-mod="shift">Shift</span>+<span class="kbd" data-mod="alt">Alt</span>+<span class="kbd">↓</span></td>
+        <td>Focused fader ±6 dB &nbsp;·&nbsp; <span class="kbd">PgUp</span> /
+          <span class="kbd">PgDn</span> do the same where the keyboard has them</td></tr>
+    <tr><td><span class="kbd" data-mod="shift">Shift</span>+ a speed button</td><td><b>Halve or double</b> the speed, snapped onto the ladder</td></tr>
+    <tr><td><span class="kbd">Esc</span></td><td>Close this · then clear solo</td></tr>
+    <tr><td><span class="kbd">?</span></td><td>This list</td></tr>
+  </tbody></table>
+  <!-- Stated, because it is the difference between "the shortcut is broken" and
+       "the shortcut is not mine to take yet". The fader rows are the exception
+       and it is worth a clause: those keys need the fader focused, because they
+       are the deck's own and a key pressed on the watch page never enters this
+       frame. -->
+  <p class="dlg__fine">The stem digits work anywhere on the page while this deck
+    is armed; the fader keys need a fader focused.
+    <span class="kbd">Space</span> and the remaining digits stay YouTube's.</p>
+  <div class="dlg__row"><span class="note"></span><button class="btn" id="keys-x" type="button">Close</button></div>
+</dialog>
+
+<footer class="foot">
+  <!--
+    THE ONE SETTING. Checked = we suppress YouTube's autoplay-next, which is the
+    default. Stored in chrome.storage.local under `prefs` as the INVERSE
+    (`autoplayNext`), because that key names YouTube's behaviour rather than our
+    intervention — see autonav.js resolveSuppress, which owns the rule.
+  -->
+  <label class="set">
+    <input type="checkbox" id="autonav-cb" checked>
+    <span>Stop at the end of the video</span>
+  </label>
+  <span class="note" id="note"></span>
+  <button class="lnk" id="keys-open" type="button" title="Keyboard shortcuts">? shortcuts</button>
+</footer>
+
+<script type="module" src="embed.js"></script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Stem Splitter Live">
+  <title>Stem Splitter Live</title>
+  <!--
+    THE SMALL-SIZE MARK, and it exists because the six-bar one does not survive
+    16 px. That was checked by rendering it, not assumed: at 16 px a 12-wide bar
+    on a 128 viewBox is 1.5 px with a 0.75 px gap, so the six bars blur into a
+    single coloured block and the mark reads as a smudge.
+
+    Three bars at 24 wide on a 40 pitch give 3 px bars and 2 px gaps at 16 px,
+    which resolve. This is ordinary optical sizing — the same reason a typeface
+    ships a caption cut — not a second logo. Used for 16 and 32; every larger
+    size uses mark.svg.
+
+    Colours are three of the six stem hues, chosen for hue separation at the
+    size where hue is the only thing still legible.
+  -->
+  <rect width="128" height="128" rx="26" fill="#0f1115"/>
+  <g>
+    <rect x="12" y="36" width="24" height="56" rx="12" fill="#ffd166"/>
+    <rect x="52" y="20" width="24" height="88" rx="12" fill="#4ce3bb"/>
+    <rect x="92" y="42" width="24" height="44" rx="12" fill="#ff96e2"/>
+  </g>
+</svg>

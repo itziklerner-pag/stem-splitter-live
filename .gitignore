@@ -1,0 +1,34 @@
+node_modules/
+dist/
+.DS_Store
+
+# large binaries — never committed, always fetched or generated
+*.onnx
+*.pt
+*.th
+*.wav
+*.mp3
+*.zip
+*.wasm
+*.so
+*.dylib
+
+# the ORT runtime: fetched by tools/fetch-vendor.sh, reproducible from a pinned
+# version + hashes, so it does not belong in the repo
+/extension/vendor/
+
+# the pinned model weights: fetched by tools/fetch-model.sh. The repo carries the
+# PIN (url, sha256, bytes) and never redistributes the file.
+/models/
+
+# harness and QA output
+/out/
+/qa/out/
+out-*.log
+.playwright-mcp/
+
+# research spikes and the platform probe — not part of the shipped tree.
+# /spike/ also holds an unpacked-extension signing keypair; it must never be
+# staged, which is why this is a whole-directory rule and not a set of globs.
+/spike/
+/probe/

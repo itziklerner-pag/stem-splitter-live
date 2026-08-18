@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question, idea, or "is this supposed to happen?"
+    url: https://github.com/itziklerner-pag/stem-splitter-live/discussions
+    about: Discussions is the right place for anything that is not a confirmed bug or a concrete proposal.
+  - name: Read the FAQ first
+    url: https://github.com/itziklerner-pag/stem-splitter-live/blob/main/FAQ.md
+    about: Latency, YouTube-only, the tab picker, the licence, and whether this is a piracy tool — all answered.
+  - name: Security vulnerability
+    url: https://github.com/itziklerner-pag/stem-splitter-live/security/advisories/new
+    about: Report privately. Please do not open a public issue for a security problem.

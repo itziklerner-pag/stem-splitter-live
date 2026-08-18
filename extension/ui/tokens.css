@@ -1,0 +1,632 @@
+/* =============================================================================
+   Stem Splitter Live — Design Tokens
+   v1.0.0 · 2026-08-07 · owner: UI Design
+   -----------------------------------------------------------------------------
+   Three-tier architecture:
+     1. PRIMITIVE  --split-<family>-<step>   raw values, never referenced in UI code
+     2. SEMANTIC   --color-*, --text-*    meaning-bearing, theme-swappable
+     3. COMPONENT  --<component>-<prop>   the only tier component CSS should use
+
+   Themes are applied on <html>:
+     data-theme="dark"       (default, primary — the design target)
+     data-theme="light"      (optional, daylight / documentation)
+     data-contrast="high"    (additive, layers on either theme)
+     data-density="compact"  (optional, for the 700px side-panel deployment)
+
+   Import order:  tokens.css  ->  base/reset  ->  components
+   No external fonts. No CDN. System stack only.
+   ========================================================================== */
+
+/* =============================================================================
+   1. PRIMITIVES
+   ========================================================================== */
+
+:root {
+  /* --- Neutral ramp (cool-neutral, blue-shifted; matches DJ hardware panels) */
+  --split-gray-0:   #ffffff;
+  --split-gray-25:  #f5f7fa;
+  --split-gray-50:  #e8ecf1;
+  --split-gray-100: #d3d9e1;
+  --split-gray-200: #b3bcc8;
+  --split-gray-300: #939eac;
+  --split-gray-400: #7c8794;
+  --split-gray-500: #6c7686;
+  --split-gray-600: #545d6b;
+  --split-gray-650: #434b57;
+  --split-gray-700: #343a44;
+  --split-gray-750: #2a2f38;
+  --split-gray-800: #24282f;
+  --split-gray-825: #1e2229;
+  --split-gray-850: #1a1d23;
+  --split-gray-875: #14161a;
+  --split-gray-900: #0f1115;
+  --split-gray-950: #0a0b0e;
+  --split-gray-1000:#060709;
+
+  /* --- Accent: "engage" cyan. Primary action + focus + active state. */
+  --split-cyan-200: #b9e9ff;
+  --split-cyan-300: #7fd6ff;
+  --split-cyan-400: #37c2ff;
+  --split-cyan-500: #12a9ee;
+  --split-cyan-600: #0b83bb;
+  --split-cyan-700: #0a5f88;
+  --split-cyan-900: #072f43;
+
+  /* --- Signal colors */
+  --split-green-300: #7ef0b6;
+  --split-green-400: #2fd07a;
+  --split-green-600: #1a8b52;
+  --split-green-900: #0c2d1e;
+
+  --split-amber-300: #ffd07f;
+  --split-amber-400: #ffab2e;
+  --split-amber-600: #b8760f;
+  --split-amber-900: #3a2606;
+
+  --split-red-300:  #ff9a9a;
+  --split-red-400:  #ff4d4d;
+  --split-red-600:  #c02222;
+  --split-red-900:  #3d0f0f;
+
+  /* --- Stem identity colors.
+         Chosen for maximum separation under deuteranopia/protanopia WHEN
+         combined with the mandatory glyph + fixed position + text label.
+         Color is never the sole carrier of state.
+
+         SIX STEMS, 2026-08-16 (docs/SIX-STEM-CONTRACT.md). The two new hues sit
+         in the two gaps the original four left on the wheel — amber 40°, coral
+         3°, violet 248°, teal 165°, so the free arcs are 40→165 and 248→363.
+         Guitar takes ~95° (lime) and piano ~315° (magenta), which are also the
+         two furthest apart from each other, and they are ADJACENT in display
+         order (5th and 6th) where the separation is read most often.
+
+         The honest limit, stated rather than implied: six hues cannot all be
+         CVD-distinct. Magenta survives both common types (its blue component
+         keeps it on the other axis); LIME AND AMBER DO NOT — under deuteranopia
+         they are the same yellow at different lightness, exactly as amber and
+         coral already were. DESIGN.md §2.4 carries the rule that makes that
+         acceptable: identity is carried by FIXED POSITION, a distinct GLYPH and
+         the spelled-out NAME on every strip on every surface, plus the NUMBER
+         KEY where there is one — four channels on the console, and THREE in the
+         embedded overlay, where guitar and piano have no digit at all. */
+  --split-stem-vocals: #ffc247;  /* amber   · glyph microphone   · key 1 */
+  --split-stem-drums:  #ff5f56;  /* coral   · glyph drum         · key 2 */
+  --split-stem-bass:   #7c6bff;  /* violet  · glyph low waveform · key 3 */
+  --split-stem-other:  #23d1a4;  /* teal    · glyph sliders      · key 4 */
+  --split-stem-guitar: #8ce04f;  /* lime    · glyph headstock    · key 5, console only */
+  --split-stem-piano:  #ff6bd6;  /* magenta · glyph keys         · key 6, console only */
+
+  --split-stem-vocals-dim: #6b501c;
+  --split-stem-drums-dim:  #6b2823;
+  --split-stem-bass-dim:   #342c6b;
+  --split-stem-other-dim:  #135843;
+  --split-stem-guitar-dim: #3b5f21;
+  --split-stem-piano-dim:  #6b2c59;
+
+  /* --- Deck identity */
+  --split-deck-a: #37c2ff;
+  --split-deck-b: #ff8a3d;
+
+  /* --- Typography primitives ---------------------------------------------- */
+  --split-font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+                  "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+  --split-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+                  "DejaVu Sans Mono", "Liberation Mono", monospace;
+
+  --split-fs-micro:   10px;
+  --split-fs-tiny:    11px;
+  --split-fs-small:   12px;
+  --split-fs-body:    13px;
+  --split-fs-h3:      14px;
+  --split-fs-h2:      16px;
+  --split-fs-h1:      19px;
+  --split-fs-display: 24px;
+
+  --split-lh-micro:   12px;
+  --split-lh-tiny:    14px;
+  --split-lh-small:   16px;
+  --split-lh-body:    18px;
+  --split-lh-h3:      18px;
+  --split-lh-h2:      20px;
+  --split-lh-h1:      24px;
+  --split-lh-display: 28px;
+
+  --split-fw-regular: 400;
+  --split-fw-medium:  500;
+  --split-fw-semi:    600;
+  --split-fw-bold:    700;
+
+  --split-ls-label: 0.08em;   /* uppercase micro labels */
+  --split-ls-tight: -0.01em;  /* headings */
+  --split-ls-num:   0.01em;   /* tabular readouts */
+
+  /* --- Spacing (4px base) -------------------------------------------------- */
+  --split-space-0:  0px;
+  --split-space-1:  2px;
+  --split-space-2:  4px;
+  --split-space-3:  6px;
+  --split-space-4:  8px;
+  --split-space-5:  12px;
+  --split-space-6:  16px;
+  --split-space-7:  20px;
+  --split-space-8:  24px;
+  --split-space-9:  32px;
+  --split-space-10: 40px;
+  --split-space-11: 48px;
+
+  /* --- Radii (hardware panel: small and consistent) ------------------------ */
+  --split-radius-0: 0px;
+  --split-radius-1: 2px;
+  --split-radius-2: 3px;
+  --split-radius-3: 4px;
+  --split-radius-4: 6px;
+  --split-radius-pill: 999px;
+
+  /* --- Borders ------------------------------------------------------------- */
+  --split-border-w: 1px;
+  --split-border-w-strong: 2px;
+
+  /* --- Motion -------------------------------------------------------------- */
+  --split-dur-instant: 60ms;
+  --split-dur-fast:    110ms;
+  --split-dur-base:    180ms;
+  --split-dur-slow:    280ms;
+  --split-ease-out:    cubic-bezier(0.16, 1, 0.3, 1);
+  --split-ease-inout:  cubic-bezier(0.65, 0, 0.35, 1);
+  --split-ease-snap:   cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* --- Z-index ------------------------------------------------------------- */
+  --split-z-base:    0;
+  --split-z-raised:  10;
+  --split-z-sticky:  100;
+  --split-z-overlay: 1000;
+  --split-z-dialog:  1010;
+  --split-z-toast:   1100;
+}
+
+/* =============================================================================
+   2. SEMANTIC — DARK (default / primary)
+   ========================================================================== */
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* Surfaces — 5 levels. Lower number = further back. */
+  --color-bg:            var(--split-gray-950); /* app canvas             */
+  --color-surface-1:     var(--split-gray-900); /* chrome bars, rails     */
+  --color-surface-2:     var(--split-gray-875); /* panels                 */
+  --color-surface-3:     var(--split-gray-850); /* cards inside panels    */
+  --color-surface-4:     var(--split-gray-825); /* raised controls        */
+  --color-surface-inset: var(--split-gray-1000);/* fader / meter troughs  */
+
+  /* Lines */
+  --color-border:        var(--split-gray-800);
+  --color-border-strong: var(--split-gray-700);
+  --color-border-subtle: var(--split-gray-850);
+  --color-divider:       var(--split-gray-825);
+
+  /* Text — measured against --color-surface-2 (#14161a) */
+  --color-text:       var(--split-gray-50);   /* 14.5:1 */
+  --color-text-muted: #a3adb9;             /*  8.0:1 */
+  --color-text-dim:   var(--split-gray-400);  /*  5.0:1 */
+  --color-text-faint: var(--split-gray-500);  /*  4.0:1 — NON-TEXT ONLY (ticks) */
+  --color-text-invert:#04121a;
+
+  /* Accent / interactive */
+  --color-accent:        var(--split-cyan-400);
+  --color-accent-hover:  var(--split-cyan-300);
+  --color-accent-press:  var(--split-cyan-500);
+  --color-accent-subtle: var(--split-cyan-900);
+  --color-accent-text:   var(--split-cyan-300);
+  --color-on-accent:     #04121a;
+
+  /* Status */
+  --color-ok:        var(--split-green-400);
+  --color-ok-bg:     var(--split-green-900);
+  --color-warn:      var(--split-amber-400);
+  --color-warn-bg:   var(--split-amber-900);
+  --color-danger:    var(--split-red-400);
+  --color-danger-bg: var(--split-red-900);
+  --color-info:      var(--split-cyan-400);
+  --color-info-bg:   var(--split-cyan-900);
+
+  /* Stems (semantic passthrough so themes can retune) */
+  --color-stem-vocals: var(--split-stem-vocals);
+  --color-stem-drums:  var(--split-stem-drums);
+  --color-stem-bass:   var(--split-stem-bass);
+  --color-stem-other:  var(--split-stem-other);
+  --color-stem-guitar: var(--split-stem-guitar);
+  --color-stem-piano:  var(--split-stem-piano);
+
+  /* Decks */
+  --color-deck-a: var(--split-deck-a);
+  --color-deck-b: var(--split-deck-b);
+
+  /* Metering zones (dBFS thresholds — see DESIGN.md §7) */
+  --color-meter-safe: var(--split-green-400); /* below -12 dBFS */
+  --color-meter-hot:  var(--split-amber-400); /* -12 .. -3      */
+  --color-meter-clip: var(--split-red-400);   /* above -3       */
+  --color-meter-peak: #ffffff;             /* peak-hold tick */
+
+  /* Buffer health zones */
+  --color-buf-starve: var(--split-red-400);
+  --color-buf-tight:  var(--split-amber-400);
+  --color-buf-stable: var(--split-green-400);
+
+  /* Focus */
+  --color-focus:      var(--split-cyan-400);
+  --color-focus-halo: var(--split-gray-1000);
+
+  /* Elevation — functional only. Never decorative. */
+  --shadow-none:    none;
+  --shadow-control: 0 1px 0 rgba(0,0,0,.55);
+  --shadow-cap:     0 1px 2px rgba(0,0,0,.7), 0 0 0 1px rgba(0,0,0,.5);
+  --shadow-popover: 0 8px 24px rgba(0,0,0,.6), 0 0 0 1px var(--split-gray-800);
+  --shadow-dialog:  0 24px 64px rgba(0,0,0,.75), 0 0 0 1px var(--split-gray-750);
+
+  /* Reusable surface treatments */
+  --grad-panel-top: linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,0) 34px);
+  --hatch-muted:    repeating-linear-gradient(45deg,
+                      rgba(255,255,255,0) 0 5px,
+                      rgba(255,255,255,.07) 5px 10px);
+  --hatch-danger:   repeating-linear-gradient(45deg,
+                      rgba(255,77,77,.22) 0 6px,
+                      rgba(255,77,77,0) 6px 12px);
+}
+
+/* =============================================================================
+   2b. SEMANTIC — LIGHT (optional; docs / bright-room export view)
+   ========================================================================== */
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  --color-bg:            #e6e9ee;
+  --color-surface-1:     #eef1f5;
+  --color-surface-2:     #ffffff;
+  --color-surface-3:     #f5f7fa;
+  --color-surface-4:     #eaeef3;
+  --color-surface-inset: #d7dce4;
+
+  --color-border:        #c9d0da;
+  --color-border-strong: #a8b2bf;
+  --color-border-subtle: #e2e6ec;
+  --color-divider:       #dfe4ea;
+
+  --color-text:       #12161c;
+  --color-text-muted: #414b58;
+  --color-text-dim:   #5b6572;
+  --color-text-faint: #7b8593;
+  --color-text-invert:#ffffff;
+
+  --color-accent:        #0b83bb;
+  --color-accent-hover:  #0a6f9f;
+  --color-accent-press:  #085a83;
+  --color-accent-subtle: #dcf1fb;
+  --color-accent-text:   #075c85;
+  --color-on-accent:     #ffffff;
+
+  --color-ok:        #12804c;
+  --color-ok-bg:     #dcf4e8;
+  --color-warn:      #8a5605;
+  --color-warn-bg:   #fdf0d8;
+  --color-danger:    #b81f1f;
+  --color-danger-bg: #fbe0e0;
+  --color-info:      #0b83bb;
+  --color-info-bg:   #dcf1fb;
+
+  --color-stem-vocals: #a06b00;
+  --color-stem-drums:  #c02d24;
+  --color-stem-bass:   #4a37c9;
+  --color-stem-other:  #0a7a5d;
+  --color-stem-guitar: #3f7a12;
+  --color-stem-piano:  #a8228a;
+
+  --color-deck-a: #0b83bb;
+  --color-deck-b: #b85410;
+
+  --color-meter-safe: #12804c;
+  --color-meter-hot:  #b8760f;
+  --color-meter-clip: #b81f1f;
+  --color-meter-peak: #12161c;
+
+  --color-buf-starve: #b81f1f;
+  --color-buf-tight:  #b8760f;
+  --color-buf-stable: #12804c;
+
+  --color-focus:      #0b83bb;
+  --color-focus-halo: #ffffff;
+
+  --shadow-control: 0 1px 0 rgba(0,0,0,.08);
+  --shadow-cap:     0 1px 2px rgba(0,0,0,.25), 0 0 0 1px rgba(0,0,0,.12);
+  --shadow-popover: 0 8px 24px rgba(20,30,45,.18), 0 0 0 1px #c9d0da;
+  --shadow-dialog:  0 24px 64px rgba(20,30,45,.24), 0 0 0 1px #a8b2bf;
+
+  --grad-panel-top: linear-gradient(180deg, rgba(0,0,0,.02), rgba(0,0,0,0) 34px);
+  --hatch-muted:    repeating-linear-gradient(45deg,
+                      rgba(0,0,0,0) 0 5px, rgba(0,0,0,.08) 5px 10px);
+  --hatch-danger:   repeating-linear-gradient(45deg,
+                      rgba(184,31,31,.18) 0 6px, rgba(184,31,31,0) 6px 12px);
+
+  --fader-cap-bg:    linear-gradient(180deg,#ffffff 0%,#e2e7ee 46%,#cfd6df 47%,#b6bfcb 100%);
+  --fader-cap-border:#8d97a4;
+  --fader-cap-line:  rgba(0,0,0,.22);
+}
+
+/* =============================================================================
+   2c. HIGH CONTRAST (additive — layers on top of either theme)
+   Targets WCAG 2.2 AAA (7:1) body text, >=4.5:1 for all non-text UI.
+   ========================================================================== */
+
+[data-contrast="high"] {
+  --color-text:       #ffffff;
+  --color-text-muted: #dfe5ec;
+  --color-text-dim:   #c3ccd6;
+  --color-text-faint: #a8b2bf;
+
+  --color-border:        #5a636f;
+  --color-border-strong: #8b95a2;
+  --color-border-subtle: #454d59;
+  --color-divider:       #5a636f;
+
+  --color-accent:      #6fd4ff;
+  --color-accent-text: #9ce2ff;
+  --color-ok:          #56e39b;
+  --color-warn:        #ffc251;
+  --color-danger:      #ff7b7b;
+
+  --color-stem-vocals: #ffd166;
+  --color-stem-drums:  #ff8a82;
+  --color-stem-bass:   #a89bff;
+  --color-stem-other:  #4ce3bb;
+  --color-stem-guitar: #a9ec74;
+  --color-stem-piano:  #ff96e2;
+
+  --focus-ring-width: 3px;
+}
+
+[data-theme="light"][data-contrast="high"] {
+  --color-text:          #000000;
+  --color-text-muted:    #1c232c;
+  --color-text-dim:      #2c3540;
+  --color-text-faint:    #48525f;
+  --color-border:        #6b7683;
+  --color-border-strong: #3a434f;
+  --color-accent:        #05506f;
+}
+
+/* =============================================================================
+   3. COMPONENT TOKENS
+   The only tier component CSS is allowed to consume.
+   ========================================================================== */
+
+:root {
+
+  /* --- Focus ring (identical everywhere; never removed) -------------------- */
+  --focus-ring-width:  2px;
+  --focus-ring-offset: 2px;
+  --focus-ring-color:  var(--color-focus);
+  --focus-ring-halo:   var(--color-focus-halo);
+
+  /* --- Hit targets --------------------------------------------------------- */
+  --hit-min: 44px;        /* pointer/touch minimum, via ::before expansion */
+  --hit-min-dense: 32px;  /* mouse-only dense clusters (transport, chips)  */
+
+  /* --- Control heights ----------------------------------------------------- */
+  --ctl-h-xs: 18px;
+  --ctl-h-sm: 22px;
+  --ctl-h-md: 26px;
+  --ctl-h-lg: 32px;
+  --ctl-h-xl: 40px;
+  --ctl-h-hero: 44px;
+
+  /* --- Button -------------------------------------------------------------- */
+  --btn-radius:         var(--split-radius-2);
+  --btn-pad-x:          12px;
+  --btn-pad-x-sm:       8px;
+  --btn-font-size:      var(--split-fs-small);
+  --btn-font-weight:    var(--split-fw-semi);
+  --btn-letter-spacing: var(--split-ls-label);
+  --btn-border:         var(--color-border-strong);
+
+  --btn-default-bg:       var(--color-surface-4);
+  --btn-default-bg-hover: #2b3039;
+  --btn-default-bg-press: #191d24;
+  --btn-default-fg:       var(--color-text);
+
+  --btn-primary-bg:       var(--color-accent);
+  --btn-primary-bg-hover: var(--color-accent-hover);
+  --btn-primary-bg-press: var(--color-accent-press);
+  --btn-primary-fg:       var(--color-on-accent);
+  --btn-primary-border:   transparent;
+
+  --btn-ghost-bg:       transparent;
+  --btn-ghost-bg-hover: rgba(255,255,255,.06);
+  --btn-ghost-fg:       var(--color-text-muted);
+
+  --btn-danger-bg: var(--color-danger);
+  --btn-danger-fg: #1a0505;
+
+  --btn-disabled-opacity: 0.38;
+
+  /* --- Segmented control (mode switcher) ----------------------------------- */
+  --seg-h:             var(--ctl-h-lg);
+  --seg-bg:            var(--color-surface-inset);
+  --seg-border:        var(--color-border);
+  --seg-radius:        var(--split-radius-3);
+  --seg-item-fg:       var(--color-text-dim);
+  --seg-item-fg-on:    var(--color-on-accent);
+  --seg-item-bg-on:    var(--color-accent);
+  --seg-item-fg-hover: var(--color-text);
+
+  /* --- Chip / status pill --------------------------------------------------- */
+  --chip-h:        20px;
+  --chip-pad-x:    7px;
+  --chip-radius:   var(--split-radius-2);
+  --chip-font:     var(--split-fs-micro);
+  --chip-tracking: var(--split-ls-label);
+
+  /* --- Panel ---------------------------------------------------------------- */
+  --panel-bg:     var(--color-surface-2);
+  --panel-border: var(--color-border);
+  --panel-radius: var(--split-radius-3);
+  --panel-pad:    12px;
+  --panel-hd-h:   28px;
+  --panel-hd-bg:  var(--color-surface-1);
+
+  /* --- Channel strip --------------------------------------------------------
+     SIX STRIPS PER DECK moved the floor, and the arithmetic is the reason the
+     deck's container break points moved with it.
+     A deck's strip band is `6 * min + 5 * gap`; with min 72 that was 462 px,
+     and at the 1100 px design width each deck only has 414 px. 60 px puts the
+     band at 390 and leaves 24 px of slack there.
+     The break points that follow are NOT the 390 px floor, because a strip at
+     its floor is a strip whose header cannot hold a name. They are set where a
+     strip reaches ~72 px, which is what `STEM_SHORT` needs:
+       3-column "a m b"  from container 1220 px  (74 px strips)
+       2-column "a b"    from container 1010 px  (72 px strips)
+       below that        single column, one deck's width each (73-112 px)
+     Measured across 520-1920 px: no band overflows and no strip header clips.
+     `flex: 1 1 0` means 60 px only ever applies below all of that; everywhere
+     above it the strips share the room and stop at --strip-max-w. */
+  --strip-min-w:     60px;
+  --strip-max-w:     112px;
+  --strip-gap:       6px;
+  --strip-bg:        var(--color-surface-3);
+  --strip-bg-active: var(--color-surface-4);
+  --strip-border:    var(--color-border);
+  --strip-radius:    var(--split-radius-3);
+  --strip-pad:       8px;
+  --strip-hd-h:      20px;
+  --strip-badge-h:   14px;
+
+  /* --- Vertical fader ------------------------------------------------------- */
+  --fader-travel-lg: 208px;  /* console, container >= 1220px */
+  --fader-travel-md: 164px;  /* console, 1010-1219px         */
+  --fader-travel-sm: 120px;  /* popup / compact density      */
+  --fader-track-w:      8px;
+  --fader-track-bg:     var(--color-surface-inset);
+  --fader-track-border: var(--color-border);
+  --fader-track-radius: var(--split-radius-1);
+  --fader-cap-w:     34px;
+  --fader-cap-h:     22px;
+  --fader-cap-bg:    linear-gradient(180deg,#4a525e 0%,#333a44 46%,#242a32 47%,#171b21 100%);
+  --fader-cap-border:#0a0c0f;
+  --fader-cap-line:  rgba(255,255,255,.20);
+  --fader-cap-notch: var(--color-accent);
+  --fader-fill-w:    4px;
+  --fader-detent-color: var(--color-text-faint);
+  --fader-hit-w:     44px;
+
+  /* --- Horizontal crossfader ------------------------------------------------ */
+  --xfader-travel:  240px;
+  --xfader-track-h: 8px;
+  --xfader-cap-w:   26px;
+  --xfader-cap-h:   38px;
+
+  /* --- Level meter ---------------------------------------------------------- */
+  --meter-w:           10px;
+  --meter-w-master:    14px;
+  --meter-trough-bg:   var(--color-surface-inset);
+  --meter-seg-h:       3px;  /* LED segment pitch: 2px lit + 1px gap */
+  --meter-seg-gap:     1px;
+  --meter-peak-h:      2px;
+  --meter-radius:      var(--split-radius-1);
+  --meter-scale-fg:    var(--color-text-faint);
+
+  /* --- Mute / Solo ---------------------------------------------------------- */
+  --ms-h:          26px;
+  --ms-radius:     var(--split-radius-2);
+  --ms-font:       var(--split-fs-tiny);
+  --ms-bg:         var(--color-surface-4);
+  --ms-fg:         var(--color-text-dim);
+  --ms-border:     var(--color-border-strong);
+  --ms-mute-on-bg: var(--color-danger);
+  --ms-mute-on-fg: #1a0505;
+  --ms-solo-on-bg: var(--color-warn);
+  --ms-solo-on-fg: #1f1403;
+
+  /* --- Buffer health -------------------------------------------------------- */
+  --buf-bar-h:      12px;
+  --buf-bar-radius: var(--split-radius-1);
+  --buf-trough-bg:  var(--color-surface-inset);
+  --buf-target-tick:var(--color-text-muted);
+  --buf-spark-h:    22px;
+  --buf-spark-fg:   var(--color-text-dim);
+
+  /* --- Transport ------------------------------------------------------------ */
+  --transport-h:      32px;
+  --transport-w:      32px;
+  --transport-w-play: 44px;
+  --timeline-h:       6px;
+  --timeline-bg:      var(--color-surface-inset);
+  --timeline-ahead:   #1f4a5e;  /* separated but not yet played */
+  --timeline-played:  var(--color-accent);
+  --timeline-head:    var(--color-text);
+
+  /* --- Progress (export) ---------------------------------------------------- */
+  --progress-h:      8px;
+  --progress-h-lg:   14px;
+  --progress-bg:     var(--color-surface-inset);
+  --progress-fill:   var(--color-accent);
+  --progress-radius: var(--split-radius-1);
+
+  /* --- Dialog / overlay ----------------------------------------------------- */
+  --overlay-scrim: rgba(6,7,9,.78);
+  --dialog-w:      440px;
+  --dialog-radius: var(--split-radius-4);
+  --dialog-pad:    20px;
+
+  /* --- Popup surface -------------------------------------------------------- */
+  --popup-w:   360px;
+  --popup-h:   480px;
+  --popup-pad: 12px;
+
+  /* --- Console layout ------------------------------------------------------- */
+  --console-max-w:    1400px;
+  --console-pad:      12px;
+  --console-gap:      12px;
+  --console-master-w: 176px;
+  --console-header-h: 44px;
+  --console-status-h: 26px;
+}
+
+/* Compact density — the 700px side-panel deployment */
+[data-density="compact"] {
+  --panel-pad:   8px;
+  --strip-pad:   6px;
+  --strip-min-w: 56px;
+  --console-gap: 8px;
+  --console-pad: 8px;
+  --ms-h:        24px;
+  --ctl-h-lg:    28px;
+}
+
+/* =============================================================================
+   4. MOTION PREFERENCES
+   Functional motion (meters, progress, buffer bar) is NEVER disabled — it is
+   information. Only decorative motion is removed.
+   ========================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --split-dur-instant: 0ms;
+    --split-dur-fast:    0ms;
+    --split-dur-base:    0ms;
+    --split-dur-slow:    0ms;
+    --split-ease-snap:   linear;
+  }
+}
+
+/* =============================================================================
+   5. FORCED COLORS (Windows High Contrast)
+   ========================================================================== */
+
+@media (forced-colors: active) {
+  :root {
+    --color-border:        CanvasText;
+    --color-border-strong: CanvasText;
+    --focus-ring-color:    Highlight;
+  }
+}

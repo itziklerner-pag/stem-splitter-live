@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="Stem Splitter Live — split any YouTube video into six stems, live and on your own machine">
+  <title>Stem Splitter Live</title>
+  <!--
+    Open Graph / social preview card. 1200x630 is the size Twitter, LinkedIn,
+    Slack, Discord and GitHub's social-preview field all accept.
+    Also used for the GitHub repo social preview.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#14161a"/>
+      <stop offset="1" stop-color="#0a0b0e"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+
+  <!-- the six stems, oversized and bled off the bottom as a background field -->
+  <g opacity="0.14">
+    <rect x="742"  y="150" width="46" height="480" rx="23" fill="#ffd166"/>
+    <rect x="812"  y="60"  width="46" height="570" rx="23" fill="#ff8a82"/>
+    <rect x="882"  y="200" width="46" height="430" rx="23" fill="#a89bff"/>
+    <rect x="952"  y="30"  width="46" height="600" rx="23" fill="#4ce3bb"/>
+    <rect x="1022" y="180" width="46" height="450" rx="23" fill="#a9ec74"/>
+    <rect x="1092" y="260" width="46" height="370" rx="23" fill="#ff96e2"/>
+  </g>
+
+  <!-- mark -->
+  <g transform="translate(80,72) scale(0.72)">
+    <rect width="128" height="128" rx="28" fill="#1a1d23"/>
+    <rect x="13"  y="42" width="12" height="44" rx="6" fill="#ffd166"/>
+    <rect x="31"  y="28" width="12" height="72" rx="6" fill="#ff8a82"/>
+    <rect x="49"  y="36" width="12" height="56" rx="6" fill="#a89bff"/>
+    <rect x="67"  y="20" width="12" height="88" rx="6" fill="#4ce3bb"/>
+    <rect x="85"  y="34" width="12" height="60" rx="6" fill="#a9ec74"/>
+    <rect x="103" y="46" width="12" height="36" rx="6" fill="#ff96e2"/>
+  </g>
+
+  <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
+    <text x="80" y="290" font-size="76" font-weight="700" letter-spacing="-2" fill="#f5f7fa">Stem Splitter Live</text>
+    <text x="80" y="368" font-size="38" font-weight="500" fill="#b3bcc8">Split any YouTube video into six stems,</text>
+    <text x="80" y="418" font-size="38" font-weight="500" fill="#b3bcc8">live and on your own machine.</text>
+    <text x="80" y="516" font-size="27" font-weight="600" fill="#4ce3bb">On-device · No upload · No download · MIT</text>
+    <text x="80" y="562" font-size="24" font-weight="400" fill="#6c7686">stemsplitter.live</text>
+  </g>
+</svg>

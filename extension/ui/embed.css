@@ -1,0 +1,774 @@
+/* =============================================================================
+   The embedded deck. Sits inside the user's YouTube page, in an iframe, so it
+   owns its own box completely and nothing here can leak out or be leaked into.
+
+   Colours come from tokens.css. Nothing here invents one — the stem identities
+   in particular are the same six the DJ console uses, and a second palette
+   would be a second thing to keep in sync.
+
+   THE MIXER IS VERTICAL, because the DJ console's is and this is the same
+   product. Native <input type="range"> sliders lying on their side were the
+   fast way to get a deck on screen; they are not what a channel strip looks
+   like, and the six-fader gesture is the whole point of this build.
+
+   ponytail: the fader and meter rules below (`---- FADER ----` to the end of
+   `---- METER ----`, ~60 lines) are a COPY of console-full.css:102-144, retuned
+   for one deck — `--_c` folded into `--stem`, no `data-route` states, no scale
+   column. Ceiling: two copies of one component, so a geometry fix has to be
+   made twice and the second one is the one that gets forgotten. Upgrade path:
+   lift `.fader` + `.meter` + `makeFader()` into `extension/ui/fader.css` and
+   `extension/ui/fader.js` — the build copies all of `extension/` into
+   out/extension-embed, so both surfaces would reach one file. That costs edits
+   to console-full.{html,css,js}, which is a different owner's tree and a
+   re-run of the console's e2e suite; it is worth doing the next time either
+   copy changes, and not before.
+   ========================================================================== */
+
+* { box-sizing: border-box; }
+
+/**
+ * `hidden` MUST WIN. The UA stylesheet's `[hidden] { display: none }` is a
+ * type-selector-strength rule, so ANY class rule that sets `display` silently
+ * defeats it — and this file has several. `.banner` did exactly that: every
+ * deck painted a permanently visible, EMPTY red box, because `b.hidden = true`
+ * had no effect against `.banner { display: flex }`. Reported from a screenshot;
+ * no amount of reading paintBanner() would have found it, because paintBanner()
+ * is correct.
+ *
+ * One rule, at the top, rather than a `:not([hidden])` on every component that
+ * ever gains a `display`.
+ */
+[hidden] { display: none !important; }
+
+html, body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: 13px/1.35 var(--split-font-sans);
+  /* The host page reflows around this frame; a scrollbar inside it means the
+     height report lost a race. Never scroll — grow instead (embed.js). */
+  overflow: hidden;
+}
+
+body { padding: 10px 12px 12px; }
+
+:focus { outline: none; }
+:focus-visible {
+  outline: var(--focus-ring-width) solid var(--color-focus);
+  outline-offset: var(--focus-ring-offset);
+  border-radius: var(--split-radius-2);
+}
+
+/* ------------------------------------------------------------------- header */
+.bar { display: flex; align-items: center; gap: 10px; }
+
+.tp {
+  min-width: 84px; padding: 7px 14px;
+  font: inherit; font-weight: 650;
+  color: var(--color-on-accent); background: var(--color-accent);
+  border: 0; border-radius: 7px; cursor: pointer;
+}
+.tp:hover:not(:disabled) { background: var(--color-accent-hover); }
+.tp:disabled { background: var(--color-surface-4); color: var(--color-text-dim); cursor: default; }
+
+/* The header's only prose, and only when the deck has no source to report on:
+   ONE line, 11px, which is shorter than .chip--lead — so the arm instruction
+   never sets the bar's height and the header is a single row at every state. */
+.hint {
+  min-width: 0; flex: 1;
+  color: var(--color-text-dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.stat { display: flex; align-items: center; gap: 8px; }
+.num { color: var(--color-text-muted); font-variant-numeric: tabular-nums; font-size: 11px; }
+
+.chip {
+  padding: 3px 8px; border-radius: 999px; font-size: 11px; font-weight: 600;
+  background: var(--color-surface-4); color: var(--color-text-muted);
+}
+/* The chip is the header's anchor now that no button is. Fixed width so the
+   row does not jog every time the priming percentage gains a digit. */
+.chip--lead {
+  flex: none; min-width: 104px; padding: 7px 10px;
+  font-size: 12px; text-align: center;
+}
+.chip[data-k="run"]  { background: var(--color-ok-bg); color: var(--color-ok); }
+.chip[data-k="wait"] { background: var(--color-info-bg); color: var(--color-info); }
+.chip[data-k="warn"] { background: var(--color-warn-bg); color: var(--color-warn); }
+.chip[data-k="err"]  { background: var(--color-danger-bg); color: var(--color-danger); }
+
+.ic {
+  width: 26px; height: 26px; flex: none;
+  font: inherit; line-height: 1;
+  color: var(--color-text-muted); background: transparent;
+  border: 1px solid var(--color-border); border-radius: 6px; cursor: pointer;
+}
+.ic:hover { color: var(--color-text); border-color: var(--color-border-strong); }
+
+/* ------------------------------------------------------------------- banner */
+.banner {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-top: 9px; padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--color-danger-bg);
+  border: 1px solid var(--color-danger);
+}
+.banner[data-sev="advisory"] {
+  background: var(--color-warn-bg); border-color: var(--color-warn);
+}
+/* The autoplay advisory. Same box, warn colours, and it never latches the deck
+   — see the note above #nav-banner in embed.html. */
+.banner--adv { background: var(--color-warn-bg); border-color: var(--color-warn); }
+.banner__txt { flex: 1; min-width: 0; }
+.banner b { color: var(--color-text); }
+.banner p { margin: 2px 0 0; color: var(--color-text-muted); font-size: 12px; }
+
+.btn {
+  flex: none; padding: 5px 10px; font: inherit; font-size: 12px;
+  color: var(--color-text); background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-radius: 6px; cursor: pointer;
+}
+
+/* --------------------------------------------------------------------- rack
+   Six channel strips and the master, in ONE horizontal band — which is the
+   layout of every mixer ever built and, here, the answer to a box that is
+   640-1280 px wide and only ~240 px tall.
+
+   WHAT THE EXTRA WIDTH DOES, since a 1280 px column is far more than four
+   faders needed. Three things, in this order:
+     1. the master moved into it, from the footer, where it was a horizontal
+        slider that matched nothing else in the product. A mixer's master lives
+        at the right-hand end of the channel row and now it does;
+     2. the strips SHARE what is left, and they stop growing at 168 px.
+        Measured at 200: the card is wide enough that the fader looks marooned
+        in the middle of it, and empty space INSIDE a bordered card reads as a
+        missing control, where the same space outside the band reads as margin;
+     3. past that the whole band centres AS ONE OBJECT (`.strips` is
+        `display: contents`, so the strips and the master share one flex line).
+        The leftover lands outside the instrument, symmetrically, which reads as
+        a rack — not as one dead gutter inside it.
+   Nothing was invented to fill the room. There is still no crossfader, no
+   assign row, no deck B and no hop control.
+
+   ==========================================================================
+   SIX STRIPS ON ONE LINE, 2026-08-16. The decision, and the arithmetic.
+   ==========================================================================
+   The alternatives were WRAP (two rows of three), a SCROLL RAIL, and one line
+   with narrower strips. One line won, and it is not a preference:
+
+     - WRAP breaks the only rule this rack has. The digits 1-4 are a FIXED
+       left-to-right map onto the first four strips, printed on the strips
+       themselves and honoured by a listener on YouTube's own document. A
+       3 + 3 wrap puts `other` — the `4` key — at the START of the second row,
+       under `vocals`. The map stops being left-to-right and starts being
+       reading order, which nobody reads a mixer in.
+     - A SCROLL RAIL hides controls behind a gesture, on a surface that is
+       already a guest inside somebody's video page. A stem you have to scroll
+       to is a stem you forget you have, and the two that would end up off the
+       right edge are exactly the two with no keyboard shortcut to reach them.
+     - So: one line, narrower strips. The rack was already `flex: 1 1 168px`
+       with a `min-width` floor; six strips only move where that floor bites.
+
+   THE ARITHMETIC, so the floor is a number and not a hope. The band is
+   `6 * strip + 6 * gap + master`, inside `body`'s 12 px of padding each side:
+
+     default          6*78 + 6*8  + 59 = 575 px  -> needs a 599 px frame
+     narrow (<=700)   6*68 + 6*6  + 59 = 503 px  -> needs a 527 px frame
+
+   `.strip`'s floor is not free: `.strip__ctl` holds a 44 px fader hit area, a
+   6 px gap and a 10 px meter, so 78 px is what 60 px of control plus 16 px of
+   padding costs. The narrow block below buys the last 10 px by taking the
+   console's own 740-999 px numbers (`--fader-hit-w: 38px`, `--meter-w: 8px`),
+   which is a documented density and not a new one.
+
+   YouTube's primary column with a video in it does not go below ~640 px, so
+   the default floor already clears it; the narrow block is the insurance, and
+   it is worth having because `body` is `overflow: hidden` — an overflow here
+   is not a scrollbar, it is the master fader silently cut off the right edge. */
+.rack {
+  display: flex; align-items: stretch; justify-content: center;
+  gap: 8px; margin-top: 10px;
+  /* The one number the whole band is built around. `--fader-travel-sm` is the
+     compact token and it was sized for exactly this case (tokens.css §Vertical
+     fader): 120 px of travel puts the total frame at ~305 px, well inside the
+     120-900 px the host clamps to. */
+  --_travel: var(--fader-travel-sm);
+}
+
+/* `display: contents` — the six strips and the master are ONE flex line, so
+   the band centres as a single object and the master sits beside the last
+   strip instead of being stranded at the far right of a stretched group. This
+   div exists only as the container embed.js writes into; it lays nothing out.
+   (The nested-flex alternative measured wrong: a shrink-to-fit `.strips` sized
+   its children from their content, 86 px, on a 1256 px frame.)
+
+   IT IS ALSO WHAT KEEPS THE LINE ONE LINE. `.rack` never gets `flex-wrap`, and
+   that is deliberate rather than an omission — see the wrap paragraph above.
+   tools/embed-smoke.mjs asserts the geometry (`s2.x > s1.x`, same `y`), which
+   is the only instrument that can tell one line from two. */
+.strips { display: contents; }
+
+.strip {
+  position: relative;
+  /* The basis is the CAP, not 0: `.strips` is shrink-to-fit, so its intrinsic
+     width is the sum of these bases — a basis of 0 collapses the whole band to
+     the width of a fader plus a meter (measured: 86 px strips on a 1256 px
+     frame) — which is why `.strips` is `display: contents` and the basis is
+     the cap. With six strips the basis sum is 1008 px, so shrink is now the
+     normal case at every real frame width and the floor is what matters.
+     78 px is 60 px of `.strip__ctl` (44 fader + 6 gap + 10 meter) plus 16 px
+     of padding plus the border; it is not a taste, and the narrow block at the
+     foot of this file is the only thing that moves it. */
+  flex: 1 1 168px; min-width: 78px; max-width: 168px;
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 7px 8px 8px;
+  background: var(--color-surface-3);
+  border: 1px solid var(--color-border);
+  border-top: 2px solid var(--stem);
+  border-radius: var(--split-radius-3);
+}
+
+/* ---- strip: name, glyph, key hint (DESIGN §9.4, top row) ---- */
+.strip__hd {
+  display: flex; align-items: center; gap: 5px;
+  width: 100%; min-width: 0; color: var(--stem);
+}
+.i {
+  width: 1em; height: 1em; flex: none; display: block;
+  fill: none; stroke: currentColor; stroke-width: 1.5;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.strip__hd .i { font-size: 13px; }
+.name {
+  font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* The digit that will select this strip. It is here BEFORE the key handling is,
+   because the fixed left-to-right order is what makes the shortcut learnable —
+   a hint that appears later teaches nothing. */
+.strip__key {
+  margin-left: auto; flex: none;
+  font-family: var(--split-font-mono); font-size: 9px;
+  /* `--color-text-dim`, where the console uses `--color-text-faint`. The ONE
+     deliberate deviation from the original's look on this surface, and it is a
+     one-step change nobody will see: tokens.css marks faint 4.0:1 NON-TEXT ONLY
+     and this is text — a digit the user is meant to read and then press. */
+  color: var(--color-text-dim);
+}
+/* GUITAR AND PIANO HAVE NO DIGIT (embed-state.js `stemKeyHint`), so their slot
+   renders empty — and an empty slot must not spend width the NAME needs. With
+   the hint gone those two strips get ~7 px more before the label ellipses,
+   which matters because the name is one of only three identity channels they
+   have left (DESIGN §2.4): glyph, name, position. The four keyed strips are
+   unaffected — `:empty` never matches them. */
+.strip__key:empty { display: none; }
+
+/* ---- strip: M | S, above the fader, as on hardware ---- */
+.strip__ms { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; width: 100%; }
+.tog {
+  position: relative; height: var(--ms-h);
+  font: inherit; font-size: 11px; font-weight: 700; line-height: 1;
+  color: var(--color-text-dim); background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-radius: var(--split-radius-2);
+  cursor: pointer;
+}
+/* Transparent 44 px hit expansion (DESIGN §5) — invisible, no layout effect. */
+.tog::after {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  transform: translate(-50%, -50%);
+  width: max(100%, var(--hit-min)); height: var(--hit-min);
+}
+.tog:hover { background: #2b3039; color: var(--color-text); }
+.tog[data-t="m"][aria-pressed="true"] {
+  background: var(--color-danger); color: #1a0505; border-color: var(--color-danger);
+}
+.tog[data-t="s"][aria-pressed="true"] {
+  background: var(--color-warn); color: #1f1403; border-color: var(--color-warn);
+}
+
+/* ---- strip: the fixed 14 px badge slot ----
+   Always present, even when empty, so toggling mute never shifts the fader
+   under a finger that is already on it (DESIGN §9.4). */
+.strip__badge {
+  height: var(--strip-badge-h); width: 100%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 9px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+  border-radius: 2px; color: var(--color-text-faint);
+}
+.strip__badge[data-b="muted"] {
+  background: var(--color-danger-bg); color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+.strip__badge[data-b="solo"] {
+  background: var(--color-warn-bg); color: var(--color-warn);
+  border: 1px solid var(--color-warn);
+}
+.strip__badge[data-b="ducked"] {
+  background: var(--color-surface-4); color: var(--color-text-dim);
+  border: 1px dashed var(--color-border-strong);
+}
+
+.strip__ctl { display: flex; align-items: flex-end; justify-content: center; gap: 6px; width: 100%; }
+
+/* ---- strip: the two readouts ---- */
+.strip__ft { display: flex; flex-direction: column; align-items: center; gap: 1px; width: 100%; }
+.strip__gain {
+  font-family: var(--split-font-mono); font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.strip__pk {
+  font-family: var(--split-font-mono); font-size: 9px; color: var(--color-text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.strip__pk[data-clip="true"] { color: var(--color-danger); font-weight: 700; }
+
+/* ---- strip: silent, and never by colour alone ----
+   Muted is the user's own act: hatch, strike the name, grey the fader.
+   Ducked is somebody else's solo doing it to them: dim, and grey the meter. */
+.strip[data-muted="true"] { border-color: var(--color-danger); }
+.strip[data-muted="true"] .strip__ctl::before {
+  content: ""; position: absolute; inset: 0; z-index: 5;
+  background: var(--hatch-muted); pointer-events: none; border-radius: var(--split-radius-3);
+}
+.strip[data-muted="true"] .name { text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.strip[data-muted="true"] .fader { --stem: var(--color-text-faint); }
+.strip[data-muted="true"] .meter__rms { filter: grayscale(1) brightness(.5); }
+.strip[data-solo="true"] { outline: 1px solid var(--color-warn); outline-offset: -1px; }
+.strip[data-ducked="true"] { opacity: .6; }
+.strip[data-ducked="true"] .meter__rms { filter: grayscale(.7) brightness(.7); }
+
+/* ---------------------------------------------------------------- FADER ----
+   Copied from console-full.css:102-127. `--pos` is normalised travel 0..1 and
+   the fill terminates at the CAP'S CENTRE LINE, which is what makes the
+   indicator line read as the value (DESIGN §6.1). */
+.fader {
+  position: relative; width: var(--fader-hit-w); height: var(--_travel);
+  flex: none; cursor: ns-resize; touch-action: none;
+}
+.fader__track {
+  position: absolute; left: 50%; top: 0; bottom: 0; width: var(--fader-track-w);
+  transform: translateX(-50%); background: var(--color-surface-inset);
+  border: 1px solid var(--color-border); border-radius: var(--split-radius-1);
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .9);
+}
+.fader__fill {
+  position: absolute; left: 50%; bottom: 0; transform: translateX(-50%);
+  width: var(--fader-fill-w);
+  height: calc(var(--pos) * (100% - var(--fader-cap-h)) + var(--fader-cap-h) / 2);
+  border-radius: 1px; background: var(--stem); opacity: .85;
+}
+.fader__detent {
+  position: absolute; left: 50%; transform: translateX(-50%); width: 18px; height: 1px;
+  background: var(--color-text-faint); opacity: .55;
+  bottom: calc(var(--unity) * (100% - var(--fader-cap-h)) + var(--fader-cap-h) / 2);
+}
+.fader__detent::before, .fader__detent::after {
+  content: ""; position: absolute; top: 0; width: 5px; height: 1px;
+  background: var(--color-text-faint);
+}
+.fader__detent::before { left: -7px; }
+.fader__detent::after { right: -7px; }
+.fader__cap {
+  position: absolute; left: 50%; transform: translateX(-50%);
+  width: var(--fader-cap-w); height: var(--fader-cap-h);
+  bottom: calc(var(--pos) * (100% - var(--fader-cap-h)));
+  background: var(--fader-cap-bg); border: 1px solid #0a0c0f;
+  border-radius: var(--split-radius-2); box-shadow: var(--shadow-cap);
+  transition: bottom var(--split-dur-fast) linear;
+}
+.fader__cap::before {
+  content: ""; position: absolute; left: 5px; right: 5px; top: 3px; bottom: 3px;
+  background: repeating-linear-gradient(180deg, rgba(255, 255, 255, .18) 0 1px, transparent 1px 4px);
+}
+.fader__cap::after {
+  content: ""; position: absolute; left: 2px; right: 2px; top: 50%; height: 2px; margin-top: -1px;
+  background: var(--stem); border-radius: 1px; box-shadow: 0 0 4px var(--stem);
+}
+.fader:hover .fader__cap { border-color: var(--color-border-strong); }
+/* During drag the cap must track the finger with zero lag (DESIGN §6.3). */
+.fader[data-drag="true"] .fader__cap {
+  transition: none; will-change: bottom; border-color: var(--color-border-strong);
+}
+
+/* ---------------------------------------------------------------- METER ----
+   Copied from console-full.css:129-144, minus the scale column. Two values:
+   an RMS bar and a peak tick (DESIGN §7). */
+.meter { position: relative; width: var(--meter-w); height: var(--_travel); flex: none; cursor: pointer; }
+.meter__trough {
+  position: absolute; inset: 0; background: var(--color-surface-inset);
+  border: 1px solid var(--color-border); border-radius: var(--split-radius-1); overflow: hidden;
+}
+.meter__trough::after {
+  content: ""; position: absolute; inset: 0; z-index: 2; pointer-events: none;
+  background: repeating-linear-gradient(to top, rgba(0, 0, 0, .92) 0 1px, rgba(0, 0, 0, 0) 1px 3px);
+}
+.meter__rms {
+  position: absolute; left: 0; right: 0; bottom: 0; height: calc(var(--rms, 0) * 100%);
+  background-image: linear-gradient(to top, var(--color-meter-safe) 0 62%,
+    var(--color-meter-hot) 62% 86%, var(--color-meter-clip) 86% 100%);
+  background-size: 100% calc(var(--_travel) - 2px);
+  background-position: left bottom; background-repeat: no-repeat; will-change: height;
+}
+.meter__peak {
+  position: absolute; left: 0; right: 0; height: var(--meter-peak-h); z-index: 3;
+  bottom: calc(var(--peak, 0) * (100% - var(--meter-peak-h)));
+  background: var(--color-meter-peak); box-shadow: 0 0 5px rgba(255, 255, 255, .45);
+  will-change: bottom;
+}
+.meter__clip {
+  position: absolute; top: 0; left: 0; right: 0; height: 4px; z-index: 4;
+  background: var(--color-meter-clip); display: none;
+}
+.meter[data-clip="true"] .meter__clip { display: block; }
+
+/* --------------------------------------------------------------- MASTER ----
+   The right-hand column of the band, behind a divider, where a mixer's master
+   is. It is the same fader component as the six beside it — one widget, one
+   law, one set of gestures to learn. */
+.mstr {
+  flex: none; display: flex; flex-direction: column; align-items: center;
+  justify-content: flex-end; gap: 6px;
+  /* The bottom padding is the strip card's own padding + border, so the master
+     cap and the six stem caps sit on ONE line. Measured: without it the master
+     fader lands 10 px low, which is exactly the kind of thing that reads as
+     "something is broken here" without the eye being able to say what. */
+  margin-left: 2px; padding: 0 2px 10px 10px; border-left: 1px solid var(--color-divider);
+  --stem: var(--color-accent);
+}
+.lbl {
+  font-size: 10px; line-height: 12px; font-weight: 700;
+  letter-spacing: var(--split-ls-label); text-transform: uppercase; color: var(--color-text-dim);
+}
+/* Fixed height, matching the strips' two-line readout, so the master cap and
+   the six stem caps sit on one line — a mixer whose faders do not share a
+   baseline reads as broken even when every value is right. */
+.mstr .db {
+  height: 27px; display: flex; align-items: center;
+  font-family: var(--split-font-mono); font-size: 11px; color: var(--color-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ------------------------------------------------------------------- dialog */
+.dlg {
+  width: min(420px, calc(100% - 24px));
+  padding: 16px 18px 14px;
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  box-shadow: var(--shadow-dialog);
+}
+.dlg::backdrop { background: rgba(0, 0, 0, .6); }
+.dlg h2 { margin: 0 0 8px; font-size: 15px; }
+.dlg p { margin: 0 0 8px; color: var(--color-text-muted); font-size: 12px; }
+.dlg__fine { color: var(--color-text-dim) !important; }
+.dlg__row { display: flex; align-items: center; gap: 8px; margin-top: 12px; }
+.dlg__row .note { flex: 1; }
+
+.progress {
+  height: 6px; margin: 10px 0 2px;
+  background: var(--color-surface-inset); border-radius: 3px; overflow: hidden;
+}
+.progress i {
+  display: block; height: 100%; width: calc(var(--p, 0) * 100%);
+  background: var(--color-accent); transition: width 120ms linear;
+}
+
+/* ------------------------------------------------------------------- footer */
+.foot {
+  display: flex; align-items: center; gap: 12px;
+  margin-top: 10px; padding-top: 9px;
+  border-top: 1px solid var(--color-divider);
+}
+/* The footer used to collapse when `#note` was empty, which is every healthy
+   Chrome — 34 px of frame height spent saying nothing, on top of the user's
+   video. It now carries the autoplay setting, which is a CONTROL and must be
+   there whether or not there is a warning to print, so the `:has(.note:empty)`
+   collapse is gone. Deleted rather than left in place: it would hide the
+   checkbox on exactly the machines where nothing is wrong. */
+.note { flex: 1; color: var(--color-text-dim); font-size: 11px; }
+
+/* The one preference. A native checkbox: it is the control the user knows, it
+   is keyboard- and screen-reader-complete for free, and `accent-color` is the
+   whole of the theming it needs. */
+.set { display: flex; align-items: center; gap: 6px; flex: none; cursor: pointer; font-size: 11px; color: var(--color-text-muted); }
+.set input { width: 14px; height: 14px; margin: 0; accent-color: var(--color-accent); cursor: pointer; }
+.set:hover { color: var(--color-text); }
+
+.lnk {
+  flex: none; padding: 2px 6px; font: inherit; font-size: 11px;
+  color: var(--color-text-dim); background: transparent;
+  border: 1px solid transparent; border-radius: 5px; cursor: pointer;
+}
+.lnk:hover { color: var(--color-text); border-color: var(--color-border); }
+
+/* ---------------------------------------------------------------- TOOLS ----
+   The play-along row: the key on the left, the two controls on the right. It
+   wraps rather than shrinking below its content — this frame is as narrow as
+   ~640 px on a small window and a squeezed scale line is unreadable, where a
+   second line costs 18 px. */
+.tools {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px 16px;
+  margin-top: 10px; padding-top: 9px;
+  border-top: 1px solid var(--color-divider);
+}
+
+.key { min-width: 0; flex: 1 1 260px; }
+.key__hd { display: flex; align-items: baseline; gap: 8px; }
+/* The state, in words, next to the label — "listening" is a fact about the
+   detector and it must not look like a key name. */
+.key__st { font-size: 11px; color: var(--color-text-dim); }
+.key[data-show="listening"] .key__st { color: var(--color-info); }
+.key[data-show="bad"] .key__st { color: var(--color-warn); }
+
+.key__names { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-top: 2px; min-height: 18px; }
+/* The WRITTEN key is the big one: it is what the player reads off the page.
+   The concert key is beside it, quieter, and both carry their label. */
+.key__written { font-size: 15px; font-weight: 650; color: var(--color-text); }
+.key__concert { font-size: 12px; color: var(--color-text-muted); }
+.key__scale {
+  margin-top: 1px; min-height: 15px;
+  font-family: var(--split-font-mono); font-size: 11px; letter-spacing: .04em;
+  color: var(--color-text-muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------- BPM ----
+   A near-copy of `.key`'s block, same tokens, one row over — because it is the
+   same kind of thing: a readout, not a control. `--color-text-dim` and not
+   `--color-text-faint` for the em dash and the fine lines, for `.strip__key`'s
+   reason: tokens.css marks faint 4.0:1 NON-TEXT ONLY, and these are text the
+   user is meant to read. */
+.bpm { min-width: 0; flex: 0 1 150px; }
+.bpm__hd { display: flex; align-items: center; gap: 6px; }
+.bpm__st { font-size: 11px; color: var(--color-text-dim); }
+.bpm[data-show="listening"] .bpm__st { color: var(--color-info); }
+.bpm[data-show="unsure"] .bpm__st,
+.bpm[data-show="bad"] .bpm__st { color: var(--color-warn); }
+/* min-height, so the box does not collapse and re-expand as the detector loses
+   and re-finds the beat — the same reason the strip badge slot is always 14 px. */
+.bpm__names { display: flex; align-items: baseline; gap: 8px; margin-top: 2px; min-height: 18px; }
+.bpm__v {
+  font-family: var(--split-font-mono); font-variant-numeric: tabular-nums;
+  font-size: 15px; font-weight: 650; color: var(--color-text);
+}
+.bpm[data-show="unsure"] .bpm__v, .bpm[data-show="bad"] .bpm__v { color: var(--color-text-dim); }
+/* The SOURCE tempo, quiet and beside the primary, exactly as `.key__concert`
+   sits beside `.key__written` — and dropped on the same rule, when the two
+   would be the same number. It is also not drawn at all in this build; see
+   BPM_SOURCE_SAFE in embed-state.js. */
+.bpm__src {
+  font-family: var(--split-font-mono); font-variant-numeric: tabular-nums;
+  font-size: 12px; color: var(--color-text-muted);
+}
+.bpm__fine { margin-top: 1px; min-height: 15px; font-size: 10px; color: var(--color-text-dim); }
+
+/* THE BEAT, AS ONE COMPOSITED ANIMATION. The period is the beat and the phase is
+   a negative `animation-delay`, written by JS only on a tempo change or a >40 ms
+   drift — about once per ten seconds, not ten times per second. A pulse stepped
+   by the 10 Hz payload would be a 100 ms-quantised stutter, and a rAF loop would
+   be a second animation loop competing with the meters for frames on a machine
+   holding a separation deadline.
+
+   THE COLOUR IS `--color-stem-drums` AND IT IS NOT DECORATION: the number comes
+   from the isolated drums stem, and tinting the readout with that strip's
+   identity colour says where it came from without a sentence. It is not carrying
+   STATE — the state is the word and the number — so DESIGN §2.4's
+   never-colour-alone rule is not in play, and the fine line says `from the drums
+   stem` in words anyway.
+
+   No `will-change`: DESIGN §16 restricts it to four named elements, and an
+   opacity/transform animation is composited without it. */
+.bpm__pulse {
+  width: 10px; height: 10px; border-radius: 50%; flex: none;
+  background: var(--color-stem-drums);
+  animation: sd-beat var(--beat-ms, 500ms) linear infinite;
+  animation-delay: var(--beat-off, 0ms);
+}
+@keyframes sd-beat {
+  0%   { opacity: 1;   transform: scale(1); }
+  18%  { opacity: .22; transform: scale(.78); }
+  100% { opacity: .22; transform: scale(.78); }
+}
+/* DESIGN §14: functional motion is never disabled — the beat IS the information,
+   the same carve-out meters and progress bars get. What goes is the DECORATIVE
+   half: the size kick. The opacity step alone still carries the phase. */
+@media (prefers-reduced-motion: reduce) {
+  .bpm__pulse { animation-name: sd-beat-flat; }
+}
+@keyframes sd-beat-flat { 0% { opacity: 1; } 18%, 100% { opacity: .22; } }
+/* NO ESTIMATE OR NO PHASE, NO PULSE. A dot pulsing beside an em dash is a beat
+   we are claiming not to have found; a dot pulsing at an invented phase is
+   worse, because it looks right and is out of time with the music. `data-pulse`
+   is written by paintBpm from `beatPulse().run` and is the second half of that —
+   see the ponytail there, because the wire does not yet carry the playhead frame
+   the phase is measured against. */
+.bpm:not([data-show="bpm"]) .bpm__pulse,
+.bpm[data-pulse="off"] .bpm__pulse { animation: none; opacity: .22; }
+
+.tools__ctl { display: flex; align-items: flex-start; gap: 14px; flex: none; }
+
+/* ---- transpose ---- */
+.tr { display: flex; flex-direction: column; gap: 3px; }
+.tr__row { display: flex; align-items: center; gap: 4px; }
+.tr__b, .tr__v {
+  position: relative; height: 24px;
+  font: inherit; font-size: 12px; line-height: 1;
+  color: var(--color-text); background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-radius: var(--split-radius-2);
+  cursor: pointer;
+}
+.tr__b { width: 26px; font-size: 14px; }
+/* The TOKENS, not the literals they happen to hold today. `--btn-default-bg-hover`
+   is #2b3039 and `--btn-disabled-opacity` is 0.38 in tokens.css, so this is a
+   no-op on screen — and it is the point: `.sp__b` beside it already uses them,
+   and two adjacent controls that are one theme override away from disagreeing
+   read as a defect the day somebody re-themes. */
+.tr__b:hover:not(:disabled) { background: var(--btn-default-bg-hover); }
+.tr__b:disabled { opacity: var(--btn-disabled-opacity); cursor: not-allowed; }
+/* Transparent 44 px hit expansion (DESIGN §5), as on the M/S toggles. */
+.tr__b::after, .tr__v::after {
+  content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: max(100%, var(--hit-min-dense)); height: var(--hit-min);
+}
+/* HOME IS VISUALLY DISTINCT, and it is the quiet one: 0 is not a setting, it is
+   the absence of one. Any other value is filled with the accent so a deck left
+   at +3 cannot be mistaken for a deck at the recording's pitch — that is the
+   state where the key readout and the record disagree. */
+.tr__v {
+  min-width: 42px; padding: 0 6px;
+  font-family: var(--split-font-mono); font-variant-numeric: tabular-nums; font-weight: 700;
+}
+.tr__v[data-home="true"] {
+  color: var(--color-text-dim); background: var(--color-surface-inset);
+  border-color: var(--color-border);
+}
+.tr__v[data-home="false"] {
+  color: var(--color-on-accent); background: var(--color-accent); border-color: var(--color-accent);
+}
+/* `--color-text-dim`, not faint: tokens.css marks faint 4.0:1 NON-TEXT ONLY and
+   this is a sentence the user is meant to read. Same call as `.strip__key`. */
+.tr__fine { font-size: 10px; color: var(--color-text-dim); }
+
+/* ---- speed ----
+   The .tr block's geometry, deliberately: these two sit side by side in one row
+   and any difference in height, radius or hit expansion reads as a defect.
+
+   Two tokens here (`--btn-default-bg-hover`, `--btn-disabled-opacity`) stood in
+   for literals `.tr__b` above used to hard-code. `.tr__b` now uses the tokens
+   too, so the two blocks cannot drift under a theme override. */
+.sp { display: flex; flex-direction: column; gap: 3px; }
+.sp__row { display: flex; align-items: center; gap: 4px; }
+.sp__b, .sp__v {
+  position: relative; height: 24px;
+  font: inherit; font-size: 12px; line-height: 1;
+  color: var(--color-text); background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-radius: var(--split-radius-2);
+  cursor: pointer;
+}
+.sp__b { width: 26px; font-size: 14px; }
+.sp__b:hover:not(:disabled) { background: var(--btn-default-bg-hover); }
+.sp__b:disabled { opacity: var(--btn-disabled-opacity); cursor: not-allowed; }
+/* Transparent 44 px hit expansion (DESIGN §5), as on .tr__b and the M/S toggles. */
+.sp__b::after, .sp__v::after {
+  content: ""; position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: max(100%, var(--hit-min-dense)); height: var(--hit-min);
+}
+/* 1.00x IS THE HOME POSITION AND LOOKS LIKE IT, exactly as transpose's 0 does:
+   it is the absence of a setting, not a setting. 52 px and tabular so the row
+   does not jog between "0.50x" and "1.00x" — every rung prints X.XX, so the
+   width does not change with the range. */
+.sp__v {
+  min-width: 52px; padding: 0 6px;
+  font-family: var(--split-font-mono); font-variant-numeric: tabular-nums; font-weight: 700;
+}
+.sp__v[data-home="true"] {
+  color: var(--color-text-dim); background: var(--color-surface-inset);
+  border-color: var(--color-border);
+}
+.sp__v[data-home="false"] {
+  color: var(--color-on-accent); background: var(--color-accent); border-color: var(--color-accent);
+}
+/* PENDING IS THE 3.4 SECONDS, DRAWN. The value is committed but not yet heard,
+   so it is outlined rather than filled — and it fills when the audio catches up.
+   The latency is the one thing about this control the user has to understand, so
+   it is SHOWN rather than explained. */
+.sp[data-pending="true"] .sp__v[data-home="false"] {
+  color: var(--color-accent-text); background: transparent;
+  border-color: var(--color-accent);
+}
+/* PAST THE KEY-LOCK RANGE. Attached to the control, not only to the caption: a
+   cost stated in fine print under a normal-looking button is a cost the user
+   reads once. It is a RULE and not a colour swap, so the accent fill (which
+   carries "off home") is not overwritten by it — two facts, two marks. */
+.sp[data-far="true"] .sp__v { box-shadow: inset 0 -3px 0 var(--color-warn); }
+/* forced-colors drops box-shadow outright. The fine line's own SENTENCE carries
+   the statement regardless, so this is belt and braces rather than the only
+   channel — the far state never depends on colour alone (DESIGN §2.4). */
+@media (forced-colors: active) {
+  .sp[data-far="true"] .sp__v { border-bottom: 3px solid Mark; }
+}
+/* 18ch and not 15ch: the far statement is the longest string this control has,
+   and this is what keeps it from stretching the row at a narrow frame. */
+.sp__fine { font-size: 10px; color: var(--color-text-dim); max-width: 18ch; }
+.sp[data-far="true"] .sp__fine { color: var(--color-warn); }
+/* GREYED IS ANYTHING THAT IS NOT `ok`, ENUMERATED BY ITS ABSENCE. `data-state`
+   carries speedPlan's own `why`, and a state it grows later must not fall
+   through to "looks fine" — which is exactly what a list of three selectors
+   would do. Same rule as speedGate, at the other end of the same fact.
+
+   A reason is not fine print: it is the only thing on screen explaining why the
+   control does not respond, so it reads as a warning and not as a caption. */
+.sp:not([data-state="ok"]) .sp__fine { color: var(--color-warn); }
+.sp:not([data-state="ok"]) .sp__row { opacity: var(--btn-disabled-opacity); }
+.sp:not([data-state="ok"]) .sp__b,
+.sp:not([data-state="ok"]) .sp__v { cursor: not-allowed; }
+
+/* ---- instrument ---- */
+.inst { display: flex; flex-direction: column; gap: 3px; cursor: pointer; }
+.inst select {
+  height: 24px; font: inherit; font-size: 11px;
+  color: var(--color-text); background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-radius: var(--split-radius-2);
+  cursor: pointer;
+}
+
+/* ---- the shortcut overlay ---- */
+.dlg--keys { width: min(440px, calc(100% - 24px)); }
+.keytbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.keytbl td { padding: 4px 8px; border-bottom: 1px solid var(--color-divider); vertical-align: top; }
+.keytbl td:first-child { white-space: nowrap; width: 1%; }
+.keytbl tr:last-child td { border-bottom: 0; }
+.kbd {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 20px; height: 19px; padding: 0 5px;
+  background: var(--color-surface-4);
+  border: 1px solid var(--color-border-strong); border-bottom-width: 2px;
+  border-radius: 3px; font-family: var(--split-font-mono); font-size: 10px;
+}
+
+/* ------------------------------------------------------- NARROW FRAME ----
+   The insurance for six strips on one line, and the arithmetic is in the
+   `.rack` header: this block takes the band's floor from 575 px to 503 px, so
+   the deck survives down to a 527 px frame instead of a 599 px one.
+
+   A MEDIA QUERY IS THE RIGHT TOOL HERE, where the console uses container
+   queries: this document IS its own frame, so the viewport and the container
+   are the same box by construction. There is no second deployment of this page
+   at a different size.
+
+   The three values are the console's own 740-999 px density (console-full.css),
+   not new ones — a fader hit area of 38 px is already shipped and already meets
+   DESIGN §5's dense-cluster allowance. Nothing is hidden and nothing wraps: the
+   glyph, the name, M/S, the badge slot and both readouts are all still on every
+   strip, because guitar and piano have no key and cannot afford to lose a
+   second identity channel. */
+@media (max-width: 700px) {
+  .rack { gap: 6px; }
+  .strip {
+    min-width: 68px; padding: 7px 6px 8px;
+    --fader-hit-w: 38px; --meter-w: 8px;
+  }
+  .mstr { padding-left: 8px; --fader-hit-w: 38px; }
+}

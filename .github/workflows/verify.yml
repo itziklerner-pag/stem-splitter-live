@@ -1,0 +1,56 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: node tools/verify.mjs --quick
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # The ORT runtime is not in git — it is reproducible from a pinned version
+      # plus hashes, so it is fetched here the same way a contributor fetches it.
+      # Cached on the pinned version, which is the only thing that changes it.
+      - name: Cache the ONNX Runtime vendor drop
+        id: ort
+        uses: actions/cache@v4
+        with:
+          path: extension/vendor/ort
+          key: ort-${{ hashFiles('tools/fetch-vendor.sh') }}
+
+      - name: Fetch the ONNX Runtime vendor drop
+        if: steps.ort.outputs.cache-hit != 'true'
+        run: bash tools/fetch-vendor.sh
+
+      # --quick is every gate that needs neither a browser nor the 109 MB
+      # weights. The two it skips (model-parity, embed-smoke) are run locally
+      # before a release; putting a 109 MB download on every PR is not worth it.
+      - name: Verify
+        run: node tools/verify.mjs --quick
+
+      - name: Upload the suite logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-logs
+          path: out/verify/
+          retention-days: 14
+          if-no-files-found: ignore

@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 128" width="640" height="128" role="img" aria-label="Stem Splitter Live">
+  <title>Stem Splitter Live</title>
+  <!--
+    Mark + wordmark, lockup. The type is set in the same system stack the deck
+    uses (tokens.css --split-font-sans) and is converted to a <text> element
+    rather than outlines on purpose: nobody here owns a licensed display face,
+    and a system stack renders honestly everywhere instead of falling back to
+    something nobody chose.
+
+    If a real typeface is ever licensed, outline it and drop the fallback.
+  -->
+  <rect width="128" height="128" rx="28" fill="#0f1115"/>
+  <g>
+    <rect x="13"  y="42" width="12" height="44" rx="6" fill="#ffd166"/>
+    <rect x="31"  y="28" width="12" height="72" rx="6" fill="#ff8a82"/>
+    <rect x="49"  y="36" width="12" height="56" rx="6" fill="#a89bff"/>
+    <rect x="67"  y="20" width="12" height="88" rx="6" fill="#4ce3bb"/>
+    <rect x="85"  y="34" width="12" height="60" rx="6" fill="#a9ec74"/>
+    <rect x="103" y="46" width="12" height="36" rx="6" fill="#ff96e2"/>
+  </g>
+  <text x="156" y="58" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="38" font-weight="700" letter-spacing="-0.5" fill="#e8ecf1">Stem Splitter</text>
+  <text x="156" y="102" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif"
+        font-size="38" font-weight="700" letter-spacing="-0.5" fill="#4ce3bb">Live</text>
+</svg>

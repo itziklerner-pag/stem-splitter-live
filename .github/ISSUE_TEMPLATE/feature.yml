@@ -1,0 +1,53 @@
+name: Feature request
+description: Suggest something the extension should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before you write this up, two things that will save you the effort:
+
+        - **Saving stems to a file is not coming.** It was built and cut. See the
+          [FAQ](../blob/main/FAQ.md#are-you-going-to-add-a-download-button--offline-export--a-second-deck).
+        - **A tab picker cannot be built.** Chrome only grants audio capture on a
+          browser-level gesture on the target tab; a list inside our own UI is
+          not one, however it is drawn.
+
+        `docs/ARCHITECTURE.md`'s appendix records what else was built and
+        removed, so a re-proposal can start from why rather than from scratch.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The problem, not the solution. What are you doing when you hit this?
+      placeholder: "I'm learning a bass line and I keep having to..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+      description: Your proposed solution, if you have one. It is fine not to.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: The workaround, if any. This is often the most useful field.
+
+  - type: checkboxes
+    id: rules
+    attributes:
+      label: Does it stay inside the project's rules?
+      description: |
+        See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md). These are not
+        negotiable, so a request that needs one of them relaxed will be closed.
+      options:
+        - label: It does not require obtaining audio from anywhere other than `chrome.tabCapture`
+          required: true
+        - label: It does not require a network request after the model download
+          required: true
+        - label: It does not require loading remote code
+          required: true

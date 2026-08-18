@@ -1,0 +1,92 @@
+name: Bug report
+description: Something is broken or behaves wrongly
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting. **Two fields below turn most audio bugs from
+        unreproducible into obvious: the deck's latency readout and your Chrome
+        version + GPU.** Please fill them in even if they seem irrelevant.
+
+        If this is a security issue, please **stop** and read
+        [SECURITY.md](../blob/main/SECURITY.md) instead — do not file it here.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+      placeholder: |
+        1. Opened a video, pressed Ctrl+Shift+9
+        2. Pressed play
+        3. Expected separated stems; heard the unseparated mix instead
+    validations:
+      required: true
+
+  - type: input
+    id: latency
+    attributes:
+      label: The deck's latency readout
+      description: The number shown on the deck while it is running, e.g. "−3.4 s". Write "never started" if it never got that far.
+      placeholder: "−3.4 s"
+    validations:
+      required: true
+
+  - type: input
+    id: chrome
+    attributes:
+      label: Chrome version
+      description: From `chrome://version` — the first line.
+      placeholder: "Chrome 141.0.7390.54 (Official Build)"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: OS and GPU
+      description: From `chrome://gpu` — the "GL Renderer" line is ideal.
+      placeholder: "macOS 15.6, Apple M2 Max"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Which backend is it using?
+      description: The deck reports this. WebGPU and WASM fail in very different ways.
+      options:
+        - WebGPU
+        - WASM (fallback)
+        - Not sure / it never said
+    validations:
+      required: true
+
+  - type: input
+    id: hop
+    attributes:
+      label: Hop setting
+      description: The default is 1.95 s.
+      placeholder: "1.95"
+
+  - type: textarea
+    id: console
+    attributes:
+      label: Console output
+      description: |
+        From the **offscreen document**, not the page. `chrome://extensions` →
+        Stem Splitter Live → "Inspect views: offscreen.html". Paste anything red.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before you file
+      options:
+        - label: I am on Chrome 128 or newer
+          required: true
+        - label: I reloaded the tab and armed it again, and it still happens
+          required: true
+        - label: I searched existing issues
+          required: true

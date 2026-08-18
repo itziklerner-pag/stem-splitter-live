@@ -1,0 +1,38 @@
+{
+  "name": "stem-splitter-live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Split any YouTube video into six stems, live and on your own machine.",
+  "homepage": "https://stemsplitter.live",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itziklerner-pag/stem-splitter-live.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itziklerner-pag/stem-splitter-live/issues"
+  },
+  "license": "MIT",
+  "keywords": [
+    "chrome-extension",
+    "stem-separation",
+    "source-separation",
+    "demucs",
+    "onnxruntime",
+    "webgpu",
+    "audio",
+    "music",
+    "on-device"
+  ],
+  "scripts": {
+    "vendor": "bash tools/fetch-vendor.sh",
+    "model": "bash tools/fetch-model.sh",
+    "test": "node tools/verify.mjs --quick",
+    "test:all": "node tools/verify.mjs",
+    "smoke": "node tools/embed-smoke.mjs",
+    "brand": "node brand/render.mjs"
+  },
+  "devDependencies": {
+    "playwright": "^1.62.1"
+  }
+}

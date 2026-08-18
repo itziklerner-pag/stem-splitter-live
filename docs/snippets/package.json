@@ -1,0 +1,12 @@
+{
+  "name": "stem-splitter-live-audio-snippets",
+  "private": true,
+  "type": "module",
+  "description": "Reference DSP utilities for docs/AUDIO.md. Zero dependencies. Runs in Node >=18 and in the browser.",
+  "scripts": {
+    "selftest": "node selftest.js",
+    "testbed": "node make-testbed.js ./testbed",
+    "testbed-check": "node make-testbed.js --check",
+    "eval": "node bss-eval.js"
+  }
+}

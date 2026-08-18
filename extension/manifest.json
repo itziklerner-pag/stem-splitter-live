@@ -1,0 +1,56 @@
+{
+  "manifest_version": 3,
+  "name": "Stem Splitter Live",
+  "version": "0.1.0",
+  "minimum_chrome_version": "128",
+  "description": "Splits the audio your own YouTube tab is already playing into 6 stems, live and on-device. Nothing leaves the machine.",
+  "background": {
+    "service_worker": "sw/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Show the Stem Splitter Live deck on this video"
+  },
+  "commands": {
+    "arm-tab": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+9",
+        "mac": "MacCtrl+Shift+9"
+      },
+      "description": "Arm this tab and show the deck in the page"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["autonav.js", "speed.js", "content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["ui/embed.html"],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ],
+  "permissions": [
+    "tabCapture",
+    "offscreen",
+    "storage",
+    "unlimitedStorage",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://huggingface.co/*",
+    "https://*.hf.co/*"
+  ],
+  "content_security_policy": {
+    "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'; connect-src 'self' blob: https://huggingface.co https://*.hf.co"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}
