@@ -2,7 +2,8 @@
   <title>Stem Splitter Live</title>
   <!--
     Six bars, one per stem, in the deck's own display order and the deck's own
-    colours (tokens.css --color-stem-*). Vertically centred rather than sitting
+    colours (the color-stem-* custom properties in tokens.css). Vertically
+    centred rather than sitting
     on a baseline, so it reads as a waveform as well as a set of faders.
 
     Bar geometry is 12 wide on an 18 pitch: 6*12 + 5*6 = 102, centred in 128

@@ -2,7 +2,8 @@
   <title>Stem Splitter Live</title>
   <!--
     Mark + wordmark, lockup. The type is set in the same system stack the deck
-    uses (tokens.css --split-font-sans) and is converted to a <text> element
+    uses (the split-font-sans custom property in tokens.css) and is converted
+    to a <text> element
     rather than outlines on purpose: nobody here owns a licensed display face,
     and a system stack renders honestly everywhere instead of falling back to
     something nobody chose.
