@@ -911,6 +911,21 @@ const steps = [
    */
   { id: 'name', title: 'node tools/name-check.mjs — nothing in the tracked tree names a former product name or an unpublished internal document, and both halves of each renamed IPC pair are present', args: ['tools/name-check.mjs'] },
   /**
+   * Third of the three gates that assert a property of the published tree
+   * rather than of the DSP, and it is here for the same reason `name` is: the
+   * failure it catches is silent everywhere anyone would have looked.
+   *
+   * `brand/mark.svg` and `brand/wordmark.svg` were not XML — a literal `--`
+   * inside an XML comment, which XML forbids. An SVG inlined into a document is
+   * read by the lenient HTML parser and renders; the same bytes fetched through
+   * `<img src>` are read by the strict XML parser and do not. `render.mjs`
+   * inlines, so every shipped PNG kept generating correctly from a broken
+   * source; the README loads by src, so the mark was a broken-image glyph.
+   *
+   * Watched going red on the pre-fix tree — 2 of 6 — before it was gated.
+   */
+  { id: 'svg', title: 'node tools/svg-check.mjs — every tracked SVG is XML, so the mark renders through <img src> and not only when inlined', args: ['tools/svg-check.mjs'] },
+  /**
    * `heavy` means "needs a large prerequisite, not a browser". It launches NO
    * browser — so calling it `slow` would be a lie that `--quick`'s own summary
    * line prints — but it reads the 109 MB pinned weights, which `--quick` must
