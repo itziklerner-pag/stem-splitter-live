@@ -218,3 +218,25 @@ Before you commit an assertion:
 - [ ] Does the function it covers have more than one caller? Then name the entry point.
 - [ ] If there is a control, can the control lose?
 - [ ] If a comment above it documents an exception, does the assertion encode it?
+
+---
+
+## Agent skills
+
+Configuration the engineering skills read. These files describe *this repo's*
+conventions; the skills themselves are generic.
+
+### Issue tracker
+
+Issues live as GitHub issues on `itziklerner-pag/stem-splitter-live`, managed with
+the `gh` CLI. See [`docs/agents/issue-tracker.md`](docs/agents/issue-tracker.md).
+
+### Triage labels
+
+The five canonical triage roles map 1:1 to labels of the same name, all of which
+already exist on the repo. See [`docs/agents/triage-labels.md`](docs/agents/triage-labels.md).
+
+### Domain docs
+
+Single-context: one `CONTEXT.md` and one `docs/adr/` at the repo root. Neither
+exists yet; that is expected. See [`docs/agents/domain.md`](docs/agents/domain.md).
