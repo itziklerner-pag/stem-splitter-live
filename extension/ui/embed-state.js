@@ -489,10 +489,24 @@ const ACCEL_MOD = {
  * into the markup because the user can rebind it, so this has to cope with any
  * accelerator and not just the manifest's.
  *
- * THE HALF THAT IS ALWAYS WORK, since Chrome hands back the glyphs on macOS
- * already: `say`. `⌃⇧9` read out character by character is not an instruction,
- * so the chip gets `role="img"` and "Control Shift 9" as its accessible name.
- * A sighted Mac user was never affected here; a screen-reader one was.
+ * THE HALF THAT IS WORK ON A GLYPH PLATFORM, since Chrome hands back the
+ * glyphs on macOS already: `say`. `⌃⇧9` read out character by character is not
+ * an instruction, so the chip gets `role="img"` and "Control Shift 9" as its
+ * accessible name. A sighted Mac user was never affected here; a screen-reader
+ * one was.
+ *
+ * AND OFF A GLYPH PLATFORM IT IS NOT WORK, WHICH IS WHY THE SEPARATOR IS
+ * SHARED. `modLabel()` already returns `text === say` for every modifier it
+ * spells in words, so the only thing that could ever have made the two strings
+ * differ off a Mac was the JOIN — and it did, for every chord with a modifier
+ * in it. That is not a cosmetic difference: `welcome.js` keys `role="img"` +
+ * `aria-label` on `say !== text`, so a chord already drawn as `Ctrl+Shift+9`
+ * was announced as a graphic named "Ctrl Shift 9" — the visible text
+ * suppressed and nothing gained, on every non-Mac machine. The announced form
+ * therefore uses the separator that is DRAWN, and a space stands in only where
+ * nothing is drawn between the glyphs, because "ControlShift9" is not an
+ * instruction either. `say !== text` then means exactly "this platform draws
+ * glyphs", which is the question the caller is actually asking.
  *
  * TOKENISING TAKES BOTH FORMS. `'+'` separates manifest tokens; Apple glyphs
  * are simply concatenated, so leading glyph characters are peeled off one at a
@@ -522,7 +536,8 @@ export function chordLabel(accel, mac) {
     while (rest.length > 1 && ACCEL_MOD[rest[0]]) { take(rest[0]); rest = rest.slice(1); }
     if (rest !== '') take(rest);
   }
-  return { text: drawn.join(mac ? '' : '+'), say: said.join(' ') };
+  const sep = mac ? '' : '+';
+  return { text: drawn.join(sep), say: said.join(sep || ' ') };
 }
 
 /**
@@ -1497,8 +1512,33 @@ async function demo() {
     'ENTRY welcome.js: the glyph form Chrome actually returns on macOS is left exactly as it is on screen and given "Control Shift 9" to be ANNOUNCED as — read out character by character it is not an instruction');
   eq(chordLabel('MacCtrl+Shift+9', true), { text: '⌃⇧9', say: 'Control Shift 9' },
     '...and the MANIFEST TOKEN form reaches the same two strings, so a Chrome that hands back what the manifest declared does not put the word "MacCtrl" — a key no keyboard is printed with — into step 2');
-  eq(chordLabel('Ctrl+Shift+9', false), { text: 'Ctrl+Shift+9', say: 'Ctrl Shift 9' },
-    '...and off a Mac the accelerator is already the instruction, so what is drawn is unchanged');
+  eq(chordLabel('Ctrl+Shift+9', false), { text: 'Ctrl+Shift+9', say: 'Ctrl+Shift+9' },
+    '...and off a Mac the accelerator is already the instruction, so what is drawn is unchanged AND it is what is announced — the two strings are one string, which is how welcome.js knows to leave the accessible name off');
+  /**
+   * THE PLATFORM QUESTION, WHICH IS THE ONE THE CALLER ACTUALLY ASKS. welcome.js
+   * branches on `chord.say !== chord.text` to decide whether to set `role="img"`
+   * and an `aria-label`, so this pair IS that branch, evaluated: it must be true
+   * where the chord is drawn in glyphs and false where it is drawn in words.
+   *
+   * IT WAS TRUE ON BOTH FOR THE LIFE OF THE FUNCTION, because `say` was joined
+   * with a space while `text` was joined with `'+'` — so every multi-key chord
+   * on every non-Mac machine got `role="img"` and an accessible name, replacing
+   * text a screen reader could already read with a graphic. tools/embed-smoke's
+   * "the chord is ANNOUNCED in words when it is DRAWN in glyphs" assertion
+   * catches it in the real extension, but that one needs a browser and CI runs
+   * `--quick`, so the regression has to be catchable here too.
+   *
+   * BOTH COLUMNS, BECAUSE EITHER ALONE IS SATISFIABLE BY A CONSTANT. An
+   * implementation that returned `say === text` always passes the second column
+   * and fails the first; the shipped one passed the first and failed the second.
+   * Three chords, so the claim is about the JOIN and not about one literal —
+   * and `Alt+Shift+K` carries no digit and no Ctrl, so it cannot pass on the
+   * manifest's own chord being special-cased.
+   */
+  const chordSplits = (a, mac) => { const c = chordLabel(a, mac); return c.say !== c.text; };
+  eq(['Ctrl+Shift+9', 'Alt+Shift+K', 'MacCtrl+Shift+F9'].map((a) => [chordSplits(a, true), chordSplits(a, false)]),
+    [[true, false], [true, false], [true, false]],
+    'ENTRY welcome.js: a chord is ANNOUNCED differently from how it is DRAWN exactly when the platform draws GLYPHS, which is the whole of welcome.js\'s role="img" test — a say that differs off a Mac as well suppresses the visible text and buys nothing');
   eq(chordLabel('Command+Shift+9', true).text, '⌘⇧9',
     '...a user who rebinds the chord onto ⌘ gets ⌘, not the manifest\'s ⌃: the string is READ, never assumed');
   eq([chordLabel('', true), chordLabel(undefined, true), chordLabel(null, false)], [null, null, null],
