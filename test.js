@@ -21,6 +21,13 @@
  *            and overruns under a simulated slow producer
  *   mix      fader law round trip, mute/solo truth table, per-sample gain
  *            smoothing settle time, soft clipper transfer function
+ *   host     the Host seam, both halves. The boot check names a missing duty
+ *            and refuses a Host that is short one, the engine really runs it
+ *            before it builds anything, R5's track-stop survives every failing
+ *            path, and each shipped Host — offscreen/host.js, ui/host.js — is
+ *            driven through the duties the typedef spells MUST: the envelope,
+ *            late binding, the address filter, the MV3 response channel, the
+ *            capture token, and the swallowed delivery failure
  *
  * ---------------------------------------------------------------------------
  * RENDERING vs REACHABILITY — read this before trusting an assertion here.
@@ -4432,7 +4439,7 @@ if (group('dual')) {
 
 // ===========================================================================
 if (group('host')) {
-  head('host — the Host seam: a Host that cannot do the job is refused at boot');
+  head('host — the ENGINE half of the Host seam: a Host that cannot do the job is refused at boot');
   /**
    * WHAT THIS COVERS AND WHY IT IS WORTH A GATE.
    *
@@ -4463,7 +4470,7 @@ if (group('host')) {
    *   3. The stubs exist only to break ONE declared duty at a time, which is the
    *      one thing a real Host cannot be asked to do on demand.
    */
-  const { assertHost, ENGINE_HOST_DUTIES } = await import('./extension/shared/host.js');
+  const { assertHost, ENGINE_HOST_DUTIES, DECK_HOST_DUTIES } = await import('./extension/shared/host.js');
   const engineHost = await import('./extension/offscreen/host.js');
   const duties = Object.keys(ENGINE_HOST_DUTIES);
   const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
@@ -4726,9 +4733,9 @@ if (group('host')) {
    *
    * The whole value of declaring an interface rather than grepping for `chrome.`
    * is that a second implementer can be checked against it, and "did you define
-   * five functions" is the question they are least likely to get wrong. S3
-   * copies this shape for `DeckHost`, so the coverage this seam has is the
-   * coverage both contexts get.
+   * five functions" is the question they are least likely to get wrong. The
+   * deck's half below is the same shape against `DeckHost`, so the coverage this
+   * seam has is the coverage both contexts get.
    *
    * REACHABLE, NOT CONSTRUCTED: every assertion below CALLS the shipping
    * `extension/offscreen/host.js`. What is stubbed is the PLATFORM underneath it
@@ -4894,6 +4901,242 @@ if (group('host')) {
     delete globalThis.addEventListener;
     Object.defineProperty(globalThis, 'navigator', realNavigator);
   }
+
+  head('host — the DECK half of the same seam: the boot check, and the transport it hides');
+  /**
+   * The shipped DeckHost, driven and never imitated: a check that reimplemented
+   * the two-line module it is guarding would be a second copy of the bug. It
+   * names `chrome` only inside its two function bodies, so importing it costs
+   * nothing here and the stub goes on `globalThis` at the point of use.
+   */
+  const deckHost = (await import('./extension/ui/host.js')).host;
+  const deckDuties = Object.keys(DECK_HOST_DUTIES);
+  /**
+   * RENDERING vs REACHABILITY: reachable by construction. Every assertion below
+   * drives the SHIPPED `extension/ui/host.js` and the SHIPPED `assertHost`, with
+   * a `chrome` stub standing in for the bus. Nothing here reimplements either.
+   *
+   * WHY THESE ARE HERE AND NOT ONLY IN `tools/embed-smoke.mjs`. The browser gate
+   * covers the deck end to end and it is the only thing that can — but CI runs
+   * `--quick` and never reaches it (`.github/workflows/verify.yml`), which is
+   * exactly why the chord fix had to leave an `embed-state` assertion behind as
+   * well. The two things a broken Host breaks SILENTLY are late binding and the
+   * envelope, so both get an assertion on this side of the browser too.
+   */
+
+  // ---------------------------------------------------------- the boot check
+  /**
+   * ENTRY POINT: `assertHost(host, DECK_HOST_DUTIES, 'DeckHost')` at the top of
+   * `extension/ui/embed.js`. `assertHost` now has TWO callers — the block above
+   * drives it through `ENGINE_HOST_DUTIES` from `offscreen/engine.js`'s side —
+   * and a duty list that is right for one and wrong for the other is exactly the
+   * "right at one call site, wrong at another" defect AGENTS.md counts five of.
+   * So these name the deck's list, not "a host".
+   */
+  {
+    const complete = { send() {}, onMessage() {} };
+    ok('assertHost-returns-the-host-it-was-given: a complete DeckHost boots',
+      assertHost(complete, DECK_HOST_DUTIES, 'DeckHost') === complete);
+
+    ok('assertHost-passes-the-SHIPPED-ui/host.js — this is the gate on its export list',
+      assertHost(deckHost, DECK_HOST_DUTIES, 'DeckHost') === deckHost,
+      deckDuties.join(', '));
+
+    const threw = (h) => { try { assertHost(h, DECK_HOST_DUTIES, 'DeckHost'); return null; } catch (e) { return e; } };
+
+    const noSend = threw({ onMessage() {} });
+    ok('assertHost-NAMES-the-missing-duty: a Host without `send` throws saying `send`',
+      noSend instanceof Error && /\bsend\b/.test(noSend.message) && /DeckHost/.test(noSend.message),
+      noSend ? noSend.message : 'it did not throw');
+
+    const noneAtAll = threw({});
+    ok('assertHost-names-EVERY-missing-duty, not just the first',
+      noneAtAll !== null && /\bsend\b/.test(noneAtAll.message) && /\bonMessage\b/.test(noneAtAll.message),
+      noneAtAll ? noneAtAll.message : 'it did not throw');
+
+    /**
+     * NOT ONLY THE STRING CASE. Both reviews of this wave found the same
+     * survivor: the deck's `assertHost` accepted `typeof v === 'object'` before
+     * the two halves were merged, so `{ send: {} }` — an Electron preload
+     * bridge wrapped one level too deep, and the likeliest shape a second Host
+     * gets wrong — passed the boot check and then died at the first user
+     * gesture with `host.send is not a function`, which is the exact failure
+     * this check exists to move to boot. The engine's half already required a
+     * function; the merged `assertHost` keeps that, and this holds it for the
+     * deck's list too. Widening it again for a genuinely namespace-shaped duty
+     * (S4's `storage`) turns this red, which is the point: it should be a
+     * deliberate change with its own assertion, not a side effect.
+     */
+    const wrongShapes = [
+      ['a lost export, which reads as a string rather than as absence', { send: 'sendMessage', onMessage() {} }],
+      ['a namespace object where a callable was meant', { send: {}, onMessage() {} }],
+      ['an array', { send: [], onMessage() {} }],
+    ];
+    const waved = wrongShapes.filter(([, h]) => threw(h) === null).map(([why]) => why);
+    ok('assertHost-refuses-a-duty-that-is-present-but-NOT-CALLABLE, in every shape a wrong one arrives in',
+      wrongShapes.length === 3 && waved.length === 0,
+      waved.length ? `ACCEPTED: ${waved.join('; ')}` : `refused all ${wrongShapes.length}`);
+
+    /**
+     * "An assertion must FAIL when it cannot look" (AGENTS.md). A boot check
+     * that excused itself when there was no host at all would report the seam
+     * intact on precisely the run where nothing was wired.
+     *
+     * IT IS NOT ENOUGH THAT SOMETHING THREW, which is all this could see before
+     * the merge — and review proved it by deleting the absent-host guard and
+     * watching the group stay green. Without the guard `assertHost(null, …)`
+     * still throws, as `Cannot read properties of null (reading 'send')`: no
+     * seam named, no duty named, no file to look in. That sentence is the whole
+     * reason the check is at boot rather than at first call, so the assertion
+     * reads the sentence rather than the fact of a throw.
+     */
+    const namesTheSeam = (h) => {
+      const e = threw(h);
+      return e !== null && /DeckHost/.test(e.message) && /\bsend\b/.test(e.message) && /\bonMessage\b/.test(e.message);
+    };
+    const noHost = threw(undefined);
+    ok('assertHost-with-no-Host-AT-ALL-throws rather than passing vacuously, and the error still names the seam and both duties',
+      namesTheSeam(undefined) && namesTheSeam(null),
+      noHost === null ? 'assertHost(undefined) returned without throwing' : noHost.message);
+  }
+
+  // ------------------------------------------------------- the outgoing wire
+  /**
+   * THE LATE-BINDING RULE, ASSERTED WITHOUT A BROWSER — `shared/host.js` rule 2.
+   *
+   * `tools/embed-smoke.mjs` observes the deck's whole outgoing wire by replacing
+   * the PROPERTY `chrome.runtime.sendMessage` after the deck has booted. A Host
+   * that captured the function at import time — `bind`, or a module-scope
+   * `const send = chrome.runtime.sendMessage` — leaves that recorder empty, and
+   * `[].every()` and `![].some()` are both true, so the transpose-ceiling and
+   * speed/ad-gate assertions report GREEN while inspecting nothing. That is a
+   * failure this repo has already paid for once, and CI cannot see the browser
+   * gate. So it is re-asserted here, against the same shipped module, by doing
+   * the same thing the smoke gate does: patch the property, and count.
+   */
+  {
+    const before = [], after = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: (m) => { before.push(m); return Promise.resolve(); },
+        onMessage: { addListener() {} },
+      },
+    };
+    deckHost.send({ v: 1, to: 'off', from: 'ui', type: 'STATUS' });
+    // exactly what tools/embed-smoke.mjs does, after boot, to the property
+    chrome.runtime.sendMessage = (m) => { after.push(m); return Promise.resolve(); };
+    deckHost.send({ v: 1, to: 'off', from: 'ui', type: 'PITCH', deck: 'A', semitones: 2 });
+
+    ok('send-resolves-the-transport-at-CALL-time: a property swapped after boot receives the next message',
+      before.length === 1 && after.length === 1 && after[0].type === 'PITCH',
+      `${before.length} before the swap, ${after.length} after — a bound transport gives 2 and 0`);
+
+    /**
+     * THE ENVELOPE IS THE UNIT'S — `shared/host.js` rule 1. The host may not add
+     * a field, rename one, or drop one: `tools/embed-smoke.mjs` injects a raw
+     * `{v:1,to:'ui',from:'off',type:'LIVE_STATE',…}` from the service worker on
+     * the strength of that, and a re-wrapping host breaks it with no symptom,
+     * because a `LIVE_STATE` that never arrives leaves the last one on screen.
+     */
+    // `|| null` and not `|| {}`: an unrecorded message is this assertion's own
+    // failure, not an excuse from it, and a bare `after[0]` would throw and take
+    // the rest of the group with it instead of going red on its own line.
+    const got = after[0] || null;
+    ok('send-carries-the-envelope-VERBATIM: no field added, renamed or dropped',
+      got !== null && Object.keys(got).sort().join(',') === 'deck,from,semitones,to,type,v'
+      && got.v === 1 && got.to === 'off' && got.from === 'ui' && got.deck === 'A' && got.semitones === 2,
+      got ? Object.keys(got).sort().join(',') : 'nothing reached the transport at all');
+
+    ok('send-returns-nothing, so no call site can start awaiting delivery',
+      deckHost.send({ v: 1, to: 'sw', from: 'ui', type: 'SW_STATUS' }) === undefined);
+  }
+
+  /**
+   * DELIVERY FAILURE IS THE HOST'S TO SWALLOW — `shared/host.js` rule 3. There
+   * is very often no listener on this bus, and the deck sends on a 10 Hz
+   * heartbeat; one unhandled rejection per message is a console nobody can read.
+   */
+  {
+    let unhandled = 0;
+    const count = () => { unhandled++; };
+    process.on('unhandledRejection', count);
+
+    // INSTRUMENT CHECK. `unhandled === 0` below is worth nothing unless this
+    // counter can move at all — an unwired handler and a swallowed rejection
+    // look identical from the assertion's side.
+    Promise.reject(new Error('control: this one is deliberately not caught'));
+    await new Promise((r) => setTimeout(r, 20));
+    ok('INSTRUMENT CHECK: an uncaught rejection in this harness IS counted',
+      unhandled === 1, `${unhandled} counted`);
+
+    unhandled = 0;
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: () => Promise.reject(new Error('Could not establish connection. Receiving end does not exist.')),
+        onMessage: { addListener() {} },
+      },
+    };
+    deckHost.send({ v: 1, to: 'off', from: 'ui', type: 'STATUS' });
+    await new Promise((r) => setTimeout(r, 20));
+    process.off('unhandledRejection', count);
+    ok('send-swallows-a-delivery-failure: a message nobody is listening for is not an error',
+      unhandled === 0, `${unhandled} unhandled rejections from one undeliverable message`);
+  }
+
+  // ------------------------------------------------------- the incoming wire
+  /**
+   * THE ADDRESS FILTER AND THE RESPONSE CHANNEL ARE THE HOST'S — rule 4. Both
+   * are facts about the transport: `chrome.runtime.sendMessage` is a BROADCAST,
+   * so every context hears every message, and MV3 reads a truthy return from a
+   * listener as "I will call `sendResponse` later" and holds the channel open
+   * for it. Neither belongs in a deck that has to run somewhere else too.
+   */
+  {
+    const listeners = [];
+    globalThis.chrome = {
+      runtime: {
+        sendMessage: () => Promise.resolve(),
+        onMessage: { addListener: (f) => listeners.push(f) },
+      },
+    };
+    const seen = [];
+    deckHost.onMessage((m) => { seen.push(m); return true; });
+
+    // INSTRUMENT CHECK: everything below reads `listeners[0]`, so an onMessage
+    // that registered nothing would leave every one of them inspecting a stub
+    // of this file's own making.
+    ok('INSTRUMENT CHECK: onMessage registered exactly one listener on the bus',
+      listeners.length === 1, `${listeners.length} registered`);
+
+    const mine = { v: 1, to: 'ui', from: 'off', type: 'LIVE_STATE', status: 'running', latencySec: 1.5 };
+    const rets = [
+      listeners[0]({ v: 1, to: 'sw', from: 'ui', type: 'SW_STATUS' }),
+      listeners[0]({ v: 1, to: 'off', from: 'ui', type: 'STATUS' }),
+      listeners[0]({ v: 1, to: 'tab', from: 'sw', type: 'STEM_SPLITTER_LIVE_EMBED' }),
+      listeners[0](null),
+      listeners[0](mine),
+    ];
+
+    ok('onMessage-delivers-only-what-is-addressed-here: 1 of 5 on a broadcast bus',
+      seen.length === 1 && seen[0].type === 'LIVE_STATE',
+      `${seen.length} delivered of 5 (to: sw, off, tab, null, ui)`);
+
+    ok('onMessage-hands-the-deck-the-SAME-message, envelope and all',
+      seen.length === 1 && seen[0] === mine && seen[0].v === 1 && seen[0].from === 'off'
+      && seen[0].latencySec === 1.5);
+
+    /**
+     * The handler above returns `true` on purpose: the control has to be able to
+     * lose. If the host forwarded what the deck returned, this would read `true`
+     * for the one message it delivered, and Chrome would hold a response channel
+     * open for every `LIVE_STATE` at 10 Hz.
+     */
+    ok('onMessage-never-holds-the-response-channel-open, not even for a handler that returns true',
+      rets.length === 5 && rets.every((r) => r === false),
+      rets.map((r) => String(r)).join(' '));
+  }
+
+  delete globalThis.chrome;
 }
 
 // ===========================================================================
