@@ -35,13 +35,35 @@
  *   rejection per 10 Hz heartbeat floods the console. MUST return undefined
  *   rather than a promise — twenty-two call sites end a `case` with
  *   `return send({...})` inside an `async` function, and a returned promise
- *   would be awaited there.
+ *   would be awaited there. MUST be usable at module-evaluation time, for the
+ *   same reason `assetUrl` must be synchronous: the engine sends its boot
+ *   `HELLO` from module scope, so a Host that needs a handshake before its
+ *   transmit path opens has to QUEUE rather than drop. Nothing downstream
+ *   retries and no gate would notice the loss.
+ *   IT IS A FAN-OUT, NOT A POINT-TO-POINT LINK — and something already relies
+ *   on that. This Host is `chrome.runtime.sendMessage`, a broadcast, and the
+ *   deck is not the only listener on `to: 'ui'`: `ui/welcome.js:92` paints the
+ *   model-download progress off the same `STATE` messages. A second Host that
+ *   delivers only to the deck loses the setup page's progress bar, silently.
  *
  * @property {(fn: (msg: object) => void) => void} onMessage
  *   Register the engine's inbox. The Host owns the "is this addressed to the
  *   engine" routing guard, and hands `fn` the RAW envelope — normalising,
  *   re-wrapping or filtering it breaks receivers quietly. `fn` returns nothing
  *   and is never awaited.
+ *   WHAT THE HOST MUST ORIGINATE — the undeclared half of this seam, and the
+ *   larger half of what a second Host has to supply. Three of the engine's
+ *   messages come from the Host itself rather than from the deck:
+ *   `CAPTURE_START { streamId, source: { tabId, title, url }, deck? }`,
+ *   `CAPTURE_STOP { deck? }` and `DECK_PREPARE { deck? }`. Two of those field
+ *   names are still Chrome's. The capture PARAMETER is `sourceToken` and
+ *   opaque, but the WIRE field is still `streamId`, and `source.tabId` is a tab
+ *   id under a Host that need not have tabs — this engine's own dev paths
+ *   already write `tabId: null` to satisfy a shape nothing reads. Nothing
+ *   breaks, because both values are opaque to the unit; the names are wrong
+ *   rather than the behaviour. Renaming them means editing the sender, which is
+ *   host-side (`sw/service-worker.js:249`) and outside this seam's files, so
+ *   S11 owns it as part of freezing Host interface v1.
  *
  * @property {(sourceToken: unknown) => Promise<MediaStream>} captureStream
  *   Open the audio of the Source that `sourceToken` names. The token is OPAQUE
@@ -72,7 +94,7 @@
  * not merely which identifier came back undefined.
  */
 export const ENGINE_HOST_DUTIES = Object.freeze({
-  send: 'deliver a message from the engine to the deck',
+  send: 'deliver a message from the engine to the deck, and to anything else listening',
   onMessage: 'hand the engine every message addressed to it',
   captureStream: 'open the audio of the Source a token names, and hand the engine the stream',
   assetUrl: 'resolve a unit-relative asset path the audio graph can load',

@@ -1,6 +1,13 @@
 /**
  * THE EXTENSION'S EngineHost — the Chrome half of the engine, and the only file
- * under `offscreen/` that is allowed to say `chrome.`.
+ * under `offscreen/` that `engine.js` allows to say `chrome.`.
+ *
+ * NOT YET the only one in the directory: `deck.js:139`, `deck.js:225`,
+ * `cacheddeck.js:222`, `live.js:593` and `master.js:64` still call
+ * `chrome.runtime.getURL` directly, bypassing the seam. S2 (#4) threads
+ * `assetUrl` through those five; until it lands, a second Host that implements
+ * these five duties and stops there is blindsided by four sibling files
+ * reaching for Chrome on their own.
  *
  * `engine.js` is the orchestration and knows nothing about the browser it is
  * in; this module is what makes it run inside a Chrome extension's offscreen

@@ -4,19 +4,27 @@
  * stem cache and the message switch that drives all of it.
  *
  * IT IS HOST-AGNOSTIC, and that is the property to preserve when editing it.
- * Everything platform-bound lives behind the five duties of `EngineHost`
- * (`../shared/host.js`), supplied here by `./host.js` — the Chrome extension's
- * implementation, and the only file under `offscreen/` that says `chrome.`:
+ * Everything platform-bound THIS file needs lives behind the five duties of
+ * `EngineHost` (`../shared/host.js`), supplied here by `./host.js` — the Chrome
+ * extension's implementation, and the only `chrome.`-speaking module this file
+ * reaches for:
  *
  *   send / onMessage    the extension message bus
  *   captureStream       getUserMedia with the tabCapture constraints
  *   assetUrl            chrome.runtime.getURL, for the worklet modules
  *   onTeardown          pagehide — a document-lifetime event, not an engine one
  *
- * Nothing else here is Chrome-specific: SharedArrayBuffer, AudioContext, OPFS
- * and `navigator.mediaDevices.enumerateDevices` are plain web platform. So a
- * second Host supplies those five and this file runs unchanged (ADR 0001
- * decision 5).
+ * (`./host.js` is not yet the only file under `offscreen/` that says `chrome.`:
+ * deck.js, cacheddeck.js, live.js and master.js still call
+ * `chrome.runtime.getURL` themselves. S2 (#4) threads `assetUrl` through them.)
+ *
+ * Nothing else here is Chrome-specific, and the audit trail is the whole list
+ * rather than a sample: Web Audio (`AudioContext`, `AudioWorkletNode`),
+ * `SharedArrayBuffer`, OPFS (`navigator.storage.getDirectory`),
+ * `navigator.mediaDevices.enumerateDevices`, `self.crossOriginIsolated`,
+ * `crypto.randomUUID` and `location.href`. That is every platform global this
+ * file touches — plain web platform, all of it — so a second Host supplies the
+ * five duties and this file runs unchanged (ADR 0001 decision 5).
  *
  * There is NO export job — the header said there was for a long time. `state.job`
  * survives as a shape: only `status`, `error` and `stage` are ever written (by
@@ -1637,6 +1645,12 @@ host.onTeardown(() => {
   }
 });
 
+// ponytail: this boot line names the Chrome offscreen document, in a file whose
+// header says it is host-agnostic. It is a RUNTIME STRING, so S11's prose pass
+// will not sweep it up, and a second Host would announce itself as a document it
+// does not have. Left alone here on purpose: it sits inside the load-bearing
+// boot-order triple below, and rewording it buys no gate. Upgrade path: S9 is
+// already enumerating host-coupled residue — rename it there, or in S11.
 log(`offscreen up · SAB ${SAB_OK} · crossOriginIsolated ${self.crossOriginIsolated}`);
 decks.A.ensureWorker();
 send({ type: 'HELLO' });
