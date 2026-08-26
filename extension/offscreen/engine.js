@@ -14,9 +14,11 @@
  *   assetUrl            chrome.runtime.getURL, for the worklet modules
  *   onTeardown          pagehide — a document-lifetime event, not an engine one
  *
- * (`./host.js` is not yet the only file under `offscreen/` that says `chrome.`:
- * deck.js, cacheddeck.js, live.js and master.js still call
- * `chrome.runtime.getURL` themselves. S2 (#4) threads `assetUrl` through them.)
+ * `./host.js` is the ONLY file under `offscreen/` that says `chrome.` at all:
+ * `deck.js`, `cacheddeck.js`, `live.js` and `master.js` reach their worklet
+ * modules and the ORT runtime through `assetUrl`, handed down from here — on
+ * `shared` for the two kinds of deck, and as a constructor argument to
+ * `MasterBus`, which is built before there is a context to await on.
  *
  * Nothing else here is Chrome-specific, and the audit trail is the whole list
  * rather than a sample: Web Audio (`AudioContext`, `AudioWorkletNode`),
@@ -235,7 +237,14 @@ async function loadOnce() {
 
 // ------------------------------------------------------------- shared context
 let ctx = null;
-const master = new MasterBus(null);
+/**
+ * NULL CONTEXT, REAL RESOLVER. There is no AudioContext at module evaluation and
+ * creating one here would start hardware nobody asked for, so `ctx` arrives at
+ * `ensureContext()` below. `assetUrl` is not in that position — the Host is
+ * already imported and its resolver is synchronous by contract — so the bus
+ * takes it now rather than being patched twice. See MasterBus's constructor.
+ */
+const master = new MasterBus(null, host.assetUrl);
 const gpu = new GpuScheduler({ priority: 'A', armed: true });
 
 async function ensureContext() {
@@ -264,6 +273,15 @@ const shared = {
   gpu,
   send,
   log,
+  /**
+   * THE HOST'S ASSET RESOLVER, HANDED DOWN. Every worklet module and the ORT
+   * runtime are named unit-relative from here on: `Deck` passes it to
+   * `LivePipeline`, `CachedDeck` takes it off this bundle, and none of the four
+   * files knows what a `chrome-extension://` URL is. Synchronous by contract
+   * (`../shared/host.js`) because two of its callers run before there is an
+   * AudioContext to await on.
+   */
+  assetUrl: host.assetUrl,
   /**
    * The steady-state cost of one chunk on `id`, in ms — the number a deck arms
    * its playhead against.

@@ -45,9 +45,38 @@ export class Deck {
    * @param {import('../engine/scheduler.js').GpuScheduler} shared.gpu
    * @param {(msg:object) => void} shared.send    already deck-tagged by the caller
    * @param {(line:string) => void} shared.log
+   * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
+   *        resolver (../shared/host.js). Synchronous, unit-relative, no leading
+   *        slash — the way the unit names an asset the HOST serves. Not every
+   *        file the unit loads is one of those: `ensureWorker()` reaches the
+   *        inference worker by import, and the note there is why that one must
+   *        NOT go through here.
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
+    /**
+     * THE BUNDLE HAS TO CARRY THE RESOLVER, and `assertHost()` cannot say so.
+     *
+     * `assertHost` checks the HOST — that `host.assetUrl` is a function — and it
+     * runs at `engine.js` module scope before this constructor. What it cannot
+     * see is the hand-off: `engine.js` copies the duty onto the `shared` bundle
+     * (`assetUrl: host.assetUrl`), and a bundle that lost that one key leaves a
+     * Host that passes every check. Review measured what happens then, by
+     * deleting exactly that line: `--quick` GREEN and `embed-smoke` 122/122,
+     * while the shipped extension dies at `decks.A.ensureWorker()` — which
+     * `engine.js` calls at module scope — with `this.s.assetUrl is not a
+     * function`. No INIT, no HELLO, no engine, and nothing red anywhere.
+     *
+     * So the deck refuses the bundle instead, in the same breath and for the
+     * same reason `MasterBus` refuses a missing resolver: the alternative is a
+     * TypeError from inside `ensureWorker()`, three layers from the mistake.
+     */
+    if (!shared || typeof shared.assetUrl !== 'function') {
+      throw new TypeError(`Deck ${id}: the shared bundle from offscreen/engine.js is missing the Host's `
+        + 'assetUrl — the deck resolves the ORT runtime directory for the inference worker\'s INIT '
+        + 'and hands the same resolver to LivePipeline for the playback worklet '
+        + `(got ${shared == null ? String(shared) : typeof shared.assetUrl}).`);
+    }
     this.id = id;
     this.s = shared;
 
@@ -104,6 +133,7 @@ export class Deck {
       ensureModel: () => this.ensureSession(),
       send: (msg) => shared.send({ deck: id, ...msg }),
       log: (line) => shared.log(`[${id}] ${line}`),
+      assetUrl: shared.assetUrl,
       // What one chunk will cost THIS deck once the GPU is shared N ways. See
       // LivePipeline.armPlayback(): arming on chunk 0's luck leaves the second
       // deck permanently starved and 100 % unseparated.
@@ -114,6 +144,20 @@ export class Deck {
   // ------------------------------------------------------------------ worker
   ensureWorker() {
     if (this.worker) return this.worker;
+    /**
+     * THE WORKER URL IS RELATIVE ON PURPOSE, and it does not go through
+     * `assetUrl`. `import.meta.url` resolves against THIS module's own location,
+     * so the expression says "the sibling directory `workers/`" and nothing
+     * about where the unit is mounted — which is what makes it correct under a
+     * `chrome-extension://` origin and under a desktop Host alike.
+     *
+     * `assetUrl` exists for the files the unit does NOT reach by import: worklet
+     * modules, which `addModule()` fetches by URL, and the ORT runtime, which
+     * the worker resolves against its own directory. Routing this one through
+     * the Host as well would hand the Host authority over the unit's internal
+     * directory layout, and that layout is part of the unit's contract
+     * (ADR 0001 decision 3). Do not "fix" it to `assetUrl`.
+     */
     const w = new Worker(new URL('../workers/inference.worker.js', import.meta.url), { type: 'module' });
     // Review finding M1: any failure that does not arrive as {type:'ERROR'} — a
     // module load failure, an uncaught rejection, an OOM that kills the worker —
@@ -136,7 +180,10 @@ export class Deck {
       this.s.onWorkerState && this.s.onWorkerState(this);
     };
     w.onmessage = (e) => this.onWorker(e.data);
-    w.postMessage({ type: 'INIT', wasmDirUrl: chrome.runtime.getURL('vendor/ort/') });
+    // A DIRECTORY URL, trailing slash and all: ORT appends its own file names to
+    // it. R0 measured the file-URL form failing inside the runtime with
+    // "w is not a function", several layers from the mistake.
+    w.postMessage({ type: 'INIT', wasmDirUrl: this.s.assetUrl('vendor/ort/') });
     this.worker = w;
     return w;
   }
@@ -222,13 +269,22 @@ export class Deck {
        * Nothing in that chain ever names the missing file. So check the one file
        * that is not in git, before spawning anything, and say what to run.
        */
-      const ortUrl = chrome.runtime.getURL('vendor/ort/ort.all.bundle.min.mjs');
+      const ortUrl = this.s.assetUrl('vendor/ort/ort.all.bundle.min.mjs');
       const head = await fetch(ortUrl, { method: 'HEAD' }).catch(() => null);
       if (!head || !head.ok) {
+        /**
+         * NAME THE URL THAT FAILED, not just the file that is usually missing.
+         * Under this Host the two are the same sentence. Under a second Host
+         * they are not: a resolver that answers with something `fetch` refuses
+         * — `file://` is refused outright in Chromium, and a custom scheme
+         * needs `supportFetchAPI` — lands here for a file that is present, and
+         * "run fetch-vendor.sh" is then advice for the wrong problem. The URL
+         * is what tells the two apart, so it goes in the message.
+         */
         throw new Error(
-          'ONNX Runtime is missing from this build: extension/vendor/ort/ is not '
-          + 'in git. Run `bash tools/fetch-vendor.sh`, then reload the extension '
-          + 'at chrome://extensions.',
+          `ONNX Runtime is missing from this build: ${ortUrl} could not be read. `
+          + 'extension/vendor/ort/ is not in git — run `bash tools/fetch-vendor.sh` '
+          + 'and reload.',
         );
       }
       this.ensureWorker();

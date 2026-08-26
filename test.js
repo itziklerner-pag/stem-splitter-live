@@ -676,6 +676,10 @@ if (group('live')) {
           return { mix, stems, prepMs: 0, inferMs: 0, postMs: 0 };
         },
         ensureModel: async () => {}, send: (m) => sent.push(m), log: () => {},
+        // See the CachedDeck stub in the `cache` group below: the deps bundle
+        // `offscreen/deck.js` hands a LivePipeline now carries the Host's asset
+        // resolver too.
+        assetUrl: (relPath) => `stub://unit/${relPath}`,
         // Mode 3: the master bus is SHARED, so the deck borrows it. The stub
         // returns whatever `lp.probeBuf`/`lp.probe` were mocked with, which is
         // what the watchdog tests drive.
@@ -2473,6 +2477,13 @@ if (group('cache')) {
         ctx: () => ({ outputLatency: 0.048 }),
         master: () => ({ build: async () => ({ input: () => ({}) }) }),
         send: (m) => sent.push(m), log: () => {},
+        // The Host's asset resolver, which `ensureGraph()` uses to find the
+        // playback worklet. Stubbed rather than omitted: `ensureGraph` is
+        // replaced below, so leaving it out would let this stub drift out of
+        // step with the bundle `offscreen/engine.js` really hands over and
+        // nothing here would notice. The graph builder's real use of it is
+        // driven in the `host` group.
+        assetUrl: (relPath) => `stub://unit/${relPath}`,
       });
       d.ensureGraph = async () => {
         d.out = new StemRingWriter(new SharedArrayBuffer(stemRingByteLength(STEM_RING_FRAMES)), STEM_RING_FRAMES);
@@ -4883,6 +4894,43 @@ if (group('host')) {
             + 'audioWorklet.addModule() would be handed it verbatim'
           : url);
 
+    /**
+     * A DIRECTORY PATH COMES BACK AS A DIRECTORY URL — S2's obligation, held
+     * against the SHIPPED Host rather than through the graph.
+     *
+     * `offscreen/deck.js` hands `assetUrl('vendor/ort/')` to the inference
+     * worker's `INIT` and ONNX Runtime appends its own file names to it, so a
+     * resolver that tidies the trailing slash away produces a wasm path with no
+     * separator in it and ORT throws "w is not a function" several layers down
+     * (R0 measured that one). Every other claim about this rule in the tree
+     * drives a `stub://unit/` resolver written here, so all of them hold
+     * `deck.js` and none of them holds a HOST: review changed this file's
+     * `assetUrl` to `chrome.runtime.getURL(relPath.replace(/\/+$/, ''))` —
+     * exactly what `path.join()` or `url.pathToFileURL()` does in a Node or
+     * Electron Host — and the whole green tree accepted it, `node test.js`
+     * 508/0 and embed-smoke 122/122.
+     *
+     * Called UNBOUND through `probe`, like every duty in this block, which is
+     * the second half of the contract: `engine.js` hands `host.assetUrl` itself
+     * to `MasterBus` and to the decks rather than calling it through the
+     * namespace.
+     */
+    const dirCall = probe(engineHost.assetUrl, 'vendor/ort/');
+    const dirUrl = dirCall.v;
+    ok('...AND A PATH ENDING IN `/` COMES BACK AS A DIRECTORY URL, trailing slash intact  '
+      + '[entry point: extension/offscreen/host.js assetUrl(), reached from deck.js ensureWorker() as the '
+      + "worker's INIT wasmDirUrl]",
+      dirCall.ok && typeof dirUrl === 'string' && dirUrl.endsWith('/vendor/ort/'),
+      !dirCall.ok
+        ? `assetUrl('vendor/ort/') could not be called at all: ${dirCall.e}`
+        : typeof dirUrl !== 'string'
+          ? `assetUrl returned ${typeof dirUrl}`
+          : dirUrl.endsWith('/vendor/ort/')
+            ? dirUrl
+            : `assetUrl('vendor/ort/') returned ${JSON.stringify(dirUrl)} — ORT appends its own file names to this, `
+              + 'so without the separator the wasm path is nonsense and the runtime throws "w is not a function"',
+    );
+
     const tdFn = () => {};
     const tdCall = probe(engineHost.onTeardown, tdFn);
     ok("onTeardown() REGISTERS THE ENGINE'S OWN CALLBACK, unwrapped, so nothing can defer or await the last-gasp stop  "
@@ -5137,6 +5185,524 @@ if (group('host')) {
   }
 
   delete globalThis.chrome;
+
+  head('host — S2: the audio graph asks the Host for every asset URL it needs');
+  /**
+   * WHAT THIS COVERS, AND WHY IT IS NOT ALREADY COVERED BY THE BLOCK ABOVE.
+   *
+   * `assetUrl` was a declared duty before this slice and `offscreen/engine.js`
+   * called it — once, for the capture worklet. The unit's other five asset URLs
+   * did not go through the seam at all: the master meter worklet (`master.js`),
+   * the playback worklet twice over (`live.js` and `cacheddeck.js`, once per
+   * kind of deck), and the ORT runtime directory plus its presence probe
+   * (`deck.js`) each called `chrome.runtime.getURL` themselves. A second Host
+   * could therefore implement all five duties perfectly and still not load a
+   * single worklet — and neither `assertHost` nor the interface-drift pair above
+   * can see that, because both only ever look at `engine.js`.
+   *
+   * REACHABLE, NOT CONSTRUCTED — and the fact that it CAN be reachable is itself
+   * the result this slice is after. All four files now import and run under Node
+   * with no `chrome` global in existence, so every claim below drives the
+   * shipped graph builder and reads back what it asked the Host for. The same
+   * code before this slice threw `chrome is not defined` on the first line of
+   * each of the five sites.
+   *
+   * WHAT IS STUBBED IS THE PLATFORM, NEVER THE GRAPH. `addModule` records the
+   * URL it is handed and resolves; construction then dies at the first real Web
+   * Audio node, which Node does not have. That is deliberate rather than
+   * tolerated: the claim is about what the builder asked the Host for, and
+   * everything after `addModule` is the browser gate's job
+   * (`tools/embed-smoke.mjs`).
+   *
+   * THE RESOLVER IS A STUB WITH A SCHEME NOTHING ELSE USES (`stub://unit/`), so
+   * a URL that reached `addModule` by any other route — a surviving literal, a
+   * second copy of the path — cannot be mistaken for one that came from the Host.
+   */
+  {
+    const asked = [];
+    const assetUrl = (relPath) => { asked.push(relPath); return `stub://unit/${relPath}`; };
+    /** a fake AudioContext that can do exactly one thing: record an addModule */
+    const fakeCtx = () => {
+      const added = [];
+      return { added, sampleRate: SR, audioWorklet: { addModule: async (url) => { added.push(url); } } };
+    };
+    /** run a builder to the point where Node runs out of Web Audio, and keep the reason */
+    const drive = (p) => p.then(() => null, (e) => String((e && e.message) || e));
+
+    // ------------------------------------------------------------ master bus
+    const { MasterBus } = await import('./extension/offscreen/master.js');
+    let noResolver = null;
+    try { new MasterBus(null); } catch (e) { noResolver = String((e && e.message) || e); }
+    ok("THE MASTER BUS REFUSES TO BE CONSTRUCTED WITHOUT THE HOST'S RESOLVER  "
+      + '[entry point: extension/offscreen/master.js constructor — its one construction is '
+      + '`new MasterBus(null, host.assetUrl)` at engine.js module scope]',
+      noResolver != null && noResolver.includes('assetUrl'),
+      noResolver == null
+        ? 'new MasterBus(null) was ACCEPTED. A short HOST is not what this catches — assertHost() already refuses '
+          + 'one, a few lines earlier in engine.js. What is left is the WIRING: an engine.js that reverts to a late '
+          + 'setter or drops the argument, after which a bus with no resolver says nothing at boot and throws inside '
+          + '_build(), at the first arm, with a deck already half-wired'
+        : noResolver);
+
+    const busCtx = fakeCtx();
+    const bus = new MasterBus(null, assetUrl);
+    // exactly what engine.js does at ensureContext(): the context arrives late,
+    // the resolver did not.
+    bus.ctx = busCtx;
+    const busWhy = await drive(bus.build());
+    ok('THE MASTER METER WORKLET IS RESOLVED THROUGH THE HOST  '
+      + '[entry point: extension/offscreen/master.js _build(), the only addModule in the file]',
+      busCtx.added.length === 1 && busCtx.added[0] === 'stub://unit/offscreen/master-meter-processor.js',
+      busCtx.added.length === 0
+        ? `_build() never reached addModule, so this inspected nothing: ${busWhy}`
+        : busCtx.added.join(', '));
+
+    // ---------------------------------------------------------- the live deck
+    const { LivePipeline } = await import('./extension/offscreen/live.js');
+    const liveCtx = fakeCtx();
+    const lp = new LivePipeline({
+      deck: 'A', ctx: () => liveCtx, master: () => null, ring: () => null,
+      infer: async () => ({}), ensureModel: async () => {}, send: () => {}, log: () => {},
+      assetUrl,
+    });
+    const liveWhy = await drive(lp.build());
+    ok('THE LIVE DECK RESOLVES ITS PLAYBACK WORKLET THROUGH THE HOST  '
+      + '[entry point: extension/offscreen/live.js LivePipeline.build(), reached from start()]',
+      liveCtx.added.length === 1 && liveCtx.added[0] === 'stub://unit/offscreen/playback-processor.js',
+      liveCtx.added.length === 0
+        ? `build() never reached addModule, so this inspected nothing: ${liveWhy}`
+        : liveCtx.added.join(', '));
+
+    // -------------------------------------------------------- the cached deck
+    // A CONTEXT OF ITS OWN. The two kinds of deck register the same processor
+    // name, and whether one registration is allowed to stand in for the other is
+    // a separate claim with its own block below; here they must not share, or
+    // this assertion would pass on the live deck's work.
+    const cachedCtx = fakeCtx();
+    const cd = new CachedDeck('A', {
+      ctx: () => cachedCtx, master: () => null, send: () => {}, log: () => {}, assetUrl,
+    });
+    const cachedWhy = await drive(cd.ensureGraph());
+    ok('...AND SO DOES THE CACHED DECK, which registers the same worklet by a different path  '
+      + '[entry point: extension/offscreen/cacheddeck.js CachedDeck.ensureGraph(), reached from load()]',
+      cachedCtx.added.length === 1 && cachedCtx.added[0] === 'stub://unit/offscreen/playback-processor.js',
+      cachedCtx.added.length === 0
+        ? `ensureGraph() never reached addModule, so this inspected nothing: ${cachedWhy}`
+        : cachedCtx.added.join(', '));
+
+    // ------------------------------------------------------- the ORT runtime
+    /**
+     * THE INFERENCE WORKER'S TWO URLS, WHICH ARE NOT THE SAME KIND OF THING.
+     *
+     * `vendor/ort/` and the probe that names it are FILES ON DISK, so they go
+     * through the Host. The worker module itself is reached by
+     * `new URL(..., import.meta.url)` and must not — see the note in
+     * `ensureWorker()`. Both halves are asserted, because "thread everything
+     * through the Host" and "thread the RIGHT things through the Host" fail
+     * differently: the second is a Host handed authority over the unit's own
+     * directory layout, and it would go unnoticed under this Host, where the two
+     * answers happen to agree.
+     */
+    const { Deck } = await import('./extension/offscreen/deck.js');
+    const posts = [];
+    const spawned = [];
+    const fetched = [];
+    const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    let deckWhy = null;
+    try {
+      globalThis.Worker = class {
+        constructor(url, opts) { this.url = String(url); this.opts = opts; spawned.push(this); }
+        postMessage(m) { posts.push(m); }
+        terminate() {}
+      };
+      globalThis.fetch = (url, init) => {
+        fetched.push({ url: String(url), method: init && init.method });
+        return Promise.resolve({ ok: true });
+      };
+      const d = new Deck('A', {
+        ctx: () => null, master: () => null, gpu: null,
+        modelBytes: async () => new ArrayBuffer(8),
+        send: () => {}, log: () => {}, armRefMs: () => 0, assetUrl,
+      });
+      const session = d.ensureSession();
+      // LOAD_MODEL is posted after two awaits; nothing here may assume how many.
+      for (let i = 0; i < 200 && !d.sessionReady; i++) await new Promise((r) => setTimeout(r, 0));
+      if (d.sessionReady) d.onWorker({ type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 });
+      deckWhy = await drive(session);
+    } finally {
+      delete globalThis.Worker;
+      if (realFetch) Object.defineProperty(globalThis, 'fetch', realFetch);
+      else delete globalThis.fetch;
+    }
+
+    ok('THE ORT PRESENCE PROBE IS RESOLVED THROUGH THE HOST, and it is still a HEAD  '
+      + '[entry point: extension/offscreen/deck.js Deck.ensureSession(), reached from LIVE_START and DECK_PREPARE]',
+      fetched.length === 1 && fetched[0].url === 'stub://unit/vendor/ort/ort.all.bundle.min.mjs'
+      && fetched[0].method === 'HEAD',
+      fetched.length === 0
+        ? `ensureSession() never reached the probe, so this inspected nothing: ${deckWhy}`
+        : JSON.stringify(fetched));
+
+    const init = posts.find((m) => m && m.type === 'INIT');
+    ok('...and the worker is told where the ORT runtime lives as a DIRECTORY url from the Host  '
+      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker(), reached from ensureSession()]',
+      init != null && init.wasmDirUrl === 'stub://unit/vendor/ort/' && init.wasmDirUrl.endsWith('/'),
+      init == null
+        ? `no INIT was posted, so this inspected nothing: ${deckWhy}. Posted: ${posts.map((m) => m && m.type).join(', ')}`
+        : String(init.wasmDirUrl));
+
+    /**
+     * THE ONE URL THE HOST DOES NOT GET TO RESOLVE, asserted from both sides: the
+     * worker was spawned from a path ending in the unit's own layout, and the
+     * Host was never asked about it. Asking only the first would be satisfied by
+     * a build that resolved it through the Host to the same place, which is
+     * exactly what this Host would do.
+     */
+    const workerUrl = spawned.length === 1 ? spawned[0].url : null;
+    ok("THE INFERENCE WORKER'S OWN URL STAYS RELATIVE — the unit's directory layout is the unit's contract, not the Host's  "
+      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker()]',
+      workerUrl != null && workerUrl.endsWith('/extension/workers/inference.worker.js')
+      && !asked.some((p) => /worker/i.test(p)),
+      spawned.length !== 1
+        ? `expected exactly one Worker to be spawned, got ${spawned.length}: ${deckWhy}`
+        : asked.some((p) => /worker/i.test(p))
+          ? `the Host was asked to resolve ${JSON.stringify(asked.filter((p) => /worker/i.test(p)))} — `
+            + 'a Host that answers that owns where the unit keeps its own files'
+          : workerUrl);
+
+    // ------------------------------------------- and nothing reaches past it
+    /**
+     * THE NEGATIVE HALF OF THE SLICE, read out of the tree rather than from a
+     * grep in a PR body: after this slice `offscreen/host.js` is the only file
+     * in the directory that says `chrome.` at all. Comments are stripped first —
+     * three prose mentions survive on purpose (`live.js` twice, `cacheddeck.js`
+     * once) and a claim a comment can satisfy is not a claim.
+     *
+     * FAILS IF IT CANNOT LOOK, in both directions: an empty or unrecognisable
+     * file list is a red, and so is a strip that has eaten the calls it is
+     * supposed to find — which the control below is the only thing that could
+     * notice.
+     */
+    const { readdirSync } = await import('node:fs');
+    const offDir = new URL('./extension/offscreen/', import.meta.url);
+    const offFiles = readdirSync(offDir).filter((f) => f.endsWith('.js')).sort();
+    const readOff = (f) => strip(readFileSync(new URL(f, offDir), 'utf8'));
+    /**
+     * `chrome[.:]` AND NOT `chrome\.`, because a URL is a coupling too. Review
+     * found the last host-coupled string in the four files this checkbox covers
+     * sitting just outside a `chrome\.`-shaped grep: `deck.js`'s ORT-missing
+     * message told the user to "reload the extension at chrome://extensions",
+     * which is wrong under every Host but this one — and the scan called the
+     * file clean. The message now names the URL that failed instead, and the
+     * scan can see the difference.
+     */
+    const offenders = offFiles.filter((f) => f !== 'host.js' && /\bchrome[.:]/.test(readOff(f)));
+    ok('THE HOST IS THE ONLY FILE UNDER offscreen/ THAT NAMES chrome AT ALL — neither `chrome.` nor `chrome:`  '
+      + '[entry point: the shipped tree, comments stripped]',
+      offFiles.length >= 8 && offFiles.includes('host.js') && offenders.length === 0,
+      offFiles.length < 8 || !offFiles.includes('host.js')
+        ? `the scan found ${offFiles.length} .js files under offscreen/ and ${offFiles.includes('host.js') ? 'did' : 'did NOT'} `
+          + 'find host.js — it is not looking at the directory it thinks it is'
+        : offenders.length
+          ? `Chrome is still named in ${offenders.join(', ')} — as a call, a second Host cannot load what that file `
+            + 'loads; as a `chrome:` URL, it is advice that is wrong under every Host but this one'
+          : `${offFiles.length - 1} files clean, host.js excepted`);
+
+    ok('INSTRUMENT CHECK: the scan can still SEE a chrome. call — offscreen/host.js, the one file that must have them  '
+      + '[control: it has to be able to lose]',
+      offFiles.includes('host.js') && /\bchrome[.:]/.test(readOff('host.js')),
+      offFiles.includes('host.js')
+        ? `host.js: ${(readOff('host.js').match(/\bchrome[.:]\w*/g) || []).join(', ') || 'NOTHING — the strip ate them, and the claim above is vacuous'}`
+        : 'offscreen/host.js was not found at all');
+
+    /**
+     * AND THEY TAKE THE RESOLVER RATHER THAN IMPORTING THE HOST. Four files that
+     * each did `import { assetUrl } from './host.js'` would pass the scan above
+     * and would work perfectly under this Host — while putting four more imports
+     * of the platform into the half of the unit that is meant to be
+     * host-agnostic, which is the property ADR 0001 decision 5 is buying.
+     */
+    /**
+     * THE SCANNED SET IS THE DIRECTORY, not a list of four names, and both are
+     * review findings rather than taste. A four-name list called itself "the
+     * platform enters at one door" while `worklets.js` — the file this very
+     * slice introduced — sat outside it: review put
+     * `import { assetUrl } from './host.js'` into it and this assertion stayed
+     * green. Reading the directory means the next file added under `offscreen/`
+     * is held to the rule on the day it is added. `engine.js` is excepted
+     * because it IS the door, and `host.js` because it is the platform.
+     *
+     * AND BOTH QUOTE STYLES, PLUS THE DYNAMIC FORM. The old pattern was
+     * `from 'host.js'` with single quotes; there is no linter in this repo to
+     * pin that style, and review walked past it twice — once with double quotes,
+     * once with `await import('./host.js')`, both green. Matching the quoted
+     * SPECIFIER covers every spelling of both.
+     *
+     * FAILS IF IT CANNOT LOOK: the five files the slice actually threads must
+     * all be inside the scanned set, or the scan is not looking at the tree it
+     * names.
+     */
+    const GRAPH = offFiles.filter((f) => f !== 'host.js' && f !== 'engine.js');
+    const THREADED = ['deck.js', 'live.js', 'cacheddeck.js', 'master.js', 'worklets.js'];
+    const importers = GRAPH.filter((f) => /['"]\.\/host\.js['"]/.test(readOff(f)));
+    ok('...and the audio graph TAKES the resolver rather than importing the Host: the platform enters at one door  '
+      + '[entry point: every .js under extension/offscreen/ except engine.js, the door, and host.js, the platform]',
+      THREADED.every((f) => GRAPH.includes(f)) && importers.length === 0,
+      !THREADED.every((f) => GRAPH.includes(f))
+        ? `cannot look: ${THREADED.filter((f) => !GRAPH.includes(f)).join(', ')} is not in the scanned set`
+        : importers.length
+          ? `${importers.join(', ')} import ./host.js directly`
+          : `${GRAPH.length} files scanned, resolver passed in from engine.js`);
+
+    // ------------------------------------------ and where the thread STARTS
+    /**
+     * THE ORIGIN OF THE THREAD — the one claim the ten above cannot make, and
+     * the one the slice is actually named after.
+     *
+     * Each of those ten hands the builder a `stub://unit/` resolver written in
+     * this file. Together they prove the four files USE a resolver; not one of
+     * them proves that `offscreen/engine.js` SUPPLIES one. Review measured the
+     * hole exactly: delete the single line `assetUrl: host.assetUrl` from the
+     * `shared` bundle and `--quick` stays GREEN at 18 of 20 steps and
+     * `embed-smoke` stays at 122/122, while the shipped extension dies at
+     * module evaluation — `engine.js` calls `decks.A.ensureWorker()` at module
+     * scope and it throws `this.s.assetUrl is not a function`. No INIT, no
+     * HELLO, no engine, and nothing red anywhere. That is the exact shape
+     * AGENTS.md names as the source of five defects here: a value right at four
+     * call sites and absent at the one that feeds them.
+     *
+     * TWO GATES NOW, BECAUSE CI IS ONLY ONE OF THEM. `Deck` and `CachedDeck`
+     * refuse a bundle short the resolver (below), which turns that mutation
+     * into a module-scope throw — and a module-scope throw takes `embed-smoke`
+     * to `5/37 FAILED`. This pair is what makes `--quick`, the only gate
+     * GitHub Actions runs, see it too.
+     *
+     * READ AS TEXT for the reason the block at the top of this group gives:
+     * `engine.js` cannot be imported from Node at all. Comments are stripped —
+     * which matters here more than usual, because the doc comment sitting
+     * directly above the line quotes the seam in prose. The `strip` control a
+     * few assertions above is what keeps that stripping honest.
+     */
+    const sharedAt = engineSrc.indexOf('const shared = {');
+    const sharedLit = sharedAt < 0 ? null : engineSrc.slice(sharedAt).split(/\n\};/)[0];
+    /**
+     * EVERY construction is parsed, and the parsed count is compared with the
+     * raw one, so a `new Deck(` this pattern cannot read is a red rather than a
+     * silent pass — there are three today (deck A at module scope, deck B in
+     * `deck()`, and the cached deck in `cachedDeck()`) and a fourth must not
+     * arrive unnoticed.
+     */
+    const constructions = (engineSrc.match(/new (?:Deck|CachedDeck)\(/g) || []).length;
+    const takers = [...engineSrc.matchAll(/new (?:Deck|CachedDeck)\(\s*[^,()]+,\s*([A-Za-z_$][\w$]*)\s*\)/g)];
+    const notShared = takers.filter((m) => m[1] !== 'shared').map((m) => m[0]);
+    const onBundle = sharedLit != null && /(^|\n)\s*assetUrl:\s*host\.assetUrl\s*,/.test(sharedLit);
+    ok("THE ENGINE PUTS THE HOST'S RESOLVER ON THE BUNDLE, and the bundle is what every deck is built from  "
+      + '[entry point: extension/offscreen/engine.js `const shared = {`, comments stripped]',
+      sharedLit != null && onBundle
+      && constructions >= 2 && takers.length === constructions && notShared.length === 0,
+      sharedLit == null
+        ? 'cannot look: no `const shared = {` in extension/offscreen/engine.js, so there is no bundle to inspect'
+        : !onBundle
+          ? 'the `shared` bundle does NOT carry `assetUrl: host.assetUrl`. Every deck then reads undefined: '
+            + 'engine.js calls decks.A.ensureWorker() at module scope, so the engine does not boot at all — no INIT '
+            + 'to the inference worker and no HELLO to the deck'
+          : takers.length !== constructions
+            ? `cannot look: ${constructions} deck constructions in engine.js but only ${takers.length} could be read, `
+              + 'so one of them is built from something this claim never inspected'
+            : notShared.length
+              ? `built from something other than the bundle: ${notShared.join(', ')}`
+              : `assetUrl: host.assetUrl on the bundle, and all ${constructions} deck constructions take it`);
+
+    /**
+     * The whole argument list is read to the statement's own `);` and the LAST
+     * argument taken from it, rather than a shape-matched pair: a resolver
+     * wrapped, replaced by a literal or dropped entirely all have to name the
+     * defect, and a pattern that only matches two bare identifiers reports
+     * "cannot look" for the two most likely of the three.
+     */
+    const busCall = engineSrc.match(/new MasterBus\(([\s\S]*?)\);/);
+    const busSecond = busCall == null ? null : busCall[1].slice(busCall[1].indexOf(',') + 1).trim();
+    ok('...AND HANDS IT TO THE MASTER BUS TOO, which is constructed before there is a context to await on  '
+      + '[entry point: extension/offscreen/engine.js module scope, comments stripped]',
+      busCall != null && busSecond === 'host.assetUrl',
+      busCall == null
+        ? 'cannot look: no `new MasterBus(…);` statement in extension/offscreen/engine.js'
+        : busSecond === 'host.assetUrl'
+          ? busCall[0]
+          : `the bus is handed ${JSON.stringify(busSecond)} rather than host.assetUrl — the Host is no longer what `
+            + 'decides where offscreen/master-meter-processor.js lives');
+
+    /**
+     * AND THE DECKS REFUSE A BUNDLE THAT LOST IT, which is what makes the two
+     * source reads above a belt rather than the only strap.
+     *
+     * `assertHost()` cannot cover this: it checks the HOST — that
+     * `host.assetUrl` is a function — and it runs before any of this. The
+     * hand-off from the Host onto `shared` is a separate step with a separate
+     * way to go wrong, and it had no alarm at all. `MasterBus` refuses the same
+     * way and has since this slice's first commit; the asymmetry review found
+     * was that the DECK side did not, so the mutation stayed silent in the
+     * browser while `new MasterBus(null)` would have aborted engine.js on the
+     * spot.
+     */
+    const shortLive = threw(() => new Deck('A', { ctx: () => null, master: () => null, send: () => {}, log: () => {} }));
+    ok("THE LIVE DECK REFUSES A SHARED BUNDLE THAT IS SHORT THE HOST'S RESOLVER  "
+      + "[entry point: extension/offscreen/deck.js constructor — `new Deck('A', shared)` runs at engine.js module scope]",
+      shortLive != null && shortLive.includes('assetUrl'),
+      shortLive == null
+        ? 'new Deck(id, {…no assetUrl}) was ACCEPTED. The deck then reads undefined and throws `this.s.assetUrl is not '
+          + 'a function` inside ensureWorker(), three layers from the mistake — and because that construction is at '
+          + 'engine.js module scope, the browser gate is the only thing that could have seen it'
+        : shortLive);
+
+    const shortCached = threw(() => new CachedDeck('A', { ctx: () => null, master: () => null, send: () => {}, log: () => {} }));
+    ok('...AND SO DOES THE CACHED DECK, which is built lazily and would otherwise find out at the first cache hit  '
+      + '[entry point: extension/offscreen/cacheddeck.js constructor — `new CachedDeck(k, shared)` in engine.js cachedDeck()]',
+      shortCached != null && shortCached.includes('assetUrl'),
+      shortCached == null
+        ? 'new CachedDeck(id, {…no assetUrl}) was ACCEPTED — ensureGraph() would then hand undefined() to addModule at '
+          + 'the first cached play'
+        : shortCached);
+  }
+
+  head('host — one playback worklet per AudioContext, whichever deck gets there first');
+  /**
+   * THE DEFECT THIS CLOSES. Mode 3 puts both decks on ONE AudioContext and both
+   * kinds of deck play through the same `stem-playback` processor, so the second
+   * registration on a context rejects with "A processor named 'stem-playback' is
+   * already registered". That fact was tracked in TWO module-scoped WeakSets
+   * that did not share state — one in `live.js`, one in `cacheddeck.js` — and
+   * only one of the two files swallowed the rejection. So whether the collision
+   * was survivable depended on WHICH DECK GOT THERE FIRST: live-then-cached was
+   * fine, and cached-then-live rejected out of `LivePipeline.build()` and
+   * surfaced as `START_FAILED`. A live deck that refuses to start because a
+   * cached deck is already playing is the flagship dual-deck gesture failing.
+   *
+   * S2 is the slice that edits both of those lines, so it is the slice that
+   * either fixes this or entrenches it: the shared set now lives in
+   * `offscreen/worklets.js` and both decks go through it.
+   *
+   * REACHABLE, NOT CONSTRUCTED: the two direction assertions drive the SHIPPED
+   * `LivePipeline.build()` and `CachedDeck.ensureGraph()` against ONE fake
+   * context, in both orders. Nothing here reimplements the decision.
+   *
+   * THE FAKE CONTEXT REFUSES A SECOND REGISTRATION THE WAY CHROME DOES, with
+   * Chrome's own wording, and the instrument check below is what makes the two
+   * claims able to lose: against a permissive fake, "cached then live" would
+   * pass on a build where live.js registered a second time and threw in the
+   * browser.
+   */
+  {
+    const { ensurePlaybackWorklet } = await import('./extension/offscreen/worklets.js');
+    const { LivePipeline } = await import('./extension/offscreen/live.js');
+    const assetUrl = (relPath) => `stub://unit/${relPath}`;
+    const drive = (p) => p.then(() => null, (e) => String((e && e.message) || e));
+    /**
+     * An AudioContext that registers a processor name exactly once, as Chrome
+     * does — and that counts ATTEMPTS as well as registrations.
+     *
+     * `tried` IS THE ESTIMATOR THE CLAIM NEEDS, and `added` is not. Review
+     * deleted the per-context dedup from `offscreen/worklets.js` outright — the
+     * mechanism this whole block exists to hold — and both direction claims
+     * below stayed GREEN, printing "1 registration" while the build had issued
+     * TWO addModule calls: the second one throws before it can push to `added`,
+     * so that count saturates at 1 before the range the claim needs (2) begins.
+     * AGENTS.md rule 3, in the file it was written about. Counting every attempt
+     * is what makes "once per context" refutable.
+     */
+    const oneShotCtx = () => {
+      const added = [], tried = [];
+      return {
+        added,
+        tried,
+        sampleRate: SR,
+        audioWorklet: {
+          addModule: async (url) => {
+            tried.push(url);
+            if (added.includes(url)) throw new Error("A processor named 'stem-playback' is already registered");
+            added.push(url);
+          },
+        },
+      };
+    };
+    const liveOn = (ctx) => new LivePipeline({
+      deck: 'A', ctx: () => ctx, master: () => null, ring: () => null,
+      infer: async () => ({}), ensureModel: async () => {}, send: () => {}, log: () => {}, assetUrl,
+    });
+    const cachedOn = (ctx) => new CachedDeck('A', {
+      ctx: () => ctx, master: () => null, send: () => {}, log: () => {}, assetUrl,
+    });
+
+    const probe = oneShotCtx();
+    await probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js');
+    const second = await drive(probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js'));
+    ok('INSTRUMENT CHECK: the fake context refuses a second registration the way Chrome does  '
+      + '[control: the refusal is what lets the two claims below SEE a builder trip; the attempt count is what '
+      + 'lets them see a second registration at all]',
+      second != null && /already registered/i.test(second) && probe.tried.length === 2 && probe.added.length === 1,
+      second == null
+        ? 'the fake accepted a second addModule of the same processor — it cannot reproduce the defect the two claims below exist for'
+        : probe.tried.length !== 2 || probe.added.length !== 1
+          ? `the fake recorded ${probe.tried.length} attempts and ${probe.added.length} registrations for 2 addModule calls — `
+            + 'it cannot tell "registered once" from "tried twice and one throw was swallowed", which is the whole claim'
+          : `${probe.tried.length} attempts, ${probe.added.length} registration, second refused with ${JSON.stringify(second)}`);
+
+    // ---- live first, then a cached deck on the same context
+    const ctxLF = oneShotCtx();
+    const lfLive = await drive(liveOn(ctxLF).build());
+    const lfCached = await drive(cachedOn(ctxLF).ensureGraph());
+    ok('LIVE FIRST, THEN CACHED ON THE SAME CONTEXT: addModule is CALLED ONCE, and neither builder trips over it  '
+      + '[entry point: live.js LivePipeline.build() then cacheddeck.js CachedDeck.ensureGraph()]',
+      ctxLF.tried.length === 1 && ctxLF.added.length === 1
+      && !/already registered/i.test(String(lfLive)) && !/already registered/i.test(String(lfCached)),
+      ctxLF.tried.length !== 1
+        ? `${ctxLF.tried.length} addModule ATTEMPTS on one context, expected 1 — the second deck re-registered and only `
+          + "worklets.js's catch hid it"
+        : ctxLF.added.length !== 1
+          ? `${ctxLF.added.length} registrations on one context, expected 1`
+          : `1 attempt, 1 registration; live stopped at ${JSON.stringify(String(lfLive).slice(0, 48))}, cached at ${JSON.stringify(String(lfCached).slice(0, 48))}`);
+
+    // ---- and the other way round, which is the order that used to fail
+    const ctxCF = oneShotCtx();
+    const cfCached = await drive(cachedOn(ctxCF).ensureGraph());
+    const cfLive = await drive(liveOn(ctxCF).build());
+    ok('...AND CACHED FIRST, THEN LIVE — the order that used to reject out of build() as START_FAILED  '
+      + '[entry point: cacheddeck.js CachedDeck.ensureGraph() then live.js LivePipeline.build()]',
+      ctxCF.tried.length === 1 && ctxCF.added.length === 1
+      && !/already registered/i.test(String(cfCached)) && !/already registered/i.test(String(cfLive)),
+      ctxCF.tried.length !== 1
+        ? `${ctxCF.tried.length} addModule ATTEMPTS on one context, expected 1 — the second deck re-registered and only `
+          + "worklets.js's catch hid it"
+        : ctxCF.added.length !== 1
+          ? `${ctxCF.added.length} registrations on one context, expected 1`
+          : /already registered/i.test(String(cfLive))
+            ? `the live deck rejected with ${JSON.stringify(String(cfLive))} — a live prime cannot start while a cached deck holds the context`
+            : `1 attempt, 1 registration; cached stopped at ${JSON.stringify(String(cfCached).slice(0, 48))}, live at ${JSON.stringify(String(cfLive).slice(0, 48))}`);
+
+    /**
+     * THE TWO REJECTIONS THAT ARE NOT THE SAME KIND, driven directly because
+     * neither is reachable from a deck builder in Node: one is what the registrar
+     * must swallow and the other is what it must never swallow, and a registrar
+     * that got them the wrong way round would pass both direction claims above.
+     */
+    const collided = await drive(ensurePlaybackWorklet({
+      audioWorklet: { addModule: async () => { throw new Error("A processor named 'stem-playback' is already registered"); } },
+    }, assetUrl));
+    ok('A NAME COLLISION IS TOLERATED — the module loaded, and the caller\'s AudioWorkletNode is what proves it  '
+      + '[entry point: extension/offscreen/worklets.js ensurePlaybackWorklet(), the one both decks call]',
+      collided === null,
+      collided === null ? 'resolved' : `rejected with ${JSON.stringify(collided)}`);
+
+    const broken = await drive(ensurePlaybackWorklet({
+      audioWorklet: { addModule: async () => { throw new Error('Failed to fetch playback-processor.js'); } },
+    }, assetUrl));
+    ok('...AND A GENUINE LOAD FAILURE IS NOT — a 404 or a syntax error in the worklet still reaches the deck  '
+      + '[entry point: extension/offscreen/worklets.js ensurePlaybackWorklet(), the one both decks call]',
+      broken != null && /Failed to fetch/.test(broken),
+      broken == null
+        ? 'ensurePlaybackWorklet() SWALLOWED a load failure — the deck would then build a node for a processor that is not there'
+        : broken);
+  }
 }
 
 // ===========================================================================
