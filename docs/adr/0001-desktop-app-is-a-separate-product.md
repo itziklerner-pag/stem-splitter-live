@@ -133,6 +133,56 @@ extension, first. The extension's identity does not change.
    its release cadence diverges from the extension's. That friction is the
    trigger, and it has not happened.
 
+## Amendments — what building it changed (S1–S11, issues #2–#12)
+
+An ADR records the decision that was taken, so the decisions above are left as
+they were written. These are the places where the implementation is not what
+that wording describes, and what it is instead. Every one of them is a
+correction of FACT, not a reversal: no decision above was overturned.
+
+**A1 — there is no `offscreen.js`.** Decision 5 says
+`extension/offscreen/offscreen.js` "is split into host-agnostic orchestration
+and a thin extension host". It was, in S1 (#2), and the file ceased to exist in
+the same commit: the orchestration is `extension/offscreen/engine.js` and the
+Chrome half is `extension/offscreen/host.js`. Decision 4 and the Context section
+cite the old name six more times; read them as those two files.
+`docs/ARCHITECTURE.md` §1 has the current picture.
+
+**A2 — the unit's public surface is declared, and this is where.** Consequences
+names it as a cost ("must be declared and kept stable"). It is now three
+artifacts: `extension/unit.json` — which file is on which side of the seam, with
+the argument for each — `extension/shared/host.js` — the interfaces, their duty
+tables and the boot-time `assertHost()` — and `extension/unit.sha256`, one
+SHA-256 per unit file in `shasum -c` format. `tools/unit-check.mjs` gates all
+three on every run, and `docs/VENDORING.md` is the procedure a second product
+follows, dry-run from an empty directory before it was published. The worry in
+the same sentence about `extension/shared/config.js` was answered in S7 (#5): the
+model's URL moved out of the unit into `offscreen/host-pin.js`, so what the unit
+keeps is the model's IDENTITY (the SHA-256 and the byte count) and never its
+origin.
+
+**A3 — Host interface v1 is frozen at `v0.2.0`,** and decision 6 stands
+unchanged: one repository, one tag series, no npm publish, no extraction. What
+"frozen" means here is weaker than the word usually is and is written out at the
+top of `extension/shared/host.js`, along with the four Chrome-shaped assumptions
+that were taken off the wire at the freeze and the two limitations that were
+named rather than closed.
+
+**A4 — decision 4's READ side is narrower than what ships, and the code is not
+what is wrong.** It words the transport's read side as `paused`, `currentTime`
+and `duration`; `extension/content.js` has read five since before the seam
+existed — those three plus `ended` and `playbackRate`, with `seeking` arriving as
+an event rather than a poll — and the deck reads all five. Every one of them is
+transport state and none of them is media: no `src`, no `currentSrc`, no
+`buffered`, no `srcObject`, no `captureStream()`. So L1's rule holds and this
+wording does not, and the same is true of the sentence in `CONTRIBUTING.md` that
+L1 is stated in. **Correcting it is the owner's, not a seam slice's:**
+`CONTRIBUTING.md` outranks every other document here, narrowing the payload would
+break the deck, and a rule promoted to a security property by `SECURITY.md` is
+not one an implementer restates on its own authority. Flagged in S11 (#12) and
+left open deliberately. The WRITE side — `muted`, `currentTime`, `playbackRate`
+— is exact, closed, and enforced at both ends.
+
 ## Consequences
 
 Positive:

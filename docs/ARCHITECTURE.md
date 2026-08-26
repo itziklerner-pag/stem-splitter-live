@@ -31,30 +31,56 @@ every structural oddity below is a consequence of which context is allowed to do
 what.
 
 ```
-                  ┌─────────────────────────────────────────┐
-   toolbar click  │  sw/service-worker.js   (service worker) │
+                  ┌──────────────────────────────────────────┐
+   toolbar click  │  sw/service-worker.js   (service worker)  │
    Ctrl+Shift+9 ──▶  the ONLY context that can mint a         │
-                  │  tabCapture stream id. Killed at 30 s     │
-                  │  idle; rehydrates from chrome.storage.    │
+                  │  capture token. Killed at 30 s idle;      │
+                  │  rehydrates from chrome.storage.          │
                   └───────┬──────────────────────┬────────────┘
-                          │ streamId             │ STEM_SPLITTER_LIVE_EMBED
-                          ▼                      ▼
-   ┌──────────────────────────────────┐   ┌────────────────────────────┐
+        CAPTURE_START      │                     │ STEM_SPLITTER_LIVE_EMBED
+        {sourceToken}      ▼                     ▼
+   ┌──────────────────────────────────┐   ┌─────────────────────────────┐
    │ offscreen/offscreen.html         │   │ content.js  (content script)│
    │ THE ENGINE. Holds the            │   │ Injects the iframe into the │
    │ AudioContext, the capture ring,  │   │ watch page, owns the page's │
    │ the ORT session, the worklets.   │   │ <video>, relays by          │
    │ The only context with            │   │ postMessage.                │
-   │ getUserMedia + workers + SAB.    │   └──────────┬─────────────────┘
-   └──────────────┬───────────────────┘              │ postMessage
-                  │ chrome.runtime                   ▼
-                  │                    ┌────────────────────────────────┐
-                  └───────────────────▶│ ui/embed.html   (the deck)      │
-                                       │ An extension page in an iframe. │
-                                       │ Draws six stem strips, meters,  │
-                                       │ key, tempo, transpose, speed.   │
-                                       └────────────────────────────────┘
+   │ getUserMedia + workers + SAB.    │   └──────────┬──────────────────┘
+   │                                  │              │ postMessage
+   │   offscreen/engine.js   UNIT     │              ▼
+   │   ────────────────────           │   ┌─────────────────────────────┐
+   │   offscreen/host.js     HOLE ────┼──▶│ ui/embed.html   (the deck)  │
+   └──────────────┬───────────────────┘   │ An extension page in an     │
+                  │ chrome.runtime        │ iframe. Draws six stem      │
+                  │  (BUS: off · ui · sw) │ strips, meters, key, tempo, │
+                  └──────────────────────▶│ transpose, speed.           │
+                                          │                             │
+                                          │   ui/embed.js       UNIT    │
+                                          │   ───────────────           │
+                                          │   ui/host.js        HOLE    │
+                                          └─────────────────────────────┘
 ```
+
+**The dashed line inside two of those boxes is the Host seam** (ADR 0001
+decision 4, built in S1–S11). Above it is the UNIT — the engine and the deck,
+which must not know which Host they run under. Below it is the one module each
+context imports to reach this Host: `offscreen/host.js` supplies the
+`EngineHost` and `ui/host.js` the `DeckHost`. Both interfaces, their duty
+tables and the boot-time `assertHost()` that refuses a Host short a duty are
+declared in `extension/shared/host.js`, which is unit and names no `chrome.` at
+all; `extension/unit.json` is the machine-readable map of which side each file
+is on, and `node tools/unit-check.mjs` is what holds the tree to it.
+
+**There is no `offscreen.js`.** It was one file until S1 split it: the
+orchestration is `offscreen/engine.js` and the Chrome half is
+`offscreen/host.js`. Older documents — ADR 0001 among them — cite the old name.
+
+**The service worker and the setup page are Host too.** `sw/service-worker.js`
+is the origin of `CAPTURE_START`, `CAPTURE_STOP` and `DECK_PREPARE`, the three
+messages the unit cannot send itself; `ui/welcome*` explains how to arm THIS
+product in THIS browser. Every context addresses the bus out of `BUS` in
+`shared/host.js` rather than spelling `'off'` / `'ui'` / `'sw'` — one address
+set, so it cannot be changed on one side only.
 
 **Why the engine is in an offscreen document.** A service worker cannot hold an
 `AudioContext`, cannot call `getUserMedia`, and dies on an idle timer. The
@@ -143,8 +169,8 @@ listening.
         │                      ORT Web + WebGPU, htdemucs_6s
         │                              │  6 stems x 2 channels
         │                              ▼
-        │                    engine/ola.js — weighted overlap-add
-        │                              │   normalised gain exactly 1 (COLA)
+        │                    engine/live.js — the seam crossfade
+        │                              │   equal-power ramps, no lookahead
         │                              ▼
         │                    shared/stemring.js — 14 planes
         │                              ▼
@@ -215,6 +241,7 @@ bash tools/fetch-vendor.sh    # once — the ORT wasm runtime (not in git)
 bash tools/fetch-model.sh     # optional — seeds the gates so they do not fetch 109 MB
 node tools/verify.mjs         # everything
 node tools/verify.mjs --quick # everything that needs no browser and no weights
+node tools/verify.mjs --unit  # only the suites whose subject is the vendored unit
 ```
 
 `chrome://extensions` → Developer mode → **Load unpacked** → `extension/`.
@@ -223,21 +250,32 @@ node tools/verify.mjs --quick # everything that needs no browser and no weights
 
 | gate | subject |
 |---|---|
-| `test.js` | the DSP: OLA/COLA, the chunk plan, the stem sum null test, the WAV round-trip, the FFT, the capture ring |
+| `test.js` | the DSP: the chunk plan, the stem sum null test, the WAV round-trip, the FFT, the capture ring — **and** this Host's conformance to the seam, in `group('host')` |
 | `extension/engine/*.js` | each engine module runs its own suite as `node engine/<x>.js` — pitch, pitchbank, chroma, keytap, bpmtap |
 | `extension/ui/dev/selftest.mjs` | the deck's display laws — the fader, the meter scale, buffer health, the error families |
 | `extension/{autonav,speed}.js`, `ui/embed-state.js` | the content-script decisions and pure UI state |
+| `tools/seam-check.mjs` | the seam serialises: one call in flight per backend, and `dispose()` settles what it takes away |
 | `tools/tree-check.mjs` | `extension/` really loads: every manifest path, every transitive import, the single-deck properties |
+| `tools/unit-check.mjs` | the unit is still vendorable: the closure resolves, reaches for no `chrome.`, leaves only through a declared hole, and `unit.sha256` still describes the tree |
+| `tools/name-check.mjs` | no former product name and no unpublished document is cited; both halves of every renamed IPC pair are present |
 | `tools/model-parity.mjs` | the pinned weights really carry six sources, in the contract's order |
 | `tools/embed-smoke.mjs` | **the one browser gate** — real Chromium, the real extension, the deck injected into a real page |
+
+**`--unit` is the vendored unit's own plan**, built from the `suites` list in
+`extension/unit.json` rather than from a list in the runner, so a suite is gated
+by being declared there and by nothing else. It runs 12 of the 23 steps and
+needs no browser, no weights and no `node_modules`. `node tools/unit-hash.mjs`
+rewrites `extension/unit.sha256` after any change to a unit file — the gate
+above is what tells you that you forgot. [`docs/VENDORING.md`](VENDORING.md) is
+the procedure a second product follows, dry-run from an empty directory.
 
 **`embed-smoke` carries more weight than a smoke test normally would**, and that
 is stated rather than discovered: the console-driven live suites went with the
 console they drove, so it is the only check that the engine and the surface meet
 correctly in a browser.
 
-**The `DEV_*` message handlers in `offscreen.js` are the engine's debug surface
-and have no in-repo caller.** They are instrumentation, not dead code — a live
+**The `DEV_*` message handlers in `offscreen/engine.js` are the engine's debug
+surface and have no in-repo caller.** They are instrumentation, not dead code — a live
 audio engine that cannot be asked what it is doing is much harder to fix — but
 nothing gates them, so treat them as unverified until something drives one.
 
