@@ -169,6 +169,39 @@
  *   MAY REJECT (a locked file, an IPC round trip): the unit does not let a
  *   failed clear replace the integrity error that caused it, and the two-ask
  *   ceiling holds regardless.
+ *
+ * @property {(hooks?: {name?: string,
+ *                      onReady?: (info: {threads: number|null, adapter: object|null}) => void,
+ *                      onFail?: (err: Error) => void}) => Backend} createBackend
+ *   Build ONE inference backend — the thing that turns 7.8 s of stereo mix into
+ *   six stereo stems. This is seed §16's option S2, the AUDIO-LEVEL seam: what
+ *   crosses it is waveforms, so the STFT/iSTFT and the model graph are both
+ *   INSIDE the backend and neither is on this interface. Today's only
+ *   implementation is `engine/workerbackend.js`, which drives
+ *   `workers/inference.worker.js` — ONNX Runtime on WebGPU, falling back to
+ *   threaded wasm.
+ *   A FRESH INSTANCE PER CALL, AND ONE PER DECK. `offscreen/deck.js:18-25` is
+ *   the reason and it is not negotiable in either direction: ORT-Web serialises
+ *   `run()` across every session sharing a wasm instance and a concurrent call
+ *   PERMANENTLY WEDGES the session, so two decks must not share one backend —
+ *   and two sessions must not share one worker. A Host that memoises this and
+ *   hands both decks the same object re-opens exactly that grenade.
+ *   CALLED LAZILY, and the laziness is the unit's: deck A's backend is built at
+ *   boot so the deck can report the GPU it found, deck B's on its first
+ *   `LIVE_START`, because each ORT session peaks at ~1.7 GB of wasm heap. So a
+ *   Host must not do anything at `createBackend()` time that a user who never
+ *   arms a second deck should not pay for.
+ *   SYNCHRONOUS, and it returns the Backend rather than a promise to one: it is
+ *   called from `Deck.ensureBackend()`, which runs at engine module scope. A
+ *   backend that needs to spawn a process starts it here and lets `load()` be
+ *   where the waiting happens.
+ *   `hooks` ARE THE UNIT'S, NOT THE HOST'S, and they carry the two things that
+ *   arrive outside any call the unit made: `onReady` once the backend knows what
+ *   hardware it got (the deck mirrors it into `STATE.boot`), and `onFail` when
+ *   the backend dies with nothing in flight — a worker killed for memory, a
+ *   module that would not resolve. Without `onFail` that death is silent until
+ *   the next arm, and the deck goes on reporting a session it no longer has.
+ *   `name` is a human label used only in error messages ("deck A").
  */
 
 /**
@@ -229,6 +262,93 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
   modelBytes: 'hand over the model weights, from wherever this Host keeps or gets them',
   modelCached: 'say whether the weights are already here, without reading them',
   clearModel: 'throw away the stored weights, so the next load goes back to source',
+  createBackend: 'build one inference backend — the thing that turns a mix into six stems',
+});
+
+/**
+ * @typedef {object} Backend
+ *
+ * THE AUDIO-LEVEL SEAM (seed §16, option S2). Waveforms in, waveforms out: the
+ * STFT/iSTFT and the model graph live INSIDE an implementation, which is what
+ * makes a native backend able to replace the slowest stage rather than inherit
+ * it. `engine/workerbackend.js` is backend #1 and today the only one.
+ *
+ * THE SIGNATURE THE PLAN DECLARED, AND WHY THIS IS NOT IT. The plan wrote
+ * `separate(mix Float32Array[2·SEGMENT]) -> six stereo stems`, and eleven lines
+ * later required that today's zero-copy transfers not change. Both cannot hold.
+ * The shape below is the second reading, because the first loses four things
+ * that are load-bearing rather than incidental:
+ *   1. THE CALLER-SUPPLIED OUTPUT BUFFER. `LivePipeline` allocates `mixBuf` and
+ *      `outBuf` ONCE PER SESSION (19.4 MB at six stems) and lends them for one
+ *      segment. Returning fresh arrays instead costs 16.5 MB of garbage per hop
+ *      — about 8.5 MB/s at hop 1.95 — on the one thread that must not pause.
+ *   2. THE MIX ROUND TRIP, for the same reason: 2.75 MB per hop.
+ *   3. ONE FLAT BUFFER, NOT SIX ARRAYS. `engine/demucs.js` writes a single flat
+ *      `Float32Array` laid out `(k*2 + ch)*SEGMENT + i` and `offscreen/live.js`
+ *      builds twelve `subarray` VIEWS over it with no copy. Six objects would be
+ *      six copies.
+ *   4. A `Float32Array` CANNOT GO IN A TRANSFER LIST. Only its buffer can.
+ * So "six stereo stems in `STEMS` order" survives as a documented property of
+ * `stems` — `STEMS.length * 2` planes of `SEGMENT` floats, stem-major, left
+ * before right — rather than as six objects. `tools/model-parity.mjs` is what
+ * holds the ORDER; this interface holds the LAYOUT.
+ *
+ * DEMOTION IS NOT ON THIS INTERFACE. `GpuScheduler` decides whether a chunk runs
+ * at all and returns `{demoted:true}` BEFORE the backend is ever called; that is
+ * cross-deck policy and it stays in `Deck.infer`. A backend either separates or
+ * throws.
+ *
+ * @property {(bytes: ArrayBuffer,
+ *             onProgress?: (phase: string, note?: string) => void)
+ *   => Promise<{ep: string, createMs: number, warmupMs: number}>} load
+ *   Take the weights and become able to `separate`. IT TAKES OWNERSHIP OF
+ *   `bytes` and may transfer it — `WorkerBackend` does, because the alternative
+ *   is 109 MB duplicated across a thread boundary at the peak-memory moment —
+ *   so the caller must treat the buffer as detached the instant it calls this,
+ *   and the Host that supplied the bytes must hand over a fresh buffer per call
+ *   (`modelBytes`, rule 2 above).
+ *   `onProgress(phase, note)` reports the stages a 109 MB model load has and a
+ *   caller cannot infer: `'session'` while the graph is being compiled (with a
+ *   `note` when the EP falls back), `'warmup'` for the first inference, which is
+ *   843-2584 ms of shader compile against ~450 ms steady. The resolution carries
+ *   which EP actually took the model, so the deck can say `webgpu` or `wasm`.
+ *
+ * @property {(mix: ArrayBuffer, out: ArrayBuffer)
+ *   => Promise<{mix: ArrayBuffer, stems: ArrayBuffer,
+ *               prepMs: number, inferMs: number, postMs: number}>} separate
+ *   Separate ONE segment. `mix` is `2 * SEGMENT` floats, left channel then
+ *   right; `out` is `STEMS.length * 2 * SEGMENT` floats and is where the stems
+ *   are written.
+ *   BORROW AND RETURN, WHICH IS THE WHOLE OF THE ZERO-COPY CONTRACT. Both
+ *   buffers may be transferred away and BOTH MUST COME BACK in the resolution —
+ *   `mix` as the same buffer, `stems` as the buffer `out` became. The caller
+ *   re-adopts them for the next segment. A backend that keeps either, or that
+ *   returns a copy, turns a per-session allocation into a per-hop one.
+ *   AND IF IT THROWS, IT MAY KEEP THEM: the caller reallocates on the failure
+ *   path rather than assuming. What it must NOT do is transfer them and then
+ *   return something that is not them.
+ *   ONE CALL IN FLIGHT AT A TIME is guaranteed by the UNIT, not asked of the
+ *   backend — see `engine/backend.js`.
+ *
+ * @property {() => Promise<void>} dispose
+ *   Give the machine back. MUST START ITS TEARDOWN SYNCHRONOUSLY: the last
+ *   caller is the engine's `onTeardown`, which does not await (R5), so whatever
+ *   is not done before this returns is not done at all. `WorkerBackend`
+ *   terminates the worker on the spot, which is what releases the ~1.7 GB wasm
+ *   heap.
+ */
+
+/**
+ * The duties a `Backend` owes. Checked with `assertHost` — the same function,
+ * for the same reason one level in: `host.createBackend()` is the one duty
+ * whose RETURN VALUE the unit then calls, so a Host that answers it with the
+ * wrong shape is a Host that passes every boot check and fails at the first
+ * arm, which is the failure `assertHost` exists to move earlier.
+ */
+export const BACKEND_DUTIES = Object.freeze({
+  load: 'take the model weights and become able to separate',
+  separate: 'separate one segment of mix into six stereo stems',
+  dispose: 'give the machine back',
 });
 
 /**

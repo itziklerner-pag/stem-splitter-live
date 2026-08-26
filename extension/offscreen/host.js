@@ -7,9 +7,10 @@
  * `live.js` and `master.js` — bypassing the seam entirely, so a second Host
  * could implement all five duties and still be blindsided by four sibling files
  * reaching for Chrome on their own — all resolve through `assetUrl` below
- * (S2, #4). The one URL that deliberately does NOT is `deck.js`'s inference
- * worker, built with `new URL(..., import.meta.url)`: that one is about the
- * unit's own directory layout, which is the unit's contract and not the Host's.
+ * (S2, #4). The one URL that deliberately does NOT is the inference worker
+ * itself, built with `new URL(..., import.meta.url)` inside
+ * `../engine/workerbackend.js`: that one is about the unit's own directory
+ * layout, which is the unit's contract and not the Host's.
  *
  * AND HALF OF WHAT IS HERE IS NOT `chrome.` AT ALL. `captureStream` is
  * `getUserMedia` with Chrome-proprietary constraints; `onTeardown` is a
@@ -39,6 +40,7 @@
  */
 
 import { MODEL } from '../shared/config.js';
+import { WorkerBackend } from '../engine/workerbackend.js';
 import { MODEL_URL, MODEL_CACHE_NAME } from './host-pin.js';
 
 /** This context's address on the extension message bus. */
@@ -94,10 +96,32 @@ export const captureStream = (sourceToken) => navigator.mediaDevices.getUserMedi
  *
  * Extension-root-relative, no leading slash: `assetUrl('offscreen/capture-processor.js')`.
  * A path that ends in `/` resolves to a directory URL and keeps its trailing
- * slash — `deck.js` hands `assetUrl('vendor/ort/')` to the inference worker's
- * `INIT`, and ORT appends its own file names to it.
+ * slash — `../engine/workerbackend.js` hands `assetUrl('vendor/ort/')` to the
+ * inference worker's `INIT`, and ORT appends its own file names to it.
  */
 export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
+
+/**
+ * @type {import('../shared/host.js').EngineHost['createBackend']}
+ *
+ * THE HOST PICKS THE BACKEND — that is the whole of what this duty is for, and
+ * under this Host there is exactly one to pick. `WorkerBackend` is unit code
+ * (`../engine/workerbackend.js`), not Chrome code: it needs a `Worker`, a
+ * `fetch` and somewhere to resolve `vendor/ort/`, and none of those is
+ * `chrome.*`. What makes it THIS Host's choice is the line below and nothing
+ * else, which is what a desktop Host replaces when a native backend exists —
+ * one line, against an interface, rather than a fork of the engine.
+ *
+ * A FRESH INSTANCE EVERY CALL. Memoising is the obvious optimisation and it is
+ * the one shape this duty must never take: two decks sharing one worker means
+ * two ORT sessions on one wasm instance, and a concurrent `run()` there
+ * PERMANENTLY WEDGES both (`offscreen/deck.js:18-25`). `new` on every call is
+ * how that stays structurally impossible rather than merely unlikely.
+ *
+ * `assetUrl` is passed as the module's own function, unbound, exactly as
+ * `engine.js` passes it to `MasterBus` and to the decks.
+ */
+export const createBackend = (hooks) => new WorkerBackend({ assetUrl, ...hooks });
 
 /**
  * @type {import('../shared/host.js').EngineHost['onTeardown']}

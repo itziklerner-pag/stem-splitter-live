@@ -15,7 +15,7 @@
  *   - the hop and the live plan  (different hops put the two decks' output
  *                                seconds apart and make them unmixable)
  *
- * ONE WORKER PER DECK, and this is not negotiable in the other direction either.
+ * ONE BACKEND PER DECK, and this is not negotiable in the other direction either.
  * spike/FINDINGS.md §6: ORT-Web serialises `run()` across every session sharing
  * a wasm instance, and a concurrent call throws `Session already started` and
  * leaves the session permanently wedged — so two sessions inside one worker is a
@@ -24,14 +24,24 @@
  * measured a sequential pair at 1.01x the sum of two solo runs), so the second
  * worker costs memory and buys safety.
  *
+ * THE WORKER IS NOW BEHIND A SEAM (S6, seed §16's option S2). The deck asks the
+ * Host for a `Backend` — `load` / `separate` / `dispose`, waveforms in and
+ * waveforms out — and today's Host answers with `engine/workerbackend.js`, which
+ * is that same worker unchanged inside. What the deck kept is what is
+ * ORCHESTRATION: session state and its mirror to the UI, the model bytes, and
+ * the cross-deck GPU scheduler. What it no longer knows is that inference
+ * involves a worker at all.
+ *
  * NOTE the memory: each session is ~1.7 GB of wasm heap at peak. Two decks
- * measured 2091 MB renderer + 357 MB gpu. Deck B's worker is therefore created
+ * measured 2091 MB renderer + 357 MB gpu. Deck B's backend is therefore created
  * LAZILY — on its first LIVE_START, never at boot — so a Mode 1 user never pays
- * for it.
+ * for it. `host.createBackend()` is synchronous and returns a fresh instance, so
+ * WHEN a deck pays is the deck's decision and not the Host's.
  */
 
 import { SR, SEGMENT, RING_FRAMES } from '../shared/config.js';
 import { RingConsumer, ringByteLength } from '../shared/ring.js';
+import { serialiseBackend } from '../engine/backend.js';
 import { LivePipeline } from './live.js';
 
 export class Deck {
@@ -41,16 +51,20 @@ export class Deck {
    * @param {() => AudioContext} shared.ctx
    * @param {() => import('./master.js').MasterBus} shared.master
    * @param {() => Promise<ArrayBuffer>} shared.modelBytes  a FRESH buffer per call
-   *        (LOAD_MODEL transfers it, so two decks cannot share one)
+   *        (the backend's `load()` transfers it, so two decks cannot share one)
+   * @param {import('../shared/host.js').EngineHost['createBackend']} shared.createBackend
+   *        the Host's inference backend factory (../shared/host.js), handed down
+   *        from `offscreen/engine.js`. Called ONCE PER DECK and lazily — see
+   *        `ensureBackend()`.
    * @param {import('../engine/scheduler.js').GpuScheduler} shared.gpu
    * @param {(msg:object) => void} shared.send    already deck-tagged by the caller
    * @param {(line:string) => void} shared.log
    * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
    *        resolver (../shared/host.js). Synchronous, unit-relative, no leading
    *        slash — the way the unit names an asset the HOST serves. Not every
-   *        file the unit loads is one of those: `ensureWorker()` reaches the
-   *        inference worker by import, and the note there is why that one must
-   *        NOT go through here.
+   *        file the unit loads is one of those: `engine/workerbackend.js` reaches
+   *        the inference worker by import, and the note there is why that one
+   *        must NOT go through here.
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
@@ -63,32 +77,48 @@ export class Deck {
      * (`assetUrl: host.assetUrl`), and a bundle that lost that one key leaves a
      * Host that passes every check. Review measured what happens then, by
      * deleting exactly that line: `--quick` GREEN and `embed-smoke` 122/122,
-     * while the shipped extension dies at `decks.A.ensureWorker()` — which
+     * while the shipped extension dies at `decks.A.ensureBackend()` — which
      * `engine.js` calls at module scope — with `this.s.assetUrl is not a
      * function`. No INIT, no HELLO, no engine, and nothing red anywhere.
      *
      * So the deck refuses the bundle instead, in the same breath and for the
      * same reason `MasterBus` refuses a missing resolver: the alternative is a
-     * TypeError from inside `ensureWorker()`, three layers from the mistake.
+     * TypeError from inside `ensureBackend()`, three layers from the mistake.
      */
     if (!shared || typeof shared.assetUrl !== 'function') {
       throw new TypeError(`Deck ${id}: the shared bundle from offscreen/engine.js is missing the Host's `
-        + 'assetUrl — the deck resolves the ORT runtime directory for the inference worker\'s INIT '
-        + 'and hands the same resolver to LivePipeline for the playback worklet '
+        + 'assetUrl — the deck hands the same resolver to LivePipeline for the playback worklet '
+        + 'and to the inference backend for the ORT runtime directory '
         + `(got ${shared == null ? String(shared) : typeof shared.assetUrl}).`);
+    }
+    /**
+     * AND IT HAS TO CARRY THE BACKEND FACTORY, for exactly the same reason and
+     * with exactly the same blind spot. `createBackend` is a duty
+     * `assertHost(host, ENGINE_HOST_DUTIES)` checks at engine boot; the line
+     * `createBackend: host.createBackend` on the `shared` bundle is a separate
+     * step with a separate way to be lost, and losing it leaves every check in
+     * the tree green while the extension dies at module scope with
+     * `this.s.createBackend is not a function`.
+     *
+     * A deck with no way to build a backend has nothing to fall back on — there
+     * is no second path to inference — so this is a refusal rather than a
+     * degradation.
+     */
+    if (typeof shared.createBackend !== 'function') {
+      throw new TypeError(`Deck ${id}: the shared bundle from offscreen/engine.js is missing the Host's `
+        + 'createBackend — the deck has no other way to reach inference '
+        + `(got ${typeof shared.createBackend}).`);
     }
     this.id = id;
     this.s = shared;
 
     // ---- inference
-    this.worker = null;
-    this.pending = new Map();
-    this.nextId = 1;
+    /** @type {import('../shared/host.js').Backend|null} this deck's own, built lazily */
+    this.backend = null;
     /** 'unknown' | 'loading' | 'ready' | 'error' — this deck's SESSION, not the download */
     this.session = 'unknown';
     this.sessionError = null;
     this.sessionLoading = null;
-    this.sessionReady = null;
     this.ep = null;
     this.threads = null;
     this.adapter = null;
@@ -141,159 +171,119 @@ export class Deck {
     });
   }
 
-  // ------------------------------------------------------------------ worker
-  ensureWorker() {
-    if (this.worker) return this.worker;
+  // ----------------------------------------------------------------- backend
+  /**
+   * THIS DECK'S inference backend, built on first use.
+   *
+   * ONE PER DECK. `host.createBackend()` returns a FRESH instance every call and
+   * this is the only place the unit calls it, so "two decks never share a wasm
+   * instance" — the rule three files exist to state (`deck.js` header,
+   * `engine/scheduler.js:19-23`, `workers/inference.worker.js:10-12`) — is a
+   * property of the call graph rather than of anyone remembering it.
+   *
+   * LAZY, because a session is ~1.7 GB of wasm heap at peak. Deck A's is built
+   * at boot (`engine.js` calls this at module scope, so the deck can report the
+   * GPU it found before any gesture); deck B's on its first LIVE_START.
+   *
+   * IT DOES NOT RE-SPAWN A DEAD ONE. A backend that failed keeps its recorded
+   * reason and throws it from every later call; `dispose()` is the only thing
+   * that clears the slot. A worker that cannot resolve its imports dies
+   * identically every time, so re-spawning here would produce one per chunk for
+   * ever and the live path's failure ladder would never see a stable error to
+   * halt on.
+   */
+  ensureBackend() {
+    if (this.backend) return this.backend;
     /**
-     * THE WORKER URL IS RELATIVE ON PURPOSE, and it does not go through
-     * `assetUrl`. `import.meta.url` resolves against THIS module's own location,
-     * so the expression says "the sibling directory `workers/`" and nothing
-     * about where the unit is mounted — which is what makes it correct under a
-     * `chrome-extension://` origin and under a desktop Host alike.
-     *
-     * `assetUrl` exists for the files the unit does NOT reach by import: worklet
-     * modules, which `addModule()` fetches by URL, and the ORT runtime, which
-     * the worker resolves against its own directory. Routing this one through
-     * the Host as well would hand the Host authority over the unit's internal
-     * directory layout, and that layout is part of the unit's contract
-     * (ADR 0001 decision 3). Do not "fix" it to `assetUrl`.
+     * SERIALISED HERE, WHERE THE INSTANCE IS BORN, so nothing downstream can
+     * hold the unwrapped one. `serialiseBackend` also refuses a Host whose
+     * `createBackend` answered with the wrong shape — see the note there.
      */
-    const w = new Worker(new URL('../workers/inference.worker.js', import.meta.url), { type: 'module' });
-    // Review finding M1: any failure that does not arrive as {type:'ERROR'} — a
-    // module load failure, an uncaught rejection, an OOM that kills the worker —
-    // leaves every `pending` entry unsettled, so `await infer(...)` hangs forever
-    // with no cancel path. Reject them all and drop the worker so the next job
-    // re-spawns. Per deck: deck B dying must not settle deck A's promises.
-    w.onerror = (e) => {
-      const err = new Error(e.message || `inference worker (deck ${this.id}) crashed`);
-      for (const [, p] of this.pending) p.reject(err);
-      this.pending.clear();
-      if (this.sessionReady) { const r = this.sessionReady; this.sessionReady = null; r.rej(err); }
-      this.sessionLoading = null;
-      this.session = 'error';
-      this.sessionError = err.message;
-      this.worker = null;
-      this.s.log(`ERROR [deck ${this.id} worker] ${err.message}`);
-      // The offscreen document mirrors session state to the UI. Without this the
-      // welcome page stays on "preparing the GPU" for ever, because `error` is a
-      // terminal state that nothing announced.
-      this.s.onWorkerState && this.s.onWorkerState(this);
-    };
-    w.onmessage = (e) => this.onWorker(e.data);
-    // A DIRECTORY URL, trailing slash and all: ORT appends its own file names to
-    // it. R0 measured the file-URL form failing inside the runtime with
-    // "w is not a function", several layers from the mistake.
-    w.postMessage({ type: 'INIT', wasmDirUrl: this.s.assetUrl('vendor/ort/') });
-    this.worker = w;
-    return w;
+    this.backend = serialiseBackend(this.s.createBackend({
+      name: `deck ${this.id}`,
+      /**
+       * The hardware the backend found. Telemetry, but the kind the user is
+       * shown: `state.boot.{ep,adapter,threads}` is what the deck reports as
+       * "wasm threads 4 · gpu nvidia/turing". It arrives unprompted and before
+       * any load, which is why it is a hook and not a return value.
+       */
+      onReady: (info) => {
+        this.adapter = info.adapter;
+        this.threads = info.threads;
+        this.s.log(`deck ${this.id} backend ready · wasm threads ${info.threads} · gpu ${info.adapter ? info.adapter.vendor + '/' + info.adapter.architecture : 'none'}`);
+        this.s.onWorkerState && this.s.onWorkerState(this);
+      },
+      /**
+       * THE BACKEND DIED WITH NOTHING IN FLIGHT — a worker killed for memory, a
+       * module that would not resolve, an error the wire could not attribute to
+       * a call. Calls that WERE in flight reject on their own and reach the
+       * caller; this is the case where nobody is listening, and without it the
+       * deck goes on reporting a session it no longer has until the next arm.
+       *
+       * `error` is terminal and nothing else announces it: the offscreen
+       * document mirrors session state to the UI, and without this the welcome
+       * page sits on "preparing the GPU" for ever.
+       */
+      onFail: (err) => {
+        this.session = 'error';
+        this.sessionError = err.message;
+        this.s.log(`ERROR [deck ${this.id} backend] ${err.message}`);
+        this.s.onWorkerState && this.s.onWorkerState(this);
+      },
+    }), `Backend for deck ${this.id}`);
+    return this.backend;
   }
 
   /**
-   * The worker handle, or a throw that carries WHY it is gone.
+   * The backend, or a throw that carries WHY there is not one.
    *
-   * `onerror` above nulls `this.worker` so the next job re-spawns, and every
-   * send site then dereferenced it anyway — `this.worker.postMessage(...)` on
-   * null throws a TypeError naming `postMessage`, which is the one fact in the
-   * failure that does not matter. The real reason was recorded in
-   * `this.sessionError` one tick earlier and then never read.
-   *
-   * Re-spawning here instead would be worse: a worker that cannot resolve its
-   * imports dies identically every time, so `infer()` would spawn one per chunk
-   * forever and the ladder would never see a stable error to halt on.
+   * `infer()` must not build one: by the time a chunk is in flight the session
+   * has been loaded, so a missing backend means it was disposed, and quietly
+   * spawning a replacement would hand the live path a backend with no weights
+   * in it.
    */
-  requireWorker() {
-    if (this.worker) return this.worker;
+  requireBackend() {
+    if (this.backend) return this.backend;
     throw new Error(this.sessionError
-      || `the inference worker for deck ${this.id} is not running and reported no reason`);
-  }
-
-  onWorker(m) {
-    switch (m.type) {
-      case 'READY':
-        this.adapter = m.adapter;
-        this.threads = m.numThreads;
-        this.s.log(`deck ${this.id} worker ready · wasm threads ${m.numThreads} · gpu ${m.adapter ? m.adapter.vendor + '/' + m.adapter.architecture : 'none'}`);
-        this.s.onWorkerState && this.s.onWorkerState(this);
-        break;
-      case 'MODEL_PROGRESS':
-        if (m.note) this.s.log(`deck ${this.id} ${m.note}`);
-        this.s.onModelProgress && this.s.onModelProgress(this, m);
-        break;
-      case 'MODEL_READY':
-        this.ep = m.ep;
-        this.session = 'ready';
-        this.s.log(`deck ${this.id} session ${m.ep} created in ${m.createMs.toFixed(0)}ms · warmup ${m.warmupMs.toFixed(0)}ms`);
-        if (this.sessionReady) { this.sessionReady.res(); this.sessionReady = null; }
-        this.s.onWorkerState && this.s.onWorkerState(this);
-        break;
-      case 'RESULT': {
-        const r = this.pending.get(m.id);
-        if (r) { this.pending.delete(m.id); r.resolve(m); }
-        break;
-      }
-      case 'ERROR': {
-        const r = m.id != null && this.pending.get(m.id);
-        if (r) { this.pending.delete(m.id); r.reject(new Error(m.message)); }
-        else if (this.sessionReady) { const s = this.sessionReady; this.sessionReady = null; s.rej(new Error(m.message)); }
-        else {
-          this.session = 'error'; this.sessionError = m.message;
-          this.s.log(`ERROR [deck ${this.id} worker] ${m.message}`);
-          this.s.onWorkerState && this.s.onWorkerState(this);
-        }
-        break;
-      }
-    }
+      || `the inference backend for deck ${this.id} is not running and reported no reason`);
   }
 
   /**
    * Load the weights into THIS deck's session. Idempotent and re-entrant-safe.
-   * The bytes come from the shared cache loader, which re-reads and re-hashes
-   * per call — LOAD_MODEL transfers the ArrayBuffer, so two decks physically
-   * cannot share one.
+   *
+   * The bytes come from the engine's shared loader, which re-reads and re-hashes
+   * per call — `Backend.load()` TRANSFERS the ArrayBuffer, so two decks
+   * physically cannot share one.
+   *
+   * WHAT THIS FUNCTION KEPT, now that the worker is behind a seam: the session
+   * state machine and its mirror to the UI, the re-entrancy guard, and the model
+   * bytes. What it no longer knows: that a worker exists, what ONNX Runtime is,
+   * or where `vendor/ort/` lives. The ORT presence probe went with the backend —
+   * it is a diagnosis of a runtime a native backend would not have.
    */
   ensureSession() {
     if (this.session === 'ready') return Promise.resolve();
     if (this.sessionLoading) return this.sessionLoading;
     this.sessionLoading = (async () => {
-      /**
-       * THE RUNTIME IS NOT IN GIT, AND ITS ABSENCE HAS TO BE NAMED HERE.
-       *
-       * `workers/inference.worker.js` STATICALLY imports
-       * `../vendor/ort/ort.all.bundle.min.mjs`, which `.gitignore` excludes —
-       * `tools/fetch-vendor.sh` puts it there. Load the extension without
-       * running that and the module worker fails to resolve its import, which
-       * fires `onerror` with an EMPTY message. The deck then nulls `this.worker`
-       * and the next send halts the ladder on "Cannot read properties of null
-       * (reading 'postMessage')", three chunks and one useless error later.
-       *
-       * Nothing in that chain ever names the missing file. So check the one file
-       * that is not in git, before spawning anything, and say what to run.
-       */
-      const ortUrl = this.s.assetUrl('vendor/ort/ort.all.bundle.min.mjs');
-      const head = await fetch(ortUrl, { method: 'HEAD' }).catch(() => null);
-      if (!head || !head.ok) {
-        /**
-         * NAME THE URL THAT FAILED, not just the file that is usually missing.
-         * Under this Host the two are the same sentence. Under a second Host
-         * they are not: a resolver that answers with something `fetch` refuses
-         * — `file://` is refused outright in Chromium, and a custom scheme
-         * needs `supportFetchAPI` — lands here for a file that is present, and
-         * "run fetch-vendor.sh" is then advice for the wrong problem. The URL
-         * is what tells the two apart, so it goes in the message.
-         */
-        throw new Error(
-          `ONNX Runtime is missing from this build: ${ortUrl} could not be read. `
-          + 'extension/vendor/ort/ is not in git — run `bash tools/fetch-vendor.sh` '
-          + 'and reload.',
-        );
-      }
-      this.ensureWorker();
+      const backend = this.ensureBackend();
       this.session = 'loading';
       this.sessionError = null;
       const buffer = await this.s.modelBytes();
-      const ready = new Promise((res, rej) => { this.sessionReady = { res, rej }; });
-      this.requireWorker().postMessage({ type: 'LOAD_MODEL', buffer }, [buffer]);
-      await ready;
+      /**
+       * The stages of a 109 MB load, as the backend reports them: `'session'`
+       * while the graph is compiled (with a `note` when the EP falls back to
+       * wasm) and `'warmup'` for the first inference. `state.model.phase` is
+       * what the setup page paints from, so a load with no progress is a
+       * progress bar that sits still for ~10 s.
+       */
+      const info = await backend.load(buffer, (phase, note) => {
+        if (note) this.s.log(`deck ${this.id} ${note}`);
+        this.s.onModelProgress && this.s.onModelProgress(this, { phase, note });
+      });
+      this.ep = info.ep;
+      this.session = 'ready';
+      this.s.log(`deck ${this.id} session ${info.ep} created in ${info.createMs.toFixed(0)}ms · warmup ${info.warmupMs.toFixed(0)}ms`);
+      this.s.onWorkerState && this.s.onWorkerState(this);
     })().catch((e) => {
       this.session = 'error';
       this.sessionError = String((e && e.message) || e);
@@ -307,9 +297,11 @@ export class Deck {
    * One inference, through the shared GPU scheduler.
    *
    * Returns EITHER `{demoted:true, why}` — L3 said this chunk cannot land in
-   * time and the priority deck needs the GPU — or the worker's RESULT message.
-   * A demotion is not an error and must not be thrown: LivePipeline routes
-   * throws into the CHUNK_FAILED ladder, which halts the deck after three.
+   * time and the priority deck needs the GPU — or the backend's result. A
+   * demotion is not an error and must not be thrown: LivePipeline routes throws
+   * into the CHUNK_FAILED ladder, which halts the deck after three, and that is
+   * why demotion is a `Deck` concern and not something on the `Backend`
+   * interface: a backend either separates or throws.
    *
    * When demoted, `mixBuf`/`outBuf` are NEVER transferred, so the caller still
    * owns them. That invariant is load-bearing — see LivePipeline.runChunk.
@@ -341,16 +333,28 @@ export class Deck {
       return { demoted: true, why: 'another deck is creating its ORT session' };
     }
     const gpu = this.s.gpu;
-    const r = await gpu.run(this.id, budgetMs, () => {
-      // Resolved BEFORE `pending.set`: a throw inside the executor rejects the
-      // promise correctly, but leaves an entry nothing will ever settle.
-      const w = this.requireWorker();
-      const id = this.nextId++;
-      return new Promise((resolve, reject) => {
-        this.pending.set(id, { resolve, reject });
-        w.postMessage({ type: 'INFER', id, mix: mixBuf, out: outBuf }, [mixBuf, outBuf]);
-      });
-    });
+    /**
+     * BOTH QUEUES, NOT EITHER. `gpu.run` is the CROSS-DECK policy — one token,
+     * FIFO with a priority jump, and the L3 demotion decisions on either side of
+     * the wait. The backend's own queue (`engine/backend.js`) is the PER-BACKEND
+     * safety rule that keeps one `separate()` in flight whatever the policy
+     * becomes. They answer different questions and neither implies the other.
+     *
+     * ⚠ AND THE ORDER IS THE ZERO-COPY CONTRACT. `separate()` — and therefore
+     * the `postMessage` that transfers both buffers — is INSIDE `fn`, and every
+     * demotion path returns before `fn` is ever called (the pre-emptive check
+     * above, `scheduler.js:185`, `scheduler.js:194`). That is the mechanism, and
+     * it is structural rather than a flag anyone has to set:
+     *
+     *   "When demoted, mixBuf/outBuf are NEVER transferred, so the caller still
+     *    owns them. That invariant is load-bearing — see LivePipeline.runChunk."
+     *
+     * Move the transfer outside `fn` — or hand the backend the buffers before
+     * the token is taken — and the next `runChunk` throws "Cannot perform
+     * Construct on a detached ArrayBuffer" at its first line, once per capture
+     * tick, for ever.
+     */
+    const r = await gpu.run(this.id, budgetMs, () => this.requireBackend().separate(mixBuf, outBuf));
     if (r.demoted) return r;
     // Feed the estimator ONLY from steady-state passes.
     //
@@ -486,8 +490,12 @@ export class Deck {
     await this.live.stop().catch(() => {});
     this.live.dispose();
     await this.detach().catch(() => {});
-    if (this.worker) { this.worker.postMessage({ type: 'DISPOSE' }); this.worker.terminate(); this.worker = null; }
-    this.pending.clear();
+    /**
+     * THE SLOT IS CLEARED, so `requireBackend()` refuses the next call rather
+     * than a disposed backend accepting one. `ensureBackend()` is what builds a
+     * replacement, and only a caller that means to start again reaches it.
+     */
+    if (this.backend) { const b = this.backend; this.backend = null; await b.dispose().catch(() => {}); }
     this.session = 'unknown';
     this.status = 'idle';
     this.prepared = false;

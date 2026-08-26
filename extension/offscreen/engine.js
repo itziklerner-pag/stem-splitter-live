@@ -4,15 +4,21 @@
  * stem cache and the message switch that drives all of it.
  *
  * IT IS HOST-AGNOSTIC, and that is the property to preserve when editing it.
- * Everything platform-bound THIS file needs lives behind the five duties of
+ * Everything platform-bound THIS file needs lives behind the duties of
  * `EngineHost` (`../shared/host.js`), supplied here by `./host.js` — the Chrome
  * extension's implementation, and the only `chrome.`-speaking module this file
- * reaches for:
+ * reaches for. `ENGINE_HOST_DUTIES` is the list; this is what each is for here:
  *
  *   send / onMessage    the extension message bus
  *   captureStream       getUserMedia with the tabCapture constraints
  *   assetUrl            chrome.runtime.getURL, for the worklet modules
  *   onTeardown          pagehide — a document-lifetime event, not an engine one
+ *   modelBytes /        the 109 MB weights: fetch + the Cache API (S7). Where
+ *   modelCached /       they come from is the Host's; whether they are the model
+ *   clearModel          is the unit's (`../shared/modelcache.js`).
+ *   createBackend       which inference backend a deck gets (S6). Today's is
+ *                       `../engine/workerbackend.js` — ORT in a Worker — and
+ *                       swapping it is the Host's one line, not a fork of this.
  *
  * `./host.js` is the ONLY file under `offscreen/` that says `chrome.` at all:
  * `deck.js`, `cacheddeck.js`, `live.js` and `master.js` reach their worklet
@@ -291,6 +297,15 @@ const shared = {
    * AudioContext to await on.
    */
   assetUrl: host.assetUrl,
+  /**
+   * THE HOST'S INFERENCE BACKEND FACTORY, HANDED DOWN THE SAME WAY AND WITH THE
+   * SAME HAZARD. A deck calls it exactly once, lazily, and gets its own
+   * instance; the engine never calls it at all. Losing this one line leaves a
+   * Host that passes `assertHost` above and an extension that dies at module
+   * scope in `decks.A.ensureBackend()`, so `Deck` refuses a bundle without it —
+   * see the constructor.
+   */
+  createBackend: host.createBackend,
   /**
    * The steady-state cost of one chunk on `id`, in ms — the number a deck arms
    * its playhead against.
@@ -1121,7 +1136,7 @@ async function handle(m) {
         if (state.model.status === 'unknown') {
           state.model.status = (await host.modelCached()) ? 'cached' : 'absent';
         }
-        decks.A.ensureWorker();
+        decks.A.ensureBackend();
         echoXf(true);
         return push(true);
 
@@ -1668,7 +1683,14 @@ host.onTeardown(() => {
   // that matters: a live track left running keeps the user's tab muted.
   for (const d of liveDecks()) {
     if (d.stream) d.stream.getTracks().forEach((t) => t.stop());
-    if (d.worker) d.worker.terminate();
+    /**
+     * `Backend.dispose()` returns a promise nothing here can await, and the
+     * interface says so: it must do its irreversible work SYNCHRONOUSLY, which
+     * for `WorkerBackend` is `terminate()` and the ~1.7 GB wasm heap that goes
+     * with it. `Promise.resolve` is only so a rejection cannot escape as an
+     * unhandled one on the way out of the document.
+     */
+    if (d.backend) Promise.resolve(d.backend.dispose()).catch(() => {});
   }
 });
 
@@ -1679,5 +1701,5 @@ host.onTeardown(() => {
 // boot-order triple below, and rewording it buys no gate. Upgrade path: S9 is
 // already enumerating host-coupled residue — rename it there, or in S11.
 log(`offscreen up · SAB ${SAB_OK} · crossOriginIsolated ${self.crossOriginIsolated}`);
-decks.A.ensureWorker();
+decks.A.ensureBackend();
 send({ type: 'HELLO' });
