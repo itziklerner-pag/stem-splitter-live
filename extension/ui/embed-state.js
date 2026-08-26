@@ -70,9 +70,17 @@ export const RUNNING = new Set(['priming', 'running', 'starving']);
  * signal landed, which is exactly why it was invisible: every state the UI
  * showed afterwards was correct.
  *
- * ponytail: ceiling — `hosted` is "am I in a frame", so a deck framed by a page
- * whose content script never loaded waits forever instead of falling back.
- * That page is the one that created this frame, so it cannot happen today.
+ * `hosted` IS A FACT ABOUT THE HOST, NOT ABOUT FRAMES. It is
+ * `host.transport != null` — does whatever is hosting this deck report a
+ * player. It used to be "am I in a frame", and that was the same answer only by
+ * accident of there being one Host: a Host that draws this deck as a top-level
+ * document and reports its player would have been read here as "nobody is ever
+ * going to tell me", i.e. as licence to start a capture, and behind it a model
+ * download, on boot.
+ *
+ * ponytail: ceiling — a Host that DECLARES a transport and then never speaks
+ * leaves this waiting for ever instead of falling back. Today the Host that
+ * declares one is the page that created this frame, so it cannot happen.
  * Upgrade path: a deadline (fall back after ~2 s of silence) if a second host
  * ever embeds this deck.
  *
