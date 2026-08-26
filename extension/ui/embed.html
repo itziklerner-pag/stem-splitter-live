@@ -58,8 +58,17 @@
 
        WHAT SURVIVES is the one thing the page does NOT say: how to arm a tab
        that is not armed. It is a single line, shorter than the chip, so it
-       costs no height. Armed, it is empty and this element is pure spacer. -->
-  <span class="hint" id="src-sub"></span>
+       costs no height. Armed, it is empty and this element is pure spacer.
+
+       TWO SPANS, AND THE SECOND ONE IS WHY. The hint names the keyboard chord
+       as well as the toolbar icon, and on an Apple keyboard that chord is drawn
+       in glyphs — `⌃⇧9`, which read out one character at a time is not an
+       instruction. So the chord gets its own element to hang `role="img"` and an
+       `aria-label` on, exactly as welcome.html's step 2 does; off a glyph
+       platform the text is already words and both attributes stay off. Both are
+       filled by embed.js and empty here: this markup makes no claim about what
+       the chord is, because only the browser knows what it is bound to. -->
+  <span class="hint" id="src-sub"><span id="src-lead"></span><span id="src-chord"></span></span>
   <div class="stat">
     <span class="num" id="stat-num"></span>
   </div>

@@ -250,10 +250,14 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
  * Electron preload bridge wrapped one level too deep hands over `{ send: fn }`
  * — and waving it through returns the seam to the failure this check exists to
  * move, `host.send is not a function` at the first gesture. A future duty that
- * is genuinely a namespace (S4's `storage`, which carries `get`/`set`/
- * `onChanged`) is therefore declared as its own callable duties, or this check
- * is widened deliberately and the widening is asserted. It is not widened by
- * accident.
+ * is genuinely a namespace was to be declared as its own callable duties, or
+ * this check widened deliberately with the widening asserted — never widened by
+ * accident. S4 TOOK THE FIRST BRANCH: the deck's storage arrived as three FLAT
+ * duties (`storageGet`, `storageSet`, `onStorageChanged`) rather than as a
+ * `storage` namespace carrying `get`/`set`/`onChanged`, so this line still
+ * reads `=== 'function'` and the not-callable refusal below still has teeth.
+ * The cost is four more names in a duty list; what it buys is that the one
+ * thing this check does is still the thing it does.
  *
  * A DUTY MAY BE CALLED UNBOUND, and one already is. A Host is a module
  * namespace and the unit treats its duties as plain functions: rather than
@@ -298,7 +302,7 @@ export function assertHost(host, duties, what = 'Host') {
 /* ========================================================================= */
 
 /**
- * The deck's Host. Two duties today; S4 adds storage and the arm shortcut, S5
+ * The deck's Host. Six duties today — the bus, storage, and the arm chord; S5
  * adds the transport to the page.
  *
  * @typedef {object} DeckHost
@@ -310,10 +314,60 @@ export function assertHost(host, duties, what = 'Host') {
  * @property {(fn: (msg: object) => void) => void} onMessage
  *   Call `fn` for each message addressed to THIS context, with the raw
  *   envelope. What `fn` returns is dropped.
+ *
+ * @property {(area: 'local'|'session', key: string) => Promise<unknown>} storageGet
+ *   Read back the value stored at `key`, or `null` if nothing is stored there.
+ *   ABSENT RESOLVES `null`; A FAILED READ REJECTS, and the two must not be
+ *   folded together. A fresh profile holds no preferences and that is the
+ *   ordinary case, not a fault. Storage that could not be READ is a fault, and a
+ *   Host that answered `null` for it would tell the deck "the user has no
+ *   preferences" on precisely the run where it could not tell — the
+ *   green-on-nothing shape AGENTS.md is written against. Both readers carry
+ *   their own catch already, so rejecting costs nothing and says something.
+ *
+ * @property {(area: 'local'|'session', key: string, value: unknown) => void} storageSet
+ *   Store `value` at `key`. Fire and forget, exactly like `send`: MUST return
+ *   undefined rather than a promise, and the Host swallows the failure. The one
+ *   caller is a checkbox and a picker whose truth is already on screen; there is
+ *   nothing a rejected write could tell the user that the next read would not
+ *   tell them better.
+ *
+ * @property {(area: 'local'|'session', key: string, fn: (value: unknown) => void) => void} onStorageChanged
+ *   Call `fn` with the NEW VALUE whenever `key` changes in `area`. The Host owns
+ *   the area/key filter for the same reason it owns the address guard on
+ *   `onMessage`: the platform delivers changes in whatever batched shape it
+ *   likes, and unpicking that shape is transport work. `fn` returns nothing.
+ *   IT IS NOT SUGAR OVER `storageGet`. The deck is not the only writer of what
+ *   it reads — the same key is written by a second deck in a second tab and read
+ *   by the extension host's own content script — so a deck that read only at
+ *   boot would sit there disagreeing with the behaviour the user is watching.
+ *
+ * @property {() => Promise<string|null>} armShortcut
+ *   The accelerator this platform has bound to the arm gesture, AS THE PLATFORM
+ *   SPELLS IT (`'Ctrl+Shift+9'`; or `'⌃⇧9'`, because Chrome hands macOS back
+ *   already drawn), or `null` when nothing is bound.
+ *   RAW, NOT RENDERED, and that split is why this is one duty and not two.
+ *   Turning an accelerator into the pair of strings a surface DRAWS and
+ *   ANNOUNCES is `chordLabel()` in `ui/embed-state.js`: unit code, gated without
+ *   a browser, and already wrong once in a way no Host would have got right on
+ *   its own — a chord drawn in words was announced as a graphic on every
+ *   non-Mac machine, suppressing text a screen reader could already read. A Host
+ *   that returned the rendered pair would be a second copy of that judgement per
+ *   Host, outside the gate that caught it.
+ *   `null` RATHER THAN `''`, because "no chord is bound" is a different sentence
+ *   for the caller to print, not an empty key cap.
+ *
+ * THE TWO STORAGE AREAS ARE A LIFETIME, AND THE UNIT NAMES WHICH ONE IT MEANT.
+ * `'local'` outlives the browser; `'session'` lasts as long as this run of it.
+ * They are a parameter and never a Host default, because the deck's two uses
+ * differ in exactly that: a preference the user set must survive a restart, and
+ * a refusal to arm must NOT — a stale one paints as current, which turns a fix
+ * for a silent failure into a new false-alarm source. A Host that guessed would
+ * be guessing about which of those two mistakes to make.
  */
 
 /**
- * THE FOUR RULES A `DeckHost` HAS TO HOLD. Each one is here because breaking it
+ * THE SEVEN RULES A `DeckHost` HAS TO HOLD. Each one is here because breaking it
  * is silent — the deck goes on looking exactly as it does now.
  *
  * 1. `send` TAKES A FINISHED MESSAGE. The `{ v: 1, to, from, ...payload }`
@@ -345,6 +399,28 @@ export function assertHost(host, duties, what = 'Host') {
  *    hears every message; and MV3 reads a truthy return from a listener as "I
  *    will call `sendResponse` later" and holds the channel open for it.
  *
+ * 5. THE STORAGE AREA IS THE DECK'S TO NAME AND THE HOST'S TO HONOUR, never to
+ *    default. `'local'` outlives the browser and `'session'` does not, and the
+ *    deck's two uses are one of each on purpose: a preference must survive a
+ *    restart, and a refusal to arm must not — a stale refusal painted as current
+ *    turns a fix for a silent failure into a new false-alarm source, which is
+ *    the more expensive of the two defects because it teaches the user to ignore
+ *    the banner. A Host that picked one area for everything would be picking
+ *    which of those two mistakes to make, silently, for both call sites.
+ *
+ * 6. `storageGet` SEPARATES ABSENT FROM UNREADABLE — `null` for the first, a
+ *    rejection for the second. Folding them together is the `!x || (real check)`
+ *    shape one layer out: the deck would apply its defaults most confidently on
+ *    the run where storage could not be read at all, and a preference silently
+ *    reset to default is indistinguishable from one the user chose.
+ *
+ * 7. `armShortcut` RETURNS THE ACCELERATOR RAW. The Host reads the binding; the
+ *    unit spells it. A Host that returned a rendered chord would be re-deciding,
+ *    per Host and outside the gate, a question this repo has already got wrong
+ *    once: whether the announced form differs from the drawn one. It does on a
+ *    glyph platform and must not anywhere else, and `chordLabel()` is where that
+ *    is written down and checked.
+ *
  * WHICH CONTEXT IS "HERE" is the one piece of unit protocol a second DeckHost
  * has to know, and today it is a literal in `ui/host.js` (`const ME = 'ui'`)
  * with its counterpart `from: 'ui'` on the other side of the seam in
@@ -357,6 +433,10 @@ export function assertHost(host, duties, what = 'Host') {
 export const DECK_HOST_DUTIES = Object.freeze({
   send: 'put one finished message from the deck on the bus',
   onMessage: 'hand the deck every message addressed to it',
+  storageGet: 'read one stored value back, from the area whose lifetime the deck named',
+  storageSet: 'store one value, in the area whose lifetime the deck named',
+  onStorageChanged: 'tell the deck when one stored value changes underneath it',
+  armShortcut: 'report the key chord this platform has bound to the arm gesture',
 });
 
 /**

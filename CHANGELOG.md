@@ -11,6 +11,15 @@ release, whether or not it is otherwise notable.
 
 ## [Unreleased]
 
+### Changed
+
+- The deck's "not armed" line now names the keyboard chord as well as the
+  toolbar icon — "…to arm it, or press Ctrl+Shift+9". The chord is read from the
+  browser rather than typed into the page, so a rebind at
+  `chrome://extensions/shortcuts` is what the deck shows, and it is announced in
+  words where the platform draws it in glyphs. The shortcut itself is unchanged
+  and has worked since 0.1.0; until now only the one-time setup page said so.
+
 ## [0.1.0] — 2026-08-17
 
 First public release.
