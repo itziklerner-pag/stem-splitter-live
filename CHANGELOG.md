@@ -19,6 +19,9 @@ release, whether or not it is otherwise notable.
   `chrome://extensions/shortcuts` is what the deck shows, and it is announced in
   words where the platform draws it in glyphs. The shortcut itself is unchanged
   and has worked since 0.1.0; until now only the one-time setup page said so.
+  Both routes the line offers are the same show/hide gesture: pressing the chord
+  (or clicking the icon) while the deck is on screen arms the tab AND puts the
+  deck away, and a second press brings it back.
 
 ## [0.1.0] — 2026-08-17
 

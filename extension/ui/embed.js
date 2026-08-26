@@ -1074,6 +1074,16 @@ function paint() {
  * a neutral extra — it REPLACES text a screen reader could already read, which
  * is the defect this repo shipped on every non-Mac machine until `chordLabel()`
  * was corrected to join both forms with the separator it draws.
+ *
+ * BOTH ROUTES THIS SENTENCE OFFERS ARE THE SHOW/HIDE GESTURE, and following
+ * either one from this exact state puts the deck away. `armTab()` ends with
+ * `notifyTab(tab.id, 'toggle')` and `content.js` unmounts on a `'toggle'` that
+ * finds a deck already up — so the tab arms and the surface the instruction was
+ * read on disappears, and a second press brings it back armed. That is not new
+ * and not the chord's: the toolbar icon this line has named since 0.1.0 reaches
+ * the identical `armTab()`. It is written down here because the sentence is now
+ * an instruction with two halves, and the next person to read the first half
+ * should not have to rediscover what the second one does.
  */
 function paintArmHint(armed) {
   const chord = armed ? null : armChord;
@@ -1083,6 +1093,10 @@ function paintArmHint(armed) {
       : 'Click the Stem Splitter Live toolbar icon on this tab to arm it.'));
   const el = $('src-chord');
   text(el, chord ? chord.text : '');
+  // `text()` is null-safe and the two attribute branches below are not, so they
+  // take the same guard rather than a different one: `paint()` is on the repaint
+  // path and a throw here takes every later repaint with it.
+  if (!el) return;
   if (chord && chord.say !== chord.text) {
     el.setAttribute('role', 'img');
     el.setAttribute('aria-label', chord.say);
