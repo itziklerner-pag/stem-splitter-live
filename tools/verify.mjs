@@ -4,6 +4,8 @@
  *   node tools/verify.mjs                 # every suite below, browsers included
  *   node tools/verify.mjs --quick         # everything that needs neither a browser
  *                                         #   nor the 114 MB weights
+ *   node tools/verify.mjs --unit          # only the suites extension/unit.json declares
+ *                                         #   over the vendored unit (ADR 0001 decision 3)
  *   node tools/verify.mjs --audible       # ...plus the DAC loopback probe (BlackHole + ffmpeg)
  *   node tools/verify.mjs --strict        # a KNOWN-FLAKY e2e assertion turns the run red
  *   node tools/verify.mjs --only e2e      # run one step by name
@@ -161,6 +163,50 @@ const arg = (k, d) => {
 const QUICK = flag('quick');
 const STRICT = flag('strict');
 const ONLY = arg('only', null);
+const UNIT = flag('unit');
+
+/**
+ * `--unit` — the plan that verifies the VENDORED UNIT, read out of the unit's
+ * own declaration and not re-typed here.
+ *
+ * ADR 0001 decision 3 copies the engine and the deck into a second product;
+ * decision 4 puts them behind a Host seam. `extension/unit.json` is the
+ * declaration of that boundary and `tools/unit-check.mjs` is its gate. What was
+ * missing until #11 is the other half: the suites that say the copy WORKS.
+ * `unit.json` now names them with their step ids, and this is where that list
+ * becomes a plan.
+ *
+ * READ, NOT RE-TYPED, for the reason the note at `RING_PLANES` above gives about
+ * a stale constant in a step title, and the one `tools/host.mjs` gives about the
+ * model pin: a second copy of a list is a list that drifts, and this one drifts
+ * SILENTLY — a `--unit` run over eight of eleven suites prints exactly the same
+ * green as a run over eleven. `--self-check` asserts the plan this builds is the
+ * manifest's list, in both directions; `unit-check` asserts the same agreement
+ * from the manifest's side, in CI, where `--self-check` does not run.
+ *
+ * This file still contains no product logic. The manifest is a plan, not a fact
+ * about audio.
+ */
+let UNIT_DECL = {};
+try {
+  UNIT_DECL = JSON.parse(fs.readFileSync(path.join(ROOT, 'extension', 'unit.json'), 'utf8'));
+} catch (e) {
+  // NOT AN EXCUSE — THE OPPOSITE. An unreadable manifest is a real defect and
+  // `tools/unit-check.mjs` is the step that diagnoses it, in one line, by name.
+  // Parsing it at module scope means an unguarded throw here kills EVERY verify
+  // command, including the one that would have said why: `--quick` would die on
+  // a JSON trace instead of running the gate. So the runner survives, says so,
+  // and hands the question to the gate — while `--unit` exits 2 on an empty
+  // plan and `--self-check` goes red on `UNIT_IDS.length > 0`. Nothing here can
+  // report green over it.
+  // Uncoloured on purpose: `C` is declared below this line, and a palette is
+  // not worth an ordering dependency in the one path that reports a broken file.
+  console.error(`verify: extension/unit.json is unreadable — ${e.message}`);
+  console.error('  --unit cannot build a plan. Run --only unit-check for the diagnosis.');
+}
+const UNIT_IDS = (UNIT_DECL.suites || []).map((s) => s.step);
+/** The one expression that selects the unit's plan. Two callers: the plan filter below, and `--self-check`. */
+const unitPlan = (all) => all.filter((s) => UNIT_IDS.includes(s.id));
 // The seed path and the pinned byte count both come from shared/config.js via
 // tools/host.mjs — see the note at its MODEL_URL. This file carried the 4-stem
 // filename in TWO places (the default and the "how to fetch it" hint) and both
@@ -491,7 +537,17 @@ const lastLines = (s, n) => strip(s).trimEnd().split('\n').slice(-n).join(' / ')
 // is the only non-trivial thing in this file, and getting it wrong in the
 // permissive direction hides a real regression. `node tools/verify.mjs
 // --self-check` runs it against a synthetic transcript, no browser, ~0 s.
-if (flag('self-check')) {
+//
+// A FUNCTION RATHER THAN AN `if` BLOCK SINCE #11, AND CALLED FROM ONE PLACE:
+// immediately after `steps` is built, ~300 lines below. It has to see `steps` —
+// the `--unit` block at the end of it compares the manifest's suite list against
+// the plan this runner would actually build from it, and there is no way to make
+// that claim without the real array. Everything else about it is unchanged: it
+// runs before the plan is filtered, it spawns nothing, and it exits. The one
+// thing that DID move is the call, and `reapOrphanBrowsers()` now sits between
+// here and it — so that function declines to run under `--self-check`, which is
+// what its old position gave it for free. See the guard in it.
+function selfCheck(steps) {
   const B = (s) => `\x1b[1m${s}\x1b[0m`;
   const P = (n) => `  \x1b[32mPASS\x1b[0m ${n}  detail`;
   const F = (n) => `  \x1b[31mFAIL\x1b[0m ${n}  detail`;
@@ -756,6 +812,57 @@ if (flag('self-check')) {
   check('...and a suite\'s prose and section headers are not mistaken for assertions',
     assertionNames('--- 11. cost ---\n      foldChroma 0.018 ms/frame\nokay then\n').length === 0);
 
+  // ---- --unit: the plan IS the manifest's list (#11) -----------------------
+  /**
+   * THE FAILURE THIS EXISTS FOR IS A GREEN ONE. `unitPlan()` is a filter, and a
+   * filter cannot report a miss: a `suites` entry naming a step id that no step
+   * has is not an error, it is a suite that silently does not run, and `--unit`
+   * goes on printing the same green over a smaller plan. Every id being right
+   * TODAY is not the claim — the claim is that the two lists cannot part
+   * company without something going red. Rename a step id, or typo one in
+   * `extension/unit.json`, and this is what says so.
+   *
+   * `unitPlan` is called here and at the plan filter below; this call is the
+   * one that has the whole `steps` array to hand, and the plan filter's call
+   * takes the same argument, so what is asserted here is what runs there.
+   *
+   * The list is compared as SETS, deliberately. Order is not a promise `--unit`
+   * makes: the plan comes out in `steps` order, which is beside-the-module
+   * order, and the manifest is free to be read in any order at all.
+   */
+  const built = unitPlan(steps).map((s) => s.id);
+  const ghosts = UNIT_IDS.filter((id) => !built.includes(id));
+  check('--unit\'s plan is exactly the suite list extension/unit.json declares  '
+    + '[entry point: unitPlan(steps), the same call the plan filter makes]',
+    UNIT_IDS.length > 0 && built.length === UNIT_IDS.length && ghosts.length === 0,
+    ghosts.length ? `NAMES NO STEP: ${ghosts.join(', ')}` : `${built.length} suites: ${built.join(' -> ')}`);
+
+  /**
+   * ...AND THE OTHER DIRECTION, which is the one that rots. The check above
+   * catches a manifest entry that lost its step; this catches a STEP THAT WAS
+   * NEVER CLASSIFIED — a new plain-node suite added to `steps` by someone who
+   * had no reason to think about vendoring, which `--unit` then never runs and
+   * nothing anywhere reports. It is the same shape as the standing rule at the
+   * top of this file ("a suite that nothing runs is not a suite"), one level in:
+   * a suite that `--unit` does not run is not part of the unit's gate, and
+   * saying so out loud is the whole job of `otherSteps`.
+   *
+   * The fix when it fires is one line in `extension/unit.json`: `suites` if the
+   * new step's subject is the engine or the deck, `otherSteps` with a reason if
+   * it is not.
+   */
+  const classifiedIds = new Set([...UNIT_IDS, ...(UNIT_DECL.otherSteps || []).map((s) => s.step)]);
+  const unclassified = steps.map((s) => s.id).filter((id) => !classifiedIds.has(id));
+  check('every step this runner knows is classified by extension/unit.json — the unit\'s, or named in otherSteps',
+    unclassified.length === 0,
+    unclassified.length
+      ? `UNCLASSIFIED: ${unclassified.join(', ')} — add each to "suites" or to "otherSteps"`
+      : `${steps.length} steps, ${UNIT_IDS.length} of them the unit's`);
+
+  const strays = [...classifiedIds].filter((id) => !steps.some((s) => s.id === id));
+  check('...and every step id the manifest names is a step this runner has',
+    strays.length === 0, strays.length ? `NO SUCH STEP: ${strays.join(', ')}` : `${classifiedIds.size} ids`);
+
   console.log(`\n${bad ? `${C.r}${bad} FAILED${C.x}` : `${C.g}self-check green${C.x}`}\n`);
   process.exit(bad ? 1 : 0);
 }
@@ -798,7 +905,11 @@ if (flag('self-check')) {
  * the keyboard cannot see it.
  */
 function reapOrphanBrowsers() {
-  if (flag('no-reap')) return null;
+  // `--self-check` launches nothing, so it has nothing to protect from
+  // contention and no business killing a colleague's browser. It used to be
+  // spared by position — it exited above this line — and since #11 it is spared
+  // on purpose instead, because it now runs below it. Same behaviour, stated.
+  if (flag('no-reap') || flag('self-check')) return null;
   const PAT = 'ms-playwright/chromium';
   let before = '';
   try { before = execFileSync('pgrep', ['-f', PAT], { encoding: 'utf8' }).trim(); } catch { /* none */ }
@@ -1063,8 +1174,58 @@ const steps = [
    *     worker files leave the closure, so two ADR clauses go unmet and the
    *     partition has three files it cannot classify. This is the assertion
    *     that would have caught the integration silently mis-declaring the unit.
+   *
+   * S10 (#11) added the other half — the suites that verify the unit, and this
+   * runner's agreement with the list. Its four mutations, each applied alone
+   * against a green 75:
+   *
+   *   - deleting a listed suite from the tree (`qa/test-edge.mjs`) — 74 of 75,
+   *     and the red names the path. This is the acceptance check for #11.
+   *   - pointing a suite at a Host file (`embed-state` -> `extension/speed.js`)
+   *     — 74 of 75: `speed.js` is neither in the closure nor declared outside
+   *     it, so it is a content script the unit's own plan would have run.
+   *   - a step id in `unit.json` that no step has (`qa-edge` -> `qa-edg`) —
+   *     73 of 75, and `--self-check` goes red on the same edit. That is the
+   *     silent one: `--unit` filters, and a filter cannot report a miss.
+   *   - deleting an `otherSteps` entry (`svg`) — 74 of 75: a step the
+   *     declaration no longer classifies, which is how a new suite quietly
+   *     never joins the unit's gate.
+   *
+   * #11's review found four more silent greens and they are gated now, at 80.
+   * Each measured on the shipped tree BEFORE the fix, then watched red after:
+   *
+   *   - deleting a real read (`content.js` from `speed-pitch`'s `reads`) — was
+   *     75 of 75, exit 0. `reads` was declared-therefore-real only; the
+   *     direction that rots was unasserted.
+   *   - pointing a suite at the wrong file (`pitch` -> `engine/chroma.js`) —
+   *     was 75 of 75: `--unit` runs each step's own argv, so `path` was
+   *     decoration, and S11 copies these paths verbatim.
+   *   - classifying a step twice (`tree` in `suites` AND `otherSteps`) — was
+   *     75 of 75 and `--self-check` green, with `--unit` then running
+   *     tree-check over a copy the same file says it cannot run in.
+   *   - `test.js`'s `group('host')` — 122 assertions that install a Chrome
+   *     platform and grade THIS Host — was undeclared, so the largest step in
+   *     `--unit` read as a claim about the unit alone. It is not one.
+   *
+   * INTEGRATION, #9 and #11 landing in the same wave. S8's `seam` step is the
+   * UNIT'S: every file `tools/seam-check.mjs` touches is unit — it drives
+   * `shared/host.js`'s wrapper over `workers/workerbackend.js` and reads
+   * `workers/inference.worker.js` as text — so it joined `suites`, and the
+   * completeness half above confirms it opens nothing across the seam. Watched
+   * from both sides on the merged tree, each edit alone:
+   *
+   *   - the entry missing — 79 of 80, `UNCLASSIFIED: seam`, and `--self-check`
+   *     red on the same edit. That is the totality assertion #11 added doing
+   *     precisely the job it was added for: a new suite landed and the gate
+   *     asked which side it was on, rather than letting `--unit` never run it.
+   *   - the entry pointing at the wrong file (`seam` -> `tools/tree-check.mjs`)
+   *     — 78 of 80, `NOT WHAT THE STEP RUNS: seam runs tools/seam-check.mjs`.
+   *
+   * The four round-1 numbers above were measured against a green 75 and read
+   * one lower against today's 80: #11's acceptance check, re-run on the merged
+   * tree, is 79 of 80 naming `qa/test-edge.mjs`.
    */
-  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
+  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out, and the suites that say so are the ones --unit runs: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**
    * Beside `tree` because it is the same kind of claim about the same tree — a
    * property of the whole published surface rather than of one module — and a
@@ -1156,10 +1317,36 @@ const steps = [
   },
 ];
 
+// The self-check needs `steps`, and nothing above it does. See the note at
+// `function selfCheck` — it still runs before the plan is built and still exits.
+if (flag('self-check')) selfCheck(steps);
+
+/**
+ * `--unit` REPLACES the plan, exactly as `--only` does, rather than narrowing
+ * whatever `--quick` left. The unit's suites are declared as a list, not as a
+ * predicate over cost, so intersecting them with `--quick` would give a plan
+ * neither flag asked for — and today every one of them is plain node anyway, so
+ * the intersection would be a no-op that reads like a rule.
+ *
+ * `--only` still wins over both, because it is the "run exactly this one thing"
+ * flag and it is what a red step is re-run with.
+ */
 let plan = steps.filter((s) => !(QUICK && (s.slow || s.heavy)));
+if (UNIT) plan = unitPlan(steps);
 if (ONLY) plan = steps.filter((s) => s.id === ONLY);
 if (!plan.length) {
-  console.error(`no step matches --only ${ONLY}. Known: ${steps.map((s) => s.id).join(', ')}`);
+  // Name the selector that emptied it. `--unit` can empty a plan too — an
+  // emptied or mistyped `suites` list in extension/unit.json produces exactly
+  // this — and a message about `--only null` would send the reader to the wrong
+  // file. Exit 2 either way: a plan of nothing is the runner-level VOID case,
+  // and it must not be able to print green.
+  console.error(ONLY
+    ? `no step matches --only ${ONLY}. Known: ${steps.map((s) => s.id).join(', ')}`
+    : UNIT
+      ? 'no step matches the "suites" list in extension/unit.json — '
+        + `it names ${UNIT_IDS.length ? UNIT_IDS.join(', ') : 'nothing at all'}. `
+        + `Known: ${steps.map((s) => s.id).join(', ')}`
+      : 'the plan is empty');
   process.exit(2);
 }
 
@@ -1251,7 +1438,23 @@ if (skipped.length) {
   console.log(`\n${C.y}${C.b}SKIPPED${C.x}`);
   for (const r of skipped) console.log(`  ${C.y}-${C.x} ${r.id}: ${r.detail}`);
 }
-if (QUICK) {
+// Whichever flag actually chose the plan says what it left out, in its own
+// words. `--unit` before `--quick` because it REPLACES the plan: under
+// `--unit --quick`, --quick's list of what it dropped would be true and
+// misleading at once.
+//
+// `--only` has no branch of its own and needs none: it wins the plan over both,
+// and the verdict line below is already a list of exactly the step it ran. What
+// it must not do is let `--unit` describe a plan it replaced — `--unit --only
+// pitch` would otherwise name the ten other unit suites as the only things that
+// did not run, when twenty-one steps did not. Hence `!ONLY` here and on the
+// verdict. (`--quick --only X` keeps its inherited shape, unchanged by #11 and
+// unchanged here: it is the same imprecision, it predates this flag, and
+// widening it is not this slice's edit to make.)
+if (UNIT && !ONLY) {
+  const notRun = steps.filter((s) => !UNIT_IDS.includes(s.id)).map((s) => s.id).join(', ');
+  console.log(`\n${C.y}--unit: ${notRun} did NOT run. This is the vendored unit's own gate, not a green build.${C.x}`);
+} else if (QUICK) {
   const skippedIds = steps.filter((s) => (s.slow || s.heavy) && !s.optIn).map((s) => s.id).join(', ');
   console.log(`\n${C.y}--quick: ${skippedIds} did NOT run. This is not a green build.${C.x}`);
 }
@@ -1261,6 +1464,7 @@ console.log(`\n${C.d}logs -> ${OUT}${C.x}`);
 const red = hard.length > 0 || results.some((r) => r.verdict === 'FAIL' || r.verdict === 'NO-OUTPUT');
 if (red) console.log(`\n${C.r}${C.b}RED${C.x} — ${hard.length} failing assertion${hard.length === 1 ? '' : 's'}. Do not commit as green.\n`);
 else if (flaky.length) console.log(`\n${C.y}${C.b}AMBER${C.x} — everything passed except ${flaky.length} known-flaky assertion${flaky.length === 1 ? '' : 's'} above. Safe to commit; re-run to confirm.\n`);
+else if (UNIT && !ONLY) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — the vendored unit's suites only; ${results.length} of ${steps.length} steps)${C.x}\n`);
 else if (QUICK) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — no browser ran; ${results.length} of ${steps.length} steps)${C.x}\n`);
 else if (skipped.length) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — see SKIPPED above)${C.x}\n`);
 else console.log(`\n${C.g}${C.b}GREEN${C.x} — ${results.map((r) => `${r.id} ${r.detail}`).join(' · ')}\n`);
