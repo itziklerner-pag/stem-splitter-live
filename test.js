@@ -792,7 +792,7 @@ if (group('live')) {
        * demotion and then looked at the buffers, so the consequence — a deck
        * that goes permanently silent, once per capture tick, for ever — rested
        * on reading two comments and believing them. S6 moved the transfer into
-       * `engine/workerbackend.js`, which is precisely the edit that could have
+       * `workers/workerbackend.js`, which is precisely the edit that could have
        * broken it silently.
        *
        * The assertions are byteLengths and a count. A detached ArrayBuffer reads
@@ -5318,7 +5318,7 @@ if (group('host')) {
      * the two properties a plausible second Host gets wrong for free.
      *
      * DRIVEN, NOT IMITATED, like every duty in this block: the shipped
-     * `offscreen/host.js` builds the shipped `engine/workerbackend.js` over a
+     * `offscreen/host.js` builds the shipped `workers/workerbackend.js` over a
      * stubbed `Worker` and `fetch`, so the INIT that comes out carries the
      * shipped `chrome.runtime.getURL`. The `assetUrl` assertions above hold that
      * resolver to the trailing-slash rule; this one holds the HAND-OFF, which is
@@ -6254,7 +6254,7 @@ if (group('host')) {
      * `vendor/ort/` and the probe that names it are FILES ON DISK, so they go
      * through the Host. The worker module itself is reached by
      * `new URL(..., import.meta.url)` and must not — see the note in
-     * `engine/workerbackend.js`. Both halves are asserted, because "thread
+     * `workers/workerbackend.js`. Both halves are asserted, because "thread
      * everything through the Host" and "thread the RIGHT things through the
      * Host" fail differently: the second is a Host handed authority over the
      * unit's own directory layout, and it would go unnoticed under this Host,
@@ -6267,7 +6267,7 @@ if (group('host')) {
      * the `shared` bundle is now what decides which backend gets built.
      */
     const { Deck } = await import('./extension/offscreen/deck.js');
-    const { WorkerBackend } = await import('./extension/engine/workerbackend.js');
+    const { WorkerBackend } = await import('./extension/workers/workerbackend.js');
     const posts = [];
     const spawned = [];
     const fetched = [];
@@ -6318,7 +6318,7 @@ if (group('host')) {
     }
 
     ok('THE ORT PRESENCE PROBE IS RESOLVED THROUGH THE HOST, and it is still a HEAD  '
-      + '[entry point: extension/engine/workerbackend.js constructor, reached from Deck.ensureBackend()]',
+      + '[entry point: extension/workers/workerbackend.js constructor, reached from Deck.ensureBackend()]',
       fetched.length === 1 && fetched[0].url === 'stub://unit/vendor/ort/ort.all.bundle.min.mjs'
       && fetched[0].method === 'HEAD',
       fetched.length === 0
@@ -6327,7 +6327,7 @@ if (group('host')) {
 
     const init = posts.map((p) => p.m).find((m) => m && m.type === 'INIT');
     ok('...and the worker is told where the ORT runtime lives as a DIRECTORY url from the Host  '
-      + '[entry point: extension/engine/workerbackend.js constructor, reached from Deck.ensureBackend()]',
+      + '[entry point: extension/workers/workerbackend.js constructor, reached from Deck.ensureBackend()]',
       init != null && init.wasmDirUrl === 'stub://unit/vendor/ort/' && init.wasmDirUrl.endsWith('/'),
       init == null
         ? `no INIT was posted, so this inspected nothing: ${deckWhy}. Posted: ${posts.map((p) => p.m && p.m.type).join(', ')}`
@@ -6342,7 +6342,7 @@ if (group('host')) {
      */
     const workerUrl = spawned.length === 1 ? spawned[0].url : null;
     ok("THE INFERENCE WORKER'S OWN URL STAYS RELATIVE — the unit's directory layout is the unit's contract, not the Host's  "
-      + '[entry point: extension/engine/workerbackend.js constructor]',
+      + '[entry point: extension/workers/workerbackend.js constructor]',
       workerUrl != null && workerUrl.endsWith('/extension/workers/inference.worker.js')
       && !asked.some((p) => /worker/i.test(p)),
       spawned.length !== 1
@@ -6367,7 +6367,7 @@ if (group('host')) {
      */
     const loadPost = posts.find((p) => p.m && p.m.type === 'LOAD_MODEL');
     ok('THE MODEL BUFFER IS TRANSFERRED INTO THE BACKEND, NOT COPIED  '
-      + '[entry point: extension/engine/workerbackend.js load(), reached from Deck.ensureSession()]',
+      + '[entry point: extension/workers/workerbackend.js load(), reached from Deck.ensureSession()]',
       loadPost != null && loadPost.m.buffer instanceof ArrayBuffer
       && loadPost.transfer.length === 1 && loadPost.transfer[0] === loadPost.m.buffer,
       loadPost == null
@@ -7470,7 +7470,7 @@ if (group('backend')) {
    * rejected concurrent call permanently wedges the session." Not slow — DEAD,
    * for the life of the worker. Seed §16 made that the SEAM'S contract rather
    * than one backend's private rule ("the seam serialises calls; no caller can
-   * wedge a session"), and `engine/backend.js` is that sentence.
+   * wedge a session"), and `shared/host.js` is that sentence.
    *
    * WHICH KIND OF TEST THIS IS — the RENDERING vs REACHABILITY rule at the head
    * of this file. Reachable by construction on the mechanism, rendering-only on
@@ -7490,7 +7490,7 @@ if (group('backend')) {
    * were inside the backend at once, in what order they arrived, how many
    * results came back. A stopwatch would be measuring the machine's load.
    */
-  const { serialiseBackend } = await import('./extension/engine/backend.js');
+  const { serialiseBackend } = await import('./extension/shared/host.js');
 
   /**
    * A backend that RECORDS rather than separates.
@@ -7534,7 +7534,7 @@ if (group('backend')) {
     const results = await Promise.all(mixes.map((m, i) => b.separate(m, outs[i])));
 
     ok('AT MOST ONE separate() IS INSIDE THE BACKEND, ACROSS 8 CONCURRENT CALLS  '
-      + '[entry point: extension/engine/backend.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
+      + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
       f.st.maxInFlight === 1,
       f.st.maxInFlight === 1
         ? '8 calls, max 1 in flight'
@@ -7548,7 +7548,7 @@ if (group('backend')) {
 
     const backAsGiven = results.every((r, i) => r.mix === mixes[i] && r.stems === outs[i]);
     ok('...AND ALL 8 RESOLVE, each with the buffers ITS OWN call lent  '
-      + '[entry point: extension/engine/backend.js serialiseBackend()]',
+      + '[entry point: extension/shared/host.js serialiseBackend()]',
       results.length === 8 && backAsGiven,
       results.length !== 8
         ? `${results.length} results came back, not 8`
@@ -7577,7 +7577,7 @@ if (group('backend')) {
       b.separate(new ArrayBuffer(9), new ArrayBuffer(99)),
     ]);
     ok('load() AND separate() SHARE ONE QUEUE — an inference during the model warm-up is the one overlap the worker’s own `busy` guard cannot see  '
-      + '[entry point: extension/engine/backend.js serialiseBackend()]',
+      + '[entry point: extension/shared/host.js serialiseBackend()]',
       f.st.maxInFlight === 1 && f.st.entered.join(',') === 'load,separate:9' && both.length === 2,
       f.st.maxInFlight === 1
         ? `entered ${f.st.entered.join(',')}`
@@ -7607,7 +7607,7 @@ if (group('backend')) {
     const disposing = b.dispose();
     for (let i = 0; i < 8; i++) await Promise.resolve();
     ok('dispose() IS NOT QUEUED — a backend that has stopped answering must still be stoppable  '
-      + '[entry point: extension/engine/backend.js serialiseBackend(), reached from deck.js Deck.dispose() and engine.js onTeardown]',
+      + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.dispose() and engine.js onTeardown]',
       f.st.disposed === 1 && hung !== null,
       f.st.disposed === 1
         ? 'disposed while a separate() was still outstanding'
@@ -7620,7 +7620,7 @@ if (group('backend')) {
   // ------------------------------------------------ a worker that died under it
   /**
    * THE THREE THINGS A DEAD WORKER MUST DO, all of which used to live in
-   * `offscreen/deck.js` and moved into `engine/workerbackend.js` with the seam.
+   * `offscreen/deck.js` and moved into `workers/workerbackend.js` with the seam.
    * A port is exactly where behaviour goes missing quietly, and none of the
    * three had an assertion on either side of the move.
    *
@@ -7644,7 +7644,7 @@ if (group('backend')) {
    * backend here, which is the point: this block is about the real one.
    */
   {
-    const { WorkerBackend } = await import('./extension/engine/workerbackend.js');
+    const { WorkerBackend } = await import('./extension/workers/workerbackend.js');
     const spawnedHere = [];
     const failures = [];
     const realWorker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
@@ -7709,7 +7709,7 @@ if (group('backend')) {
     }
 
     ok('A WORKER THAT DIES REJECTS EVERY CALL IN FLIGHT — nothing on the wire would ever answer them  '
-      + "[entry point: extension/engine/workerbackend.js die(), reached from the worker's onerror]",
+      + "[entry point: extension/workers/workerbackend.js die(), reached from the worker's onerror]",
       pendingRejected != null && pendingRejected.includes('deck A'),
       pendingRejected == null
         ? 'the in-flight separate() is still pending after the worker died — with no timeout anywhere, '
@@ -7724,7 +7724,7 @@ if (group('backend')) {
         : failures.join(' | '));
 
     ok('...and the NEXT separate() refuses with the recorded reason rather than spawning a replacement per chunk  '
-      + '[entry point: extension/engine/workerbackend.js require(), reached from Deck.infer() inside gpu.run()]',
+      + '[entry point: extension/workers/workerbackend.js require(), reached from Deck.infer() inside gpu.run()]',
       refused != null && refused.includes('deck A') && spawnedByRefusal === 1,
       refused == null
         ? 'separate() neither resolved nor rejected — a backend with no worker swallowed the call'
@@ -7735,7 +7735,7 @@ if (group('backend')) {
           : refused);
 
     ok('...while load() DOES replace it — a worker killed for memory costs one gesture, not a reload  '
-      + '[entry point: extension/engine/workerbackend.js spawn(), reached from Deck.ensureSession()]',
+      + '[entry point: extension/workers/workerbackend.js spawn(), reached from Deck.ensureSession()]',
       spawnedHere.length === 2 && reloaded === 'ok',
       spawnedHere.length !== 2
         ? `${spawnedHere.length} worker(s) were spawned in all — load() did not replace the dead one, so an OOM `
@@ -7758,7 +7758,7 @@ if (group('backend')) {
     catch (e) { return String((e && e.message) || e); }
   })();
   ok('A BACKEND THE HOST ANSWERED WITH IS REFUSED WHERE IT ARRIVES, not at the first arm  '
-    + '[entry point: extension/engine/backend.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
+    + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
     shortBackend != null && shortBackend.includes('dispose') && shortBackend.includes('Backend for deck A'),
     shortBackend == null
       ? 'a backend with no dispose() was ACCEPTED — Deck.dispose() and the pagehide teardown both call it, so the '

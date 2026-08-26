@@ -26,7 +26,7 @@
  *
  * THE WORKER IS NOW BEHIND A SEAM (S6, seed §16's option S2). The deck asks the
  * Host for a `Backend` — `load` / `separate` / `dispose`, waveforms in and
- * waveforms out — and today's Host answers with `engine/workerbackend.js`, which
+ * waveforms out — and today's Host answers with `workers/workerbackend.js`, which
  * is that same worker unchanged inside. What the deck kept is what is
  * ORCHESTRATION: session state and its mirror to the UI, the model bytes, and
  * the cross-deck GPU scheduler. What it no longer knows is that inference
@@ -41,7 +41,7 @@
 
 import { SR, SEGMENT, RING_FRAMES } from '../shared/config.js';
 import { RingConsumer, ringByteLength } from '../shared/ring.js';
-import { serialiseBackend } from '../engine/backend.js';
+import { serialiseBackend, BACKEND_DUTIES } from '../shared/host.js';
 import { LivePipeline } from './live.js';
 
 export class Deck {
@@ -62,9 +62,9 @@ export class Deck {
    * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
    *        resolver (../shared/host.js). Synchronous, unit-relative, no leading
    *        slash — the way the unit names an asset the HOST serves. Not every
-   *        file the unit loads is one of those: `engine/workerbackend.js` reaches
-   *        the inference worker by import, and the note there is why that one
-   *        must NOT go through here.
+   *        file the unit loads is one of those: `workers/workerbackend.js`
+   *        reaches the inference worker by import, and the note there is why
+   *        that one must NOT go through here.
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
@@ -336,7 +336,7 @@ export class Deck {
     /**
      * BOTH QUEUES, NOT EITHER. `gpu.run` is the CROSS-DECK policy — one token,
      * FIFO with a priority jump, and the L3 demotion decisions on either side of
-     * the wait. The backend's own queue (`engine/backend.js`) is the PER-BACKEND
+     * the wait. The backend's own queue (`shared/host.js`) is the PER-BACKEND
      * safety rule that keeps one `separate()` in flight whatever the policy
      * becomes. They answer different questions and neither implies the other.
      *

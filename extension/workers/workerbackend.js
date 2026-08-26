@@ -1,7 +1,7 @@
 /**
  * BACKEND #1 — today's inference worker, behind the seam.
  *
- * `workers/inference.worker.js` is untouched by this file: ONNX Runtime on
+ * `inference.worker.js`, its neighbour, is untouched by this file: ONNX Runtime on
  * WebGPU with a threaded-wasm fallback, the ~283 ms/segment JS STFT/iSTFT around
  * the hoisted-STFT ONNX graph, one ORT session, one wasm instance. What moved
  * here is everything that used to sit in `offscreen/deck.js` between the deck
@@ -130,7 +130,7 @@ export class WorkerBackend {
     /**
      * THE PROBE IS STARTED HERE AND AWAITED IN `load()`.
      *
-     * `workers/inference.worker.js` STATICALLY imports
+     * `./inference.worker.js` STATICALLY imports
      * `../vendor/ort/ort.all.bundle.min.mjs`, which `.gitignore` excludes —
      * `tools/fetch-vendor.sh` puts it there. A module worker that cannot resolve
      * its static import fires `onerror` with an EMPTY message, so without this
@@ -153,8 +153,8 @@ export class WorkerBackend {
     /**
      * THE WORKER URL IS RELATIVE ON PURPOSE, and it does not go through
      * `assetUrl`. `import.meta.url` resolves against THIS module's own location,
-     * so the expression says "the sibling directory `workers/`" and nothing
-     * about where the unit is mounted — which is what makes it correct under a
+     * so the expression says "the file next to this one" and nothing about where
+     * the unit is mounted — which is what makes it correct under a
      * `chrome-extension://` origin and under a desktop Host alike.
      *
      * `assetUrl` exists for the files the unit does NOT reach by import: worklet
@@ -164,7 +164,7 @@ export class WorkerBackend {
      * directory layout, and that layout is part of the unit's contract
      * (ADR 0001 decision 3). Do not "fix" it to `assetUrl`.
      */
-    const w = new Worker(new URL('../workers/inference.worker.js', import.meta.url), { type: 'module' });
+    const w = new Worker(new URL('./inference.worker.js', import.meta.url), { type: 'module' });
     /**
      * Review finding M1, carried across the seam unchanged: any failure that
      * does not arrive as `{type:'ERROR'}` — a module load failure, an uncaught

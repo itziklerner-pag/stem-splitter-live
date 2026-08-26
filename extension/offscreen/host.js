@@ -9,7 +9,7 @@
  * reaching for Chrome on their own — all resolve through `assetUrl` below
  * (S2, #4). The one URL that deliberately does NOT is the inference worker
  * itself, built with `new URL(..., import.meta.url)` inside
- * `../engine/workerbackend.js`: that one is about the unit's own directory
+ * `../workers/workerbackend.js`: that one is about the unit's own directory
  * layout, which is the unit's contract and not the Host's.
  *
  * AND HALF OF WHAT IS HERE IS NOT `chrome.` AT ALL. `captureStream` is
@@ -40,7 +40,7 @@
  */
 
 import { MODEL } from '../shared/config.js';
-import { WorkerBackend } from '../engine/workerbackend.js';
+import { WorkerBackend } from '../workers/workerbackend.js';
 import { MODEL_URL, MODEL_CACHE_NAME } from './host-pin.js';
 
 /** This context's address on the extension message bus. */
@@ -96,8 +96,8 @@ export const captureStream = (sourceToken) => navigator.mediaDevices.getUserMedi
  *
  * Extension-root-relative, no leading slash: `assetUrl('offscreen/capture-processor.js')`.
  * A path that ends in `/` resolves to a directory URL and keeps its trailing
- * slash — `../engine/workerbackend.js` hands `assetUrl('vendor/ort/')` to the
- * inference worker's `INIT`, and ORT appends its own file names to it.
+ * slash — `../workers/workerbackend.js` hands `assetUrl('vendor/ort/')` to
+ * the inference worker's `INIT`, and ORT appends its own file names to it.
  */
 export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
 
@@ -106,7 +106,7 @@ export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
  *
  * THE HOST PICKS THE BACKEND — that is the whole of what this duty is for, and
  * under this Host there is exactly one to pick. `WorkerBackend` is unit code
- * (`../engine/workerbackend.js`), not Chrome code: it needs a `Worker`, a
+ * (`../workers/workerbackend.js`), not Chrome code: it needs a `Worker`, a
  * `fetch` and somewhere to resolve `vendor/ort/`, and none of those is
  * `chrome.*`. What makes it THIS Host's choice is the line below and nothing
  * else, which is what a desktop Host replaces when a native backend exists —

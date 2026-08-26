@@ -17,7 +17,7 @@
  *   modelCached /       they come from is the Host's; whether they are the model
  *   clearModel          is the unit's (`../shared/modelcache.js`).
  *   createBackend       which inference backend a deck gets (S6). Today's is
- *                       `../engine/workerbackend.js` — ORT in a Worker — and
+ *                       `../workers/workerbackend.js` — ORT in a Worker — and
  *                       swapping it is the Host's one line, not a fork of this.
  *
  * `./host.js` is the ONLY file under `offscreen/` that says `chrome.` at all:
