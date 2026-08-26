@@ -103,5 +103,46 @@ for (const { s, n, what } of PAIRED) {
   ok(found >= n, `${s} appears ${found}x (need >= ${n}) — ${what}`);
 }
 
+/**
+ * THE FOURTH PAIR — the deck->host namespace — AND WHY A COUNT CANNOT CARRY IT.
+ *
+ * `from: 'stem-splitter-live'` is the deck's half of the `postMessage`
+ * protocol, and until S5 it had no entry above at all: the sender was eight
+ * literals in `embed.js` and the guard one in `content.js`, and a rename that
+ * moved the eight and forgot the one would have gone unnoticed.
+ *
+ * It is not in the PAIRED list, and the reason is worth writing down because it
+ * generalises. This literal is named by the GATES as well as by the product —
+ * `test.js` drives the shipped host and asserts what it stamps on the wire, and
+ * `docs/ARCHITECTURE.md` spells it in prose. Renaming BOTH real sides therefore
+ * leaves the whole-tree count at 2 and `>= 2` reports the pair intact. Measured,
+ * by doing exactly that: `'stem-splitter-live' appears 2x` stayed green with
+ * neither half of the pair left in the extension. A count that a suite's own
+ * fixtures can satisfy is not evidence about the product.
+ *
+ * So each side is NAMED and each side is CHECKED. That is what "both halves are
+ * present" meant all along; for this pair it is the only form of it that can
+ * still fail.
+ *
+ * FAILS IF IT CANNOT LOOK: a side that is not in the readable tree at all is
+ * reported as missing rather than skipped, so moving a file without moving this
+ * list is a red and not a silent pass.
+ */
+const SIDED = [
+  {
+    s: "'stem-splitter-live'",
+    sides: ['extension/ui/host.js', 'extension/content.js'],
+    what: 'the deck->host postMessage namespace: the deck stamps it, content.js refuses anything else',
+  },
+];
+for (const { s, sides, what } of SIDED) {
+  const missing = sides.filter((rel) => {
+    if (!readable.includes(rel)) return true;
+    return !fs.readFileSync(path.join(ROOT, rel), 'utf8').includes(s);
+  });
+  ok(missing.length === 0, `${s} is on BOTH sides — ${what}${
+    missing.length ? ` — MISSING FROM ${missing.join(', ')}` : ` (${sides.join(', ')})`}`);
+}
+
 console.log(fails ? `\n${fails} of ${checks} FAILED` : `\nname-check: ${checks} checks passed`);
 process.exit(fails ? 1 : 0);
