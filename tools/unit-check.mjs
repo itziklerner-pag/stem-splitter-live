@@ -48,15 +48,28 @@
  *      that name at boot. `unit.json` is the first thing a second Host reads;
  *      a rename on either side must not leave it naming an interface that is
  *      gone.
- *   9. The suites that verify the unit are declared, on disk, on the right side
- *      of the seam, and honest about what they read across it. `--unit` (#11)
- *      is the plan `extension/unit.json` declares, so a suite is gated by being
- *      in that list and by nothing else.
+ *   9. The suites that verify the unit are declared, on disk, AT THE PATH THE
+ *      STEP REALLY RUNS, on the right side of the seam, and honest about what
+ *      they read across it — BOTH WAYS since #11 was reviewed: a declared read
+ *      is really made, and a read really made is declared. `--unit` (#11) is
+ *      the plan `extension/unit.json` declares, so a suite is gated by being in
+ *      that list and by nothing else.
  *  10. ...and the list and `tools/verify.mjs` name the same steps, BOTH WAYS: no
  *      declared id that is not a step (it would silently drop out of `--unit`),
- *      and no step that the declaration never classified (it would silently
- *      never join it). `--self-check` asserts the stronger form of the same
- *      property against the real array; this is the copy that runs in CI.
+ *      no step that the declaration never classified (it would silently never
+ *      join it), and no step classified twice — `suites` and `otherSteps`
+ *      contradicting each other is the same defect as a file claimed by two
+ *      roles, one level up. `--self-check` asserts the first two against the
+ *      real array; this is the copy that runs in CI.
+ *  11. A suite that is ALSO this Host's conformance suite says so. `test.js`'s
+ *      `group('host')` stubs `globalThis.chrome` and asserts about
+ *      `extension/offscreen/host.js` and `extension/ui/host.js` by name: claims
+ *      about THIS Host's platform, not about the unit. The entry declares
+ *      `hostConformance`, and the gate holds it both ways — declared and the
+ *      suite really stubs the platform, stubs it and the suite really declared.
+ *      Without that, `--unit`'s largest step reads as a claim about the unit
+ *      alone, and a second Host that supplies its own holes takes assertion
+ *      failures it has no way to have predicted from this file.
  *
  * AND THE TWO CONTROLS, WHICH ARE THE POINT. Assertion 5 is a search that finds
  * nothing, and a search that finds nothing is indistinguishable from a search
@@ -757,33 +770,58 @@ ok(notHost.length === 0,
     : `  ${plural(declaredReads.length, 'read')} from ${new Set(declaredReads.map((r) => r.from)).size} suites`}`);
 
 /**
- * ...AND THE SUITE STILL NAMES THE FILE. Without this the list is a comment: a
- * `reads` entry outlives the code that earned it, and the next reader treats a
- * file as load-bearing for a suite that stopped opening it years ago. It is the
- * same claim the `hostReads` loop above makes with the crawl — but the crawl
- * cannot make it here, because these reads are ASSEMBLED
- * (`readFileSync(join(EXT, 'speed.js'))`), and a crawl that matches a string
- * literal is blind to a path built from parts. This file's own header says so.
+ * ...AND THE SUITE STILL MAKES THE READ, AND MAKES NO OTHER. Held BOTH WAYS
+ * since the review of #11, because one way is not a gate. Declared-therefore-
+ * real catches a `reads` entry that outlived the code that earned it. Real-
+ * therefore-declared is the direction that ROTS: a suite acquires a new Host
+ * read during ordinary work, nothing goes red, and the list S11 writes
+ * `docs/VENDORING.md` from is quietly short. That is the same silent-green
+ * shape `--unit`'s step ids are held against below, and the same one the
+ * `hostReads` crawl above already closes for the unit's own files
+ * (`UNDECLARED READ`). Measured before it was closed: deleting `"content.js"`
+ * from `speed-pitch`'s `reads` — a read that genuinely happens, at
+ * `qa/speed-pitch.mjs:113` — left this file at 75 of 75, exit 0.
  *
- * The needle is the `extension/`-relative spelling, which is how all six are
- * written at their call sites — `'./extension/ui/host.js'`,
- * `'extension/offscreen/host-pin.js'`, `join(EXT, 'content.js')`. The basename
- * alone would not do: `ui/host.js` and `offscreen/host.js` share one, and a
- * suite that read only the first would vouch for both.
+ * A READ POSITION, NOT A MENTION. The needle is the path inside a string
+ * literal that a file-opening call is looking at: `import(`, `from`,
+ * `new URL(`, `readFile[Sync](`, `require(`, or a `join(`/`resolve(` whose
+ * remaining arguments are literal — which is how all six of these are written
+ * (`await import('./extension/ui/host.js')`, `join(EXT, 'content.js')`,
+ * `new URL('../speed.js', import.meta.url)`). Matching a bare mention instead
+ * would be wrong in both directions at once: `test.js` names `content.js` and
+ * `ui/welcome.js` inside assertion strings it never opens (:5296, :7249), so
+ * the completeness half would demand two false declarations, and the staleness
+ * half would accept a suite that had stopped reading a file it still talks
+ * about — measured on the shipped tree, splitting only the `readFileSync`
+ * literal at `qa/speed-pitch.mjs:130` left the old needle green at 75 of 75,
+ * because the failure message at :156 still said `extension/speed.js`. That
+ * mutation goes red now.
+ *
+ * A literal is matched by SUFFIX (`l === p || l.endsWith('/' + p)`) because
+ * `reads` is spelt `extension/`-relative and the call sites are relative to
+ * wherever they sit. The basename alone would not do: `ui/host.js` and
+ * `offscreen/host.js` share one, and a suite that read only the first would
+ * vouch for both.
  *
  * COMMENTS STRIPPED, with this file's own scanner — the one `demo()` pins at
  * the top. A claim a doc comment can satisfy is not a claim, and every one of
  * these files discusses the seam in prose at length.
  *
- * WHAT IT DOES NOT CARRY, MEASURED RATHER THAN REASONED ABOUT: it says the file
- * is NAMED in code, not that it is READ. `qa/speed-pitch.mjs` names
- * `extension/speed.js` twice — once in the `readFileSync` at :130, once inside
- * the failure message at :156 — and splitting the read's literal alone leaves
- * this green (checked: 75 of 75). Splitting both takes it red (74 of 75). So it
- * catches a suite that has finished with a Host file, and it does not catch a
- * suite that stopped reading one it still talks about. A stricter needle would
- * have to recognise a read, which is a parser; the honest fix if that ever
- * matters is to declare the call site, not to tighten the regex.
+ * WHICH HALF IS THE CONTROL. The completeness half is a search that finds
+ * nothing, and this file's standing rule is that such a search must be pinned
+ * from the other side or it is indistinguishable from a search that did not
+ * run. It is: a `READ_CALL` that matched nothing at all would take the
+ * STALENESS half red on all seven declared reads at once, and that half prints
+ * every one of them by name. Breaking the needle cannot go quiet.
+ *
+ * WHAT IT STILL DOES NOT CARRY, MEASURED RATHER THAN REASONED ABOUT: a path
+ * assembled from a VARIABLE is invisible in both directions — `join(EXT, name)`
+ * matches nothing here, and `test.js` walks `extension/` wholesale for its last
+ * grep exactly that way. A suite that started reading a Host file through a
+ * computed path would still go undeclared. That is the blind spot this file's
+ * header already owns about `engine/pitchbank.js:1040`, it is one the crawl
+ * above shares, and closing it needs a parser rather than a tighter regex. The
+ * honest fix if it ever matters is to declare the call site.
  */
 const codeOnly = (src, kind) => {
   const m = commentMask(src, kind);
@@ -794,15 +832,77 @@ const codeOnly = (src, kind) => {
 const suiteCode = new Map();
 for (const s of runnable) {
   const abs = path.join(ROOT, s.path);
-  if ((s.reads || []).length && fs.existsSync(abs)) {
-    suiteCode.set(s.path, codeOnly(fs.readFileSync(abs, 'utf8'), KIND(s.path)));
-  }
+  if (fs.existsSync(abs)) suiteCode.set(s.path, codeOnly(fs.readFileSync(abs, 'utf8'), KIND(s.path)));
 }
-const stale = declaredReads.filter((r) => !(suiteCode.get(r.from) || '').includes(r.path));
+
+/** Everything a `reads` entry may name, and everything the scan looks for. */
+const SEAM = [...hostPaths, ...holePaths];
+const READ_CALL = /(?:\bimport\s*\(|\bfrom\s+|\bnew\s+URL\s*\(|\breadFileSync\s*\(|\breadFile\s*\(|\brequire\s*\(|\b(?:join|resolve)\s*\([^)'"`]*)\s*['"`]([^'"`]+)['"`]/g;
+const realReads = new Map(runnable.map((s) => {
+  const lits = [...(suiteCode.get(s.path) || '').matchAll(READ_CALL)].map((m) => m[1]);
+  return [s.path, SEAM.filter((t) => lits.some((l) => l === t || l.endsWith(`/${t}`)))];
+}));
+
+const stale = declaredReads.filter((r) => !(realReads.get(r.from) || []).includes(r.path));
 ok(declaredReads.length > 0 && stale.length === 0,
-  `...and every one of them is really named in the suite that declares it${stale.length
-    ? ` — NOT FOUND, the declaration outlived the code: ${stale.map((r) => `${r.from} -> ${r.path}`).join(', ')}`
+  `...and every one of them is really read by the suite that declares it${stale.length
+    ? ` — NOT IN A READ POSITION, the declaration outlived the code: ${stale.map((r) => `${r.from} -> ${r.path}`).join(', ')}`
     : `  ${declaredReads.map((r) => `${r.from} -> ${r.path}`).join(', ')}`}`);
+
+const undeclaredRead = runnable.flatMap((s) => (realReads.get(s.path) || [])
+  .filter((t) => !(s.reads || []).includes(t))
+  .map((t) => `${s.path} -> ${t}`));
+ok(undeclaredRead.length === 0,
+  `...and no suite reads across the seam without declaring it — the list a copy is told to carry cannot be short${undeclaredRead.length
+    ? ` — UNDECLARED READ: ${undeclaredRead.join(', ')}; add each to that suite's "reads" in extension/unit.json`
+    : `  ${runnable.length} suites and runners scanned in read position`}`);
+
+/**
+ * ...AND A SUITE THAT IS ALSO THIS HOST'S CONFORMANCE SUITE SAYS SO. This is
+ * the finding that mattered most about #11 as delivered: `unit` is the largest
+ * step in `--unit`, and it is two suites in one file. `test.js`'s
+ * `group('host')` (4570-7397, 122 of the file's 583 `ok(` sites) installs a
+ * Chrome platform at :4950 and asserts that THIS Host's `offscreen/host.js` and
+ * `ui/host.js` behave — a claim about the Host, not about the unit.
+ *
+ * Nothing else here can see that. `offscreen/host.js` and `ui/host.js` are
+ * HOLES: a second product MUST supply its own, so the reads above succeed and
+ * `reads` reports nothing missing. What a copy actually gets is assertion
+ * failures about a platform it does not have — measured, by replacing
+ * `extension/offscreen/host.js:58` `send()` with a contract-satisfying
+ * non-Chrome implementation (same envelope, same undefined return, same
+ * swallowed delivery failure, over a plain bus): step `unit` goes to
+ * `610 passed, 2 failed`, both reds naming `send()`. No ENOENT anywhere.
+ *
+ * `otherSteps` cannot express it, because `unit` is genuinely both. So the
+ * entry declares it and the gate holds the declaration to the code both ways.
+ * The needle is `globalThis.chrome`: installing a platform is the sharp,
+ * checkable act, and it is what makes those assertions unpassable off Chrome. A
+ * suite that instead asserts about a Host file by READING it is caught by
+ * `reads` above — between them the two mechanisms are covered.
+ */
+const CHROME_STUB = 'globalThis.chrome';
+const undeclaredConf = runnable
+  .filter((s) => (suiteCode.get(s.path) || '').includes(CHROME_STUB) && !s.hostConformance)
+  .map((s) => s.path);
+ok(undeclaredConf.length === 0,
+  `every suite that installs this Host's platform declares itself a Host-conformance suite${undeclaredConf.length
+    ? ` — STUBS ${CHROME_STUB} AND DOES NOT SAY SO: ${undeclaredConf.join(', ')}; add "hostConformance" to its entry in extension/unit.json`
+    : `  ${runnable.filter((s) => s.hostConformance).length} of ${runnable.length}: `
+      + `${runnable.filter((s) => s.hostConformance).map((s) => s.path).join(', ')}`}`);
+
+const declaredConf = runnable.filter((s) => s.hostConformance);
+const idleConf = declaredConf.filter((s) => {
+  const code = suiteCode.get(s.path) || '';
+  const g = s.hostConformance.group;
+  return !code.includes(CHROME_STUB) || (g && !code.includes(`group('${g}')`));
+}).map((s) => `${s.path}${s.hostConformance.group ? ` group('${s.hostConformance.group}')` : ''}`);
+ok(declaredConf.length > 0 && idleConf.length === 0,
+  `...and every declared one really does, in the assertion group it names${declaredConf.length === 0
+    ? ' — NONE DECLARED, so the assertion above has nothing to be the other half of'
+    : idleConf.length
+      ? ` — DECLARED BUT NOT FOUND: ${idleConf.join(', ')}`
+      : `  ${declaredConf.map((s) => `${s.path} group('${s.hostConformance.group}')`).join(', ')}`}`);
 
 /**
  * THE MANIFEST AND THE RUNNER NAME THE SAME STEPS. A `suites` entry whose step
@@ -823,14 +923,63 @@ ok(declaredReads.length > 0 && stale.length === 0,
 const runnerSrc = codeOnly(fs.readFileSync(path.join(ROOT, 'tools/verify.mjs'), 'utf8'), 'js');
 const stepsAt = runnerSrc.indexOf('\nconst steps = [');
 const stepsEnd = stepsAt < 0 ? -1 : runnerSrc.indexOf('\n];', stepsAt);
-const stepIds = stepsAt < 0 || stepsEnd < 0 ? []
-  : [...runnerSrc.slice(stepsAt, stepsEnd).matchAll(/\bid:\s*'([\w-]+)'/g)].map((m) => m[1]);
+const stepsSrc = stepsAt < 0 || stepsEnd < 0 ? '' : runnerSrc.slice(stepsAt, stepsEnd);
+const idHits = [...stepsSrc.matchAll(/\bid:\s*'([\w-]+)'/g)];
+const stepIds = idHits.map((m) => m[1]);
 ok(stepIds.includes('unit-check'),
   `control: the runner's step list was really found and read  ${stepIds.length
     ? `${plural(stepIds.length, 'step')} in tools/verify.mjs, this one among them`
-    : 'NOTHING EXTRACTED — the `const steps = [` slice missed, so the two assertions below prove nothing'}`);
+    : 'NOTHING EXTRACTED — the `const steps = [` slice missed, so the assertions below prove nothing'}`);
+
+/**
+ * ...AND A SUITE'S `path` IS THE FILE ITS STEP REALLY RUNS. Without this the
+ * paths are decoration: `--unit` runs each step's own `args` out of
+ * `tools/verify.mjs` and never looks at `path`, so a wrong-but-existing one is
+ * silently green — measured, before this was here: pointing `pitch` at
+ * `extension/engine/chroma.js` left the file at 75 of 75, exit 0. It matters
+ * because S11 is instructed to copy these paths verbatim to build the vendored
+ * copy; a copy assembled from a decorative list is missing a file it will only
+ * discover at `MODULE_NOT_FOUND`.
+ *
+ * The region for a step is from its `id:` to the next one, so a step with no
+ * `args` cannot borrow its neighbour's. Every one of the eleven `suites` steps
+ * is a one-line `{ id, title, args: ['<path>'] }` today; a step whose command
+ * grows past a single literal argument would need this to grow with it, and
+ * would say so by going red rather than by drifting.
+ */
+const stepArg = new Map(idHits.map((m, i) => {
+  const region = stepsSrc.slice(m.index, i + 1 < idHits.length ? idHits[i + 1].index : stepsSrc.length);
+  const a = /\bargs:\s*\[\s*'([^']+)'/.exec(region);
+  return [m[1], a ? a[1] : null];
+}));
+const wrongPath = SUITES.filter((s) => stepIds.includes(s.step) && stepArg.get(s.step) !== s.path);
+ok(wrongPath.length === 0,
+  `...and every suite's declared path is the file its step really runs${wrongPath.length
+    ? ` — NOT WHAT THE STEP RUNS: ${wrongPath.map((s) => `${s.step} runs ${stepArg.get(s.step) || 'no literal args'}, declared ${s.path}`).join('; ')}`
+    : `  ${SUITES.length} paths pinned to their step's argv`}`);
 
 const declaredSteps = [...SUITES.map((s) => s.step), ...(decl.otherSteps || []).map((s) => s.step)];
+
+/**
+ * A PARTITION, NOT TWO OPINIONS. The two assertions below make the
+ * classification TOTAL; this one makes it DISJOINT, which is the same defect
+ * one level up from `no path is claimed by two roles` and `nothing in the unit
+ * is also declared Host` above. A step in `suites` AND in `otherSteps` passed
+ * every instrument here and in `--self-check` — measured: adding
+ * `{"step":"tree","path":"tools/tree-check.mjs"}` to `suites` while leaving
+ * `tree` in `otherSteps` left this file at 75 of 75 and `--self-check` green,
+ * with `--unit` then running tree-check inside a vendored copy, over the
+ * `otherSteps` line that says tree-check cannot run in one.
+ *
+ * It lives here rather than in `--self-check` because it is a claim about the
+ * manifest alone — no `steps` array is needed to see it — and because this is
+ * the copy CI runs.
+ */
+const dupSteps = [...new Set(declaredSteps.filter((id, i) => declaredSteps.indexOf(id) !== i))];
+ok(dupSteps.length === 0,
+  `no step is classified twice — "suites" and "otherSteps" partition the runner's plan${dupSteps.length
+    ? ` — CLASSIFIED TWICE: ${dupSteps.join(', ')}; a step is the unit's or it is not`
+    : `  ${declaredSteps.length} ids, all distinct`}`);
 const noSuchStep = declaredSteps.filter((id) => !stepIds.includes(id));
 ok(noSuchStep.length === 0,
   `every step id the declaration names is a step tools/verify.mjs has${noSuchStep.length

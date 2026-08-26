@@ -1190,6 +1190,22 @@ const steps = [
    *   - deleting an `otherSteps` entry (`svg`) — 74 of 75: a step the
    *     declaration no longer classifies, which is how a new suite quietly
    *     never joins the unit's gate.
+   *
+   * #11's review found four more silent greens and they are gated now, at 80.
+   * Each measured on the shipped tree BEFORE the fix, then watched red after:
+   *
+   *   - deleting a real read (`content.js` from `speed-pitch`'s `reads`) — was
+   *     75 of 75, exit 0. `reads` was declared-therefore-real only; the
+   *     direction that rots was unasserted.
+   *   - pointing a suite at the wrong file (`pitch` -> `engine/chroma.js`) —
+   *     was 75 of 75: `--unit` runs each step's own argv, so `path` was
+   *     decoration, and S11 copies these paths verbatim.
+   *   - classifying a step twice (`tree` in `suites` AND `otherSteps`) — was
+   *     75 of 75 and `--self-check` green, with `--unit` then running
+   *     tree-check over a copy the same file says it cannot run in.
+   *   - `test.js`'s `group('host')` — 122 assertions that install a Chrome
+   *     platform and grade THIS Host — was undeclared, so the largest step in
+   *     `--unit` read as a claim about the unit alone. It is not one.
    */
   { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out, and the suites that say so are the ones --unit runs: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**
@@ -1405,9 +1421,19 @@ if (skipped.length) {
   for (const r of skipped) console.log(`  ${C.y}-${C.x} ${r.id}: ${r.detail}`);
 }
 // Whichever flag actually chose the plan says what it left out, in its own
-// words. `--unit` first because it REPLACES the plan: under `--unit --quick`,
-// --quick's list of what it dropped would be true and misleading at once.
-if (UNIT) {
+// words. `--unit` before `--quick` because it REPLACES the plan: under
+// `--unit --quick`, --quick's list of what it dropped would be true and
+// misleading at once.
+//
+// `--only` has no branch of its own and needs none: it wins the plan over both,
+// and the verdict line below is already a list of exactly the step it ran. What
+// it must not do is let `--unit` describe a plan it replaced — `--unit --only
+// pitch` would otherwise name the ten other unit suites as the only things that
+// did not run, when twenty-one steps did not. Hence `!ONLY` here and on the
+// verdict. (`--quick --only X` keeps its inherited shape, unchanged by #11 and
+// unchanged here: it is the same imprecision, it predates this flag, and
+// widening it is not this slice's edit to make.)
+if (UNIT && !ONLY) {
   const notRun = steps.filter((s) => !UNIT_IDS.includes(s.id)).map((s) => s.id).join(', ');
   console.log(`\n${C.y}--unit: ${notRun} did NOT run. This is the vendored unit's own gate, not a green build.${C.x}`);
 } else if (QUICK) {
@@ -1420,7 +1446,7 @@ console.log(`\n${C.d}logs -> ${OUT}${C.x}`);
 const red = hard.length > 0 || results.some((r) => r.verdict === 'FAIL' || r.verdict === 'NO-OUTPUT');
 if (red) console.log(`\n${C.r}${C.b}RED${C.x} — ${hard.length} failing assertion${hard.length === 1 ? '' : 's'}. Do not commit as green.\n`);
 else if (flaky.length) console.log(`\n${C.y}${C.b}AMBER${C.x} — everything passed except ${flaky.length} known-flaky assertion${flaky.length === 1 ? '' : 's'} above. Safe to commit; re-run to confirm.\n`);
-else if (UNIT) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — the vendored unit's suites only; ${results.length} of ${steps.length} steps)${C.x}\n`);
+else if (UNIT && !ONLY) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — the vendored unit's suites only; ${results.length} of ${steps.length} steps)${C.x}\n`);
 else if (QUICK) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — no browser ran; ${results.length} of ${steps.length} steps)${C.x}\n`);
 else if (skipped.length) console.log(`\n${C.g}${C.b}GREEN${C.x} ${C.y}(partial — see SKIPPED above)${C.x}\n`);
 else console.log(`\n${C.g}${C.b}GREEN${C.x} — ${results.map((r) => `${r.id} ${r.detail}`).join(' · ')}\n`);
