@@ -40,11 +40,20 @@
  */
 
 import { MODEL } from '../shared/config.js';
+import { BUS } from '../shared/host.js';
 import { WorkerBackend } from '../workers/workerbackend.js';
 import { MODEL_URL, MODEL_CACHE_NAME } from './host-pin.js';
 
-/** This context's address on the extension message bus. */
-const ME = 'off';
+/**
+ * This context's address on the extension message bus, READ OUT OF THE SEAM'S
+ * OWN DECLARATION rather than spelled here.
+ *
+ * It was `const ME = 'off'` until Host interface v1 (S11): three files spelled
+ * three literals and nothing connected them, so "hand the engine every message
+ * addressed to it" was a duty a second Host could read in full and still not
+ * know how to discharge. `BUS` is where the addresses are frozen.
+ */
+const ME = BUS.engine;
 
 /**
  * @type {import('../shared/host.js').EngineHost['send']}
@@ -56,7 +65,7 @@ const ME = 'off';
  * fills the console with a condition that is entirely normal.
  */
 export const send = (msg) => {
-  chrome.runtime.sendMessage({ v: 1, to: 'ui', from: ME, ...msg }).catch(() => {});
+  chrome.runtime.sendMessage({ v: 1, to: BUS.deck, from: ME, ...msg }).catch(() => {});
 };
 
 /**

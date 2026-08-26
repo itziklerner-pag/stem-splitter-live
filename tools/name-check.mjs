@@ -163,6 +163,38 @@ const SIDED = [
       { rel: 'extension/content.js', form: /!==\s*'STEM_SPLITTER_LIVE_EMBED'/, is: "content.js's type guard" },
     ],
   },
+  /**
+   * THE TWO FIELD RENAMES HOST INTERFACE v1 MADE (S11, #12), and they are here
+   * rather than in a seam gate because this is the file that knows what a
+   * half-landed rename costs. Both cross the Host seam in the direction the
+   * seam gates cannot see: `tools/unit-check.mjs` asks whether a unit file
+   * reaches for `chrome.`, and neither of these ever did — the leak was a Chrome
+   * NOUN on a wire the unit is forbidden to know the Host of, which reads as
+   * ordinary JavaScript from both ends.
+   *
+   * A half-landed rename here is silent in the worst way: `m.sourceToken` is
+   * `undefined` if the worker still sends `streamId`, `getUserMedia` is handed
+   * `undefined` as its `chromeMediaSourceId`, and the arm gesture fails with a
+   * platform error about a constraint rather than about a rename. The
+   * `session.armed` half is quieter still — the deck reads `undefined`, decides
+   * it is not armed, and paints the not-armed hint over a tab that IS armed.
+   */
+  {
+    s: 'CAPTURE_START.sourceToken',
+    what: "the capture token's wire name: the Host mints it, the engine carries it back to captureStream() without looking inside it (v1 froze it; it was Chrome's `streamId`)",
+    sides: [
+      { rel: 'extension/sw/service-worker.js', form: /type:\s*'CAPTURE_START',\s*sourceToken\b/, is: "the worker's send" },
+      { rel: 'extension/offscreen/engine.js', form: /captureStart\(m\.sourceToken\b/, is: "the engine's CAPTURE_START case" },
+    ],
+  },
+  {
+    s: 'SESSION.session.armed',
+    what: 'the deck\'s "am I armed?": the Host derives a boolean, the deck reads one (v1 froze it; it was `!!session.tabId`, which made a tab id the unit\'s definition of armed)',
+    sides: [
+      { rel: 'extension/sw/service-worker.js', form: /armed:\s*!!s\.tabId\b/, is: "sessionForDeck()'s derivation" },
+      { rel: 'extension/ui/embed.js', form: /armed:\s*m\.session\.armed === true\b/, is: "the deck's SESSION projection" },
+    ],
+  },
   {
     s: "'stem-splitter-live-deck'",
     what: 'the injected element id: content.js creates it, the browser gate is what looks for it',

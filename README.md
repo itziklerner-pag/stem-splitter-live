@@ -191,9 +191,12 @@ extension/         the extension — load this unpacked
   offscreen/         THE ENGINE — AudioContext, capture ring, worklets
   engine/            pure DSP, each file with its own runnable suite
   workers/           ONNX Runtime inference worker
-  shared/            config, the Host seam, ring buffers, WAV, stem cache
+  shared/            config, the Host seam (host.js), ring buffers, WAV, stem cache
+  unit.json          which file is on which side of the Host seam
+  unit.sha256        one SHA-256 per unit file (tools/unit-hash.mjs writes it)
   ui/                the deck (embed.*), the welcome page, display maths
-docs/              ARCHITECTURE, AUDIO (the DSP spec), SIX-STEM-CONTRACT
+docs/              ARCHITECTURE, AUDIO (the DSP spec), SIX-STEM-CONTRACT,
+                   VENDORING (how a second product copies the engine + deck)
 tools/             verify + the gates + the fetch scripts
 qa/                edge cases and the passthrough-gain acceptance gate
 test.js            the DSP suite

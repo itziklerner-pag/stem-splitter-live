@@ -12,17 +12,62 @@
  */
 
 import { ARM_ERROR_KEY } from '../shared/config.js';
+import { BUS } from '../shared/host.js';
+
+/**
+ * THE BUS ADDRESSES COME FROM THE SEAM'S DECLARATION, not from literals here.
+ *
+ * This context is the Host's privileged half and it is the ORIGIN of three of
+ * the four messages the unit cannot send itself (`CAPTURE_START`,
+ * `CAPTURE_STOP`, `DECK_PREPARE`) — so it has to know how the unit is
+ * addressed, and until Host interface v1 (S11) it knew by spelling `'off'`,
+ * `'ui'` and `'sw'` five times. Change the unit's address and this file goes on
+ * shouting into the old one: the arm gesture stops arming, with nothing in any
+ * console, because a broadcast nobody is listening for looks exactly like a
+ * broadcast that worked.
+ *
+ * `'tab'` BELOW IS DELIBERATELY NOT ONE OF THEM. It addresses `content.js`, and
+ * that is Host talking to Host — the unit never sees the message and has no word
+ * for the context. Putting it in `BUS` would put a Host's private address inside
+ * the unit's declaration of its own protocol.
+ */
 
 const OFFSCREEN_URL = 'offscreen/offscreen.html';
 
 // ---------------------------------------------------------------- persistence
 /**
- * ONE armed tab. `session` keeps the shape it has always had —
- * `{tabId, title, url, armedAt}` — because the deck page and
- * `tools/embed-smoke.mjs` read `session.tabId` directly.
+ * ONE armed tab. THE STORED RECORD KEEPS THE SHAPE IT HAS ALWAYS HAD —
+ * `{tabId, title, url, armedAt}` — because it is this Host's own bookkeeping:
+ * `startCapture()` needs the tab id to mint a capture token, `chrome.tabs`
+ * events key off it, and `tools/embed-smoke.mjs` reads
+ * `chrome.storage.session`'s copy directly.
+ *
+ * WHAT GOES ON THE WIRE IS NOT THIS RECORD — see `sessionForDeck()`. S11 froze
+ * Host interface v1, and a deck that answered "am I armed?" with `!!tabId` was
+ * the last place the unit knew what a tab was.
  */
 const KEY = 'session';
 const EMPTY = { tabId: null, title: null, url: null, armedAt: null };
+
+/**
+ * THE SESSION RECORD AS THE DECK IS ALLOWED TO SEE IT — `{armed, title, url,
+ * armedAt}`, and `armed` is a boolean this Host derives rather than a tab id
+ * the deck reads the truthiness of.
+ *
+ * This is one of the three messages a Host must ORIGINATE for the deck
+ * (`shared/host.js`, `DeckHost.onMessage`), so its shape is part of Host
+ * interface v1 and not of this file's convenience. The translation is HERE, in
+ * the Host, because that is the whole of what a seam is for: a second Host with
+ * no tabs answers `armed` from whatever it does have, and the deck's four
+ * `session.armed` reads do not move.
+ *
+ * `title` and `url` describe the Source and travel unchanged; the deck reads
+ * neither today (the page behind the frame shows both) and they are on the wire
+ * because the record has carried them since 0.1.0.
+ */
+const sessionForDeck = (s) => ({
+  armed: !!s.tabId, title: s.title, url: s.url, armedAt: s.armedAt,
+});
 
 async function getSession() {
   const got = await chrome.storage.session.get(KEY);
@@ -31,12 +76,12 @@ async function getSession() {
 async function setSession(s) {
   await chrome.storage.session.set({ [KEY]: s });
   chrome.runtime.sendMessage({
-    v: 1, to: 'ui', from: 'sw', type: 'SESSION', session: s,
+    v: 1, to: BUS.deck, from: BUS.host, type: 'SESSION', session: sessionForDeck(s),
   }).catch(() => {});
 }
 
 function toUi(msg) {
-  chrome.runtime.sendMessage({ v: 1, to: 'ui', from: 'sw', ...msg }).catch(() => {});
+  chrome.runtime.sendMessage({ v: 1, to: BUS.deck, from: BUS.host, ...msg }).catch(() => {});
 }
 
 // ------------------------------------------------------- the durable refusal
@@ -153,7 +198,7 @@ async function ensureOffscreen() {
  */
 function notifyTab(tabId, mode) {
   if (!tabId) return;
-  chrome.tabs.sendMessage(tabId, { v: 1, to: 'tab', from: 'sw', type: 'STEM_SPLITTER_LIVE_EMBED', mode }).catch(() => {});
+  chrome.tabs.sendMessage(tabId, { v: 1, to: 'tab', from: BUS.host, type: 'STEM_SPLITTER_LIVE_EMBED', mode }).catch(() => {});
 }
 
 /**
@@ -236,29 +281,40 @@ async function startCapture() {
     return;
   }
   await ensureOffscreen();
-  let streamId;
+  let sourceToken;
   try {
-    streamId = await chrome.tabCapture.getMediaStreamId({ targetTabId: s.tabId });
+    sourceToken = await chrome.tabCapture.getMediaStreamId({ targetTabId: s.tabId });
   } catch (e) {
     const msg = String(e.message || e);
     const hit = ARM_ERRORS.find(([re]) => re.test(msg));
     await raiseArm(hit ? hit[1] : 'ARM_FAILED', (hit ? hit[2] : msg) + ` [${msg}]`);
     return;
   }
+  /**
+   * `sourceToken`, NOT `streamId`, AND THE SOURCE HAS NO TAB ID — Host
+   * interface v1, frozen in S11. Both names were Chrome's leaking through a
+   * wire the unit is forbidden to know the Host of: the engine carries the
+   * token straight back to `host.captureStream()` without looking inside it
+   * (`offscreen/engine.js` `captureStart()`), and it never read `source.tabId`
+   * at all — the engine's own dev paths wrote `tabId: null` to satisfy a shape
+   * nothing consumed. `source` describes the Source, so it is `{title, url}`:
+   * the two fields the engine really reads, at `engine.js`'s `videoIdFromUrl`
+   * and the cache entry's title.
+   */
   chrome.runtime.sendMessage({
-    v: 1, to: 'off', from: 'sw', type: 'CAPTURE_START', streamId,
-    source: { tabId: s.tabId, title: s.title, url: s.url },
+    v: 1, to: BUS.engine, from: BUS.host, type: 'CAPTURE_START', sourceToken,
+    source: { title: s.title, url: s.url },
   }).catch(() => {});
 }
 
 // ------------------------------------------------------------------- routing
 chrome.runtime.onMessage.addListener((m, _sender, sendResponse) => {
-  if (!m || m.to !== 'sw') return;
+  if (!m || m.to !== BUS.host) return;
   (async () => {
     switch (m.type) {
       case 'SW_STATUS':
         await ensureOffscreen();
-        toUi({ type: 'SESSION', session: await getSession() });
+        toUi({ type: 'SESSION', session: sessionForDeck(await getSession()) });
         break;
       case 'SW_ENSURE_OFFSCREEN':
         await ensureOffscreen();
@@ -281,7 +337,7 @@ chrome.runtime.onMessage.addListener((m, _sender, sendResponse) => {
          */
         await ensureOffscreen();
         chrome.runtime.sendMessage({
-          v: 1, to: 'off', from: 'sw', type: 'DECK_PREPARE',
+          v: 1, to: BUS.engine, from: BUS.host, type: 'DECK_PREPARE',
         }).catch(() => {});
         break;
 
@@ -317,7 +373,7 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   // Stop the capture too, or its MediaStream track sits in the offscreen
   // document holding a dead tab and the deck plays 7.8 s of history forever.
   // The offscreen document cannot see chrome.tabs; only here can.
-  chrome.runtime.sendMessage({ v: 1, to: 'off', from: 'sw', type: 'CAPTURE_STOP' }).catch(() => {});
+  chrome.runtime.sendMessage({ v: 1, to: BUS.engine, from: BUS.host, type: 'CAPTURE_STOP' }).catch(() => {});
   await raiseArm('TAB_GONE', 'The captured tab was closed.');
 });
 

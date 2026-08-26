@@ -11,6 +11,34 @@ release, whether or not it is otherwise notable.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-08-26
+
+The Host seam. Nothing about what the extension does changes; what changes is
+that the engine and the deck no longer know they are inside a Chrome extension,
+so a second product can host them without forking them
+([ADR 0001](docs/adr/0001-desktop-app-is-a-separate-product.md)). Three
+user-visible fixes rode along.
+
+### Security and privacy
+
+- **A seek no longer starts the model download the user declined.** Scrubbing
+  the video restarted live capture through a path that did not ask whether the
+  weights were on disk, so a user who had said no to the 172 MiB download could
+  have it start anyway by dragging the scrubber. The guard that the rest of the
+  build goes through is now on that path too. No other change to data handling:
+  still no telemetry, still exactly one network request in the extension's
+  lifetime, still nothing transmitted.
+
+### Fixed
+
+- The arm chord is announced as **words** on every platform that draws it in
+  words. It was being labelled as a graphic on non-Mac machines, which replaced
+  text a screen reader could already read with an accessible name saying the
+  same thing — so the chord was announced twice or awkwardly, depending on the
+  reader. The announced form now follows the drawn form.
+- The brand mark and wordmark parse as XML, so they render through `<img src>`
+  and not only when inlined.
+
 ### Changed
 
 - The deck's "not armed" line now names the keyboard chord as well as the
@@ -22,6 +50,32 @@ release, whether or not it is otherwise notable.
   Both routes the line offers are the same show/hide gesture: pressing the chord
   (or clicking the icon) while the deck is on screen arms the tab AND puts the
   deck away, and a second press brings it back.
+
+### Added — for anyone building on this
+
+None of this is visible in the browser. It is here because the tag is what a
+second product pins.
+
+- **Host interface v1, frozen.** `extension/shared/host.js` declares what the
+  engine and the deck ask of whatever hosts them — five interfaces, their duty
+  tables, and a boot-time `assertHost()` that refuses a Host short a duty and
+  names the duty. The file opens with what v1 freezes, the four Chrome-shaped
+  assumptions taken off the wire at the freeze, and the two limitations named
+  rather than closed.
+- **`extension/unit.json`** — which file is on which side of the seam, with the
+  argument for each — and **`extension/unit.sha256`**, one SHA-256 per unit file
+  in `shasum -c` format, written by `node tools/unit-hash.mjs`.
+- **[`docs/VENDORING.md`](docs/VENDORING.md)** — how a second product copies the
+  unit out of a tag and verifies it, dry-run from an empty directory before it
+  was published.
+- **Three new gates**, all in `node tools/verify.mjs --quick`:
+  `tools/unit-check.mjs` (the unit still comes out, reaches for no `chrome.`,
+  and the sums file still describes the tree), `tools/seam-check.mjs` (one
+  inference call in flight per backend; `dispose()` settles what it takes away),
+  and `node tools/verify.mjs --unit`, the plan `unit.json` declares — 12 steps,
+  no browser, no weights, no `node_modules`.
+- Verification is 23 gates and 1452 assertions in `--quick`, up from 19 gates
+  and 1302 at 0.1.0.
 
 ## [0.1.0] — 2026-08-17
 
@@ -60,5 +114,6 @@ First public release.
 - No `downloads` permission, and an automated gate asserts its continued
   absence.
 
-[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/itziklerner-pag/stem-splitter-live/releases/tag/v0.1.0

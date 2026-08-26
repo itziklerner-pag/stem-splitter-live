@@ -5086,7 +5086,7 @@ if (group('host')) {
           ? 'chrome.runtime.sendMessage is a broadcast, so `to` is the routing, and the routing is applied here'
           : `the engine was handed ${seen.length} message(s) not addressed to it: ${JSON.stringify(seen)}`);
 
-    const mine = { v: 1, to: 'off', from: 'sw', type: 'CAPTURE_START', streamId: 'tok' };
+    const mine = { v: 1, to: 'off', from: 'sw', type: 'CAPTURE_START', sourceToken: 'tok' };
     const rMine = inbox ? inbox(mine) : null;
     ok('...and what it hands over is the RAW ENVELOPE — the same object, not a copy and not the payload',
       seen.length === 1 && seen[0] === mine,

@@ -36,7 +36,8 @@ import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, PREFS_KEY, SR } from '../shared
  * carries the duty lists and the rules a second application would have to hold.
  */
 import {
-  assertHost, assertHostOption, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+  assertHost, assertHostOption, BUS,
+  DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
 } from '../shared/host.js';
 import { host } from './host.js';
 import {
@@ -127,13 +128,32 @@ assertHost(host.page, DECK_PAGE_DUTIES, 'DeckHost.page');
  * player SAY so rather than merely omit it.
  */
 const transport = assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost');
-const toOff = (m) => host.send({ v: 1, to: 'off', from: 'ui', ...m });
-const toSw = (m) => host.send({ v: 1, to: 'sw', from: 'ui', ...m });
+/**
+ * THE DECK'S TWO CORRESPONDENTS, addressed out of the seam's own declaration
+ * (`BUS`, `../shared/host.js`) rather than out of three string literals.
+ * `DeckHost.send` takes a FINISHED envelope — the addresses are the unit's
+ * protocol and stamping them here is what keeps the Host a transport.
+ */
+const toOff = (m) => host.send({ v: 1, to: BUS.engine, from: BUS.deck, ...m });
+const toSw = (m) => host.send({ v: 1, to: BUS.host, from: BUS.deck, ...m });
 
 // ------------------------------------------------------------------- state
-// The SESSION record carries a title and a url too; this surface reads neither
-// (the page behind the frame shows both), so only the tab id is held.
-let session = { tabId: null };
+/**
+ * THE DECK'S VIEW OF THE SESSION, and it is a BOOLEAN — `armed` — not a tab id
+ * whose truthiness stands in for one.
+ *
+ * This is what Host interface v1 froze here (S11). The `SESSION` message is one
+ * of the three a Host must ORIGINATE for the deck (`shared/host.js`,
+ * `DeckHost.onMessage`), and until the freeze the deck answered "am I armed?"
+ * with `!!session.tabId` at four sites — the last place in the unit that knew
+ * what a tab was, and a duty a Host with no tabs could only discharge by
+ * inventing a truthy id. This Host derives the boolean in `sw/service-worker.js`
+ * (`sessionForDeck()`), which is where a translation belongs.
+ *
+ * The record carries a title and a url too; this surface reads neither (the page
+ * behind the frame shows both).
+ */
+let session = { armed: false };
 let engineInfo = null;
 let err = null;            // {code, message, advisory, seq}
 /**
@@ -666,7 +686,7 @@ const isCapturing = () => {
 };
 
 function startLive() {
-  const send = () => toOff({ type: 'LIVE_START', deck: DECK, tabId: session.tabId });
+  const send = () => toOff({ type: 'LIVE_START', deck: DECK });
   if (isCapturing()) { send(); return; }
   if (waiting) return;
   waiting = true;
@@ -750,7 +770,7 @@ const HOSTED = transport != null;
 
 function reconcile() {
   const what = follow({
-    halted, armed: !!session.tabId, status: live.status, videoPlaying, hosted: HOSTED,
+    halted, armed: session.armed, status: live.status, videoPlaying, hosted: HOSTED,
   });
   if (what === 'start') {
     /**
@@ -1073,7 +1093,7 @@ function paintModel() {
 
 // -------------------------------------------------------------------- paint
 function paint() {
-  const armed = !!session.tabId;
+  const armed = session.armed;
   paintArmHint(armed);
   paintStatus();
   paintBanner();
@@ -1144,7 +1164,7 @@ function paintStatus() {
   // for the welcome page while this deck is priming its ring perfectly happily.
   const modelPct = live.phase === 'model' && m && m.total ? (m.got / m.total) * 100 : null;
   const c = chip({
-    armed: !!session.tabId,
+    armed: session.armed,
     halted,
     status: live.status,
     videoPlaying,
@@ -1345,7 +1365,7 @@ function closeKeys() {
 let lastDeckPost = '';
 function postDeck() {
   const claim = {
-    armed: !!session.tabId,
+    armed: session.armed,
     keys: hostKeys({ anySolo: anySolo(), overlayOpen: keysOpen() }),
   };
   // The dedupe is on the CLAIM, not on the finished message: the wire's `from`
@@ -2112,7 +2132,26 @@ host.onMessage((m) => {
       if (err && ARM_CODES.has(err.code)) { err = null; paint(); }
       break;
     case 'SESSION':
-      if (m.session) session = { ...session, ...m.session };
+      /**
+       * PROJECTED, NOT MERGED, and `armed` is read as `=== true`.
+       *
+       * `{ ...session, ...m.session }` was the shape until S11 froze this
+       * message, and it is the one a Host can get silently wrong: a record that
+       * omits the field leaves the PREVIOUS value standing, so a Host that
+       * forgot to say "disarmed" leaves a deck that believes it is still armed
+       * — and the deck's whole not-armed hint, the one surface that tells the
+       * user what to do about it, never appears. Projecting makes an omitted
+       * `armed` read as `false`, which is the safe direction of the two and the
+       * loud one: the deck says it is not armed and names the gesture that
+       * would arm it.
+       */
+      if (m.session) {
+        session = {
+          armed: m.session.armed === true,
+          title: m.session.title ?? null,
+          url: m.session.url ?? null,
+        };
+      }
       reconcile();
       paint();
       break;
@@ -2271,7 +2310,7 @@ $('eject').addEventListener('click', () => {
   if (RUNNING.has(live.status)) stopLive();
   dismissArmError();
   toSw({ type: 'SW_DISARM', deck: DECK });
-  session = { tabId: null };
+  session = { armed: false };
   paint();
 });
 
@@ -2399,7 +2438,18 @@ host.onStorageChanged('local', PREFS_KEY, (p) => applyPrefs(p));
  *
  * THE `.catch` IS THE PLATFORM SAYING IT HAS NO SUCH THING — a host with no
  * command table at all. `armChord` stays null and the sentence falls back to the
- * toolbar icon, which is the true instruction on such a host anyway.
+ * toolbar-icon half alone.
+ *
+ * THAT FALLBACK IS THIS HOST'S SENTENCE, AND HOST INTERFACE v1 DID NOT FIX IT
+ * (S11, ruled and recorded in `shared/host.js`). "Click the Stem Splitter Live
+ * toolbar icon on this tab to arm it" is true of a browser extension and of
+ * nothing else: a Host with no toolbar and no tabs answers `armShortcut()` with
+ * `null` — honestly, as the duty allows — and the deck then prints an
+ * instruction that names an affordance the user does not have. It is the one
+ * host-shaped thing left in the deck after the freeze, it is cosmetic, and
+ * `docs/VENDORING.md` names it as a string a copy patches. It is NOT a Host
+ * duty in v1: putting user-facing copy behind the seam hands a second product
+ * one English sentence it cannot lay out, wrap or translate.
  */
 host.armShortcut().then((accel) => { armChord = chordLabel(accel, MAC); paint(); }).catch(() => {});
 

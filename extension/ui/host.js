@@ -33,13 +33,19 @@
  * assertions green-on-nothing with it. See rule 2 in `../shared/host.js`.
  */
 
+import { BUS } from '../shared/host.js';
+
 /**
- * This context's address on the bus. The deck's outbound envelope is composed
- * in `embed.js` (`to: 'off'` / `to: 'sw'`, `from: 'ui'`) because the addresses
- * are the unit's protocol; the host reads `to` in exactly one place, here, to
- * answer the one question only the transport can — "is this one mine?"
+ * This context's address on the bus, READ OUT OF THE SEAM'S OWN DECLARATION.
+ * The deck's outbound envelope is composed in `embed.js` (`to: BUS.engine` /
+ * `to: BUS.host`, `from: BUS.deck`) because the addresses are the unit's
+ * protocol; the host reads `to` in exactly one place, here, to answer the one
+ * question only the transport can — "is this one mine?"
+ *
+ * It was `const ME = 'ui'` until Host interface v1 (S11) put the address set in
+ * `../shared/host.js`, where a second Host reading its duties finds them.
  */
-const ME = 'ui';
+const ME = BUS.deck;
 
 /**
  * THE ONLY TWO AREAS THIS HOST WILL INDEX, and the refusal is a P1 guard rather
