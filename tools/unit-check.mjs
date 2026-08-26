@@ -719,7 +719,7 @@ ok(SUITES.length > 0 && RUNNERS.length > 0,
 
 /**
  * REPO-RELATIVE, not `extension/`-relative like every other path in this file,
- * and the `doc` block says so: seven of these thirteen live outside
+ * and the `doc` block says so: eight of these fourteen live outside
  * `extension/` — a suite is not a thing Chrome loads. Resolved from ROOT for
  * that reason.
  */
@@ -729,7 +729,7 @@ ok(missingRun.length === 0,
     ? ` — MISSING: ${missingRun.join(', ')}` : `  ${plural(runnable.length, 'path')}, repo-relative`}`);
 
 /**
- * WHICH SIDE OF THE SEAM A SUITE MAY SIT ON. Six of the eleven are unit files
+ * WHICH SIDE OF THE SEAM A SUITE MAY SIT ON. Six of the twelve are unit files
  * that self-check under plain node, so they are in the closure; one
  * (`ui/dev/selftest.mjs`) is declared `outside`. What no suite in this list may
  * be is a Host file: `extension/autonav.js` and `extension/speed.js` are also

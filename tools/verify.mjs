@@ -1206,6 +1206,24 @@ const steps = [
    *   - `test.js`'s `group('host')` — 122 assertions that install a Chrome
    *     platform and grade THIS Host — was undeclared, so the largest step in
    *     `--unit` read as a claim about the unit alone. It is not one.
+   *
+   * INTEGRATION, #9 and #11 landing in the same wave. S8's `seam` step is the
+   * UNIT'S: every file `tools/seam-check.mjs` touches is unit — it drives
+   * `shared/host.js`'s wrapper over `workers/workerbackend.js` and reads
+   * `workers/inference.worker.js` as text — so it joined `suites`, and the
+   * completeness half above confirms it opens nothing across the seam. Watched
+   * from both sides on the merged tree, each edit alone:
+   *
+   *   - the entry missing — 79 of 80, `UNCLASSIFIED: seam`, and `--self-check`
+   *     red on the same edit. That is the totality assertion #11 added doing
+   *     precisely the job it was added for: a new suite landed and the gate
+   *     asked which side it was on, rather than letting `--unit` never run it.
+   *   - the entry pointing at the wrong file (`seam` -> `tools/tree-check.mjs`)
+   *     — 78 of 80, `NOT WHAT THE STEP RUNS: seam runs tools/seam-check.mjs`.
+   *
+   * The four round-1 numbers above were measured against a green 75 and read
+   * one lower against today's 80: #11's acceptance check, re-run on the merged
+   * tree, is 79 of 80 naming `qa/test-edge.mjs`.
    */
   { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out, and the suites that say so are the ones --unit runs: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**
