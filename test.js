@@ -4486,7 +4486,10 @@ if (group('host')) {
    *   3. The stubs exist only to break ONE declared duty at a time, which is the
    *      one thing a real Host cannot be asked to do on demand.
    */
-  const { assertHost, ENGINE_HOST_DUTIES, DECK_HOST_DUTIES } = await import('./extension/shared/host.js');
+  const {
+    assertHost, assertHostOption,
+    ENGINE_HOST_DUTIES, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+  } = await import('./extension/shared/host.js');
   const engineHost = await import('./extension/offscreen/host.js');
   const duties = Object.keys(ENGINE_HOST_DUTIES);
   const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
@@ -5230,10 +5233,49 @@ if (group('host')) {
   head('host — the DECK half of the same seam: the boot check, and the transport it hides');
   /**
    * The shipped DeckHost, driven and never imitated: a check that reimplemented
-   * the two-line module it is guarding would be a second copy of the bug. It
-   * names `chrome` only inside its two function bodies, so importing it costs
-   * nothing here and the stub goes on `globalThis` at the point of use.
+   * the module it is guarding would be a second copy of the bug.
+   *
+   * THE PLATFORM IS STUBBED, NEVER THE HOST — the same rule the engine half
+   * states. `chrome` goes on `globalThis` at the point of use; `window` has to
+   * go on before the import, because `ui/host.js` reads `window.parent` and
+   * hangs its one `message` listener at MODULE SCOPE. That is deliberate on
+   * both sides: the module asks `window.parent` rather than a bare `parent`
+   * precisely so it can be driven from here, and the frame question is
+   * evaluated once, at import, which is what makes the two-import test below
+   * mean anything.
+   *
+   * `posted` is the outgoing postMessage wire and `listeners` the incoming one.
+   * A LONE window is one whose `parent` is itself — a document opened outside a
+   * frame, where a post to `parent` lands back on its own listener.
+   *
+   * WHICH WINDOW IT WENT TO IS TAGGED, and that tag is the whole difference
+   * between an assertion and a name. Both sinks land in the same `posted` array,
+   * so without `to` a Host that posted to its OWN window instead of its parent —
+   * every deck -> host message reaching `content.js` never — is indistinguishable
+   * from a correct one. Review measured exactly that: `window.postMessage(msg,
+   * '*')` in place of `window.parent.postMessage` left `node test.js host` at
+   * 58 passed, 0 failed, under an assertion whose name says "to `parent`".
+   * On a LONE window `parent` IS the window, so `to: 'self'` there is the truth
+   * and not a miss.
    */
+  const makeWindow = (framed) => {
+    const w = {
+      listeners: [], posted: [],
+      addEventListener(type, fn) { w.listeners.push([type, fn]); },
+      postMessage(msg, targetOrigin) { w.posted.push({ to: 'self', msg, targetOrigin }); },
+    };
+    w.parent = framed
+      ? { postMessage: (msg, targetOrigin) => w.posted.push({ to: 'parent', msg, targetOrigin }) }
+      : w;
+    return w;
+  };
+  /** Deliver one `message` event to whatever the module registered. */
+  const deliver = (w, source, data) => {
+    for (const [type, fn] of w.listeners) if (type === 'message') fn({ source, data });
+  };
+  const realWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const framedWin = makeWindow(true);
+  globalThis.window = framedWin;
   const deckHost = (await import('./extension/ui/host.js')).host;
   const deckDuties = Object.keys(DECK_HOST_DUTIES);
   /**
@@ -6444,6 +6486,434 @@ if (group('host')) {
         ? 'ensurePlaybackWorklet() SWALLOWED a load failure — the deck would then build a node for a processor that is not there'
         : broken);
   }
+
+  // ------------------------------------------- the page, and the player on it
+  head('host — the DECK half: the page it is drawn into, and the player above it');
+  /**
+   * WHAT S5 MOVED AND WHY IT NEEDS ITS OWN COVERAGE.
+   *
+   * The deck used to talk to the page it is drawn into with eight bare
+   * `parent.postMessage` calls and one `window.addEventListener('message')`.
+   * Both are now duties: `host.page` (keys, the autoplay report, the frame's
+   * own life) and `host.transport` (the player). The split is not cosmetic —
+   * `host.transport != null` is now the ONLY thing that decides whether this
+   * deck is hosted, replacing `window.parent !== window`.
+   *
+   * That replacement is the whole slice, and it is the assertion that has to be
+   * unmissable: a Host that draws the deck as a TOP-LEVEL document and reports
+   * its player is hosted, and the old frame test called it unhosted — which
+   * `follow()` reads as "nobody is ever going to tell me whether the video is
+   * playing, so RUN", i.e. a capture and a 109 MB model download on boot, on a
+   * page nobody pressed play on.
+   */
+  {
+    const pageDuties = Object.keys(DECK_PAGE_DUTIES);
+    const transportDuties = Object.keys(DECK_TRANSPORT_DUTIES);
+    const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
+
+    // ------------------------------------------------ the controls: it passes
+    /**
+     * THE CONTROL FOR EVERY REFUSAL BELOW. Without it, "a Host short a page duty
+     * is refused" is satisfied by a function that refuses everything.
+     */
+    const pageOk = threw(() => assertHost(deckHost.page, DECK_PAGE_DUTIES, 'DeckHost.page'));
+    ok('THE SHIPPED DeckHost.page SATISFIES EVERY DECLARED DUTY  '
+      + '[entry point: extension/ui/host.js, the module extension/ui/embed.js imports]',
+      pageDuties.length > 0 && pageOk === null,
+      pageDuties.length === 0
+        ? 'DECK_PAGE_DUTIES is empty — this assertion has no coverage at all'
+        : pageOk || `${pageDuties.length} duties: ${pageDuties.join(', ')}`);
+
+    const trOk = threw(() => assertHost(deckHost.transport, DECK_TRANSPORT_DUTIES, 'DeckHost.transport'));
+    ok('...and so does the SHIPPED DeckHost.transport, when the Host has a player at all',
+      transportDuties.length > 0 && trOk === null,
+      transportDuties.length === 0
+        ? 'DECK_TRANSPORT_DUTIES is empty — this assertion has no coverage at all'
+        : trOk || `${transportDuties.length} duties: ${transportDuties.join(', ')}`);
+
+    // --------------------------------- an optional namespace must be DECLARED
+    /**
+     * ENTRY POINT: `assertHostOption(host, 'transport', …)` at the top of
+     * `extension/ui/embed.js`. It is a different question from `assertHost`'s,
+     * and this is the case that makes it worth a function: a Host that MEANT to
+     * supply a transport and misspelled the key looks exactly like a Host that
+     * deliberately has no player. One of those boots a deck that waits for its
+     * page; the other boots a deck that starts a capture on its own.
+     */
+    const silent = threw(() => assertHostOption({ send() {}, onMessage() {} }, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost'));
+    ok('A HOST THAT NEVER MENTIONED `transport` IS REFUSED — an omission is not an answer  '
+      + "[entry point: assertHostOption(), called at extension/ui/embed.js module scope]",
+      silent != null && silent.includes('transport') && silent.includes('null'),
+      silent == null
+        ? 'a Host with no `transport` property was ACCEPTED as a Host with no player — a misspelled key now '
+          + 'boots the deck into the state follow() reads as "nobody will ever tell me, so run"'
+        : silent);
+
+    const declared = { send() {}, onMessage() {}, transport: null };
+    const declaredOut = probe(assertHostOption, declared, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost');
+    ok('...and a DECLARED absence is accepted, and reads back as null  '
+      + '[entry point: assertHostOption(), the `transport: null` a Host with no player writes]',
+      declaredOut.ok && declaredOut.v === null,
+      declaredOut.ok ? String(declaredOut.v) : `it threw: ${declaredOut.e}`);
+
+    const short = { send() {}, onMessage() {}, transport: Object.fromEntries(transportDuties.map((k) => [k, () => {}])) };
+    delete short.transport.drive;
+    const shortWhy = threw(() => assertHostOption(short, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost'));
+    ok('...and a transport that is PRESENT BUT SHORT is refused, naming the duty and the namespace',
+      shortWhy != null && shortWhy.includes('drive() — ') && shortWhy.includes('DeckHost.transport'),
+      shortWhy == null ? 'a transport with no drive() was ACCEPTED' : shortWhy);
+
+    const noHostAtAll = threw(() => assertHostOption(undefined, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost'));
+    ok('...and with NO HOST AT ALL it throws rather than answering "no player" — a check that cannot look must fail',
+      noHostAtAll != null && noHostAtAll.includes('no host module was supplied'),
+      noHostAtAll == null
+        ? 'assertHostOption(undefined, …) returned without throwing — the absent-host case would read as a deliberate absence'
+        : noHostAtAll);
+
+    // -------------------------------------- hosted is a HOST fact, not a frame
+    /**
+     * THE SLICE'S CENTRAL CLAIM, DRIVEN RATHER THAN READ.
+     *
+     * The shipped `ui/host.js` is imported a SECOND time under a `window` whose
+     * `parent` is itself — a document opened outside a frame. The query string
+     * is what makes Node evaluate the module again rather than hand back the
+     * cached instance; the frame question is answered once, at module scope,
+     * which is exactly the thing being checked.
+     *
+     * BOTH HALVES, so the control can lose: framed must give a transport and
+     * lone must give null. An implementation that returned `null` always, or an
+     * object always, fails one of them.
+     *
+     * ...AND `page` SURVIVES BOTH. A deck with no player still has to be able to
+     * size itself and take its keys, which is the whole reason these are two
+     * namespaces and not one.
+     */
+    const loneWin = makeWindow(false);
+    globalThis.window = loneWin;
+    const lone = (await import('./extension/ui/host.js?lone')).host;
+    globalThis.window = framedWin;
+
+    ok('HOSTED IS A FACT ABOUT THE HOST, NOT ABOUT FRAMES: a player above the deck is what supplies a transport  '
+      + '[entry point: extension/ui/host.js module scope, imported twice under two windows]',
+      deckHost.transport !== null && typeof deckHost.transport === 'object' && lone.transport === null,
+      `framed -> ${deckHost.transport === null ? 'null' : 'a transport'}, `
+        + `lone -> ${lone.transport === null ? 'null' : 'a transport'}`);
+
+    const lonePage = threw(() => assertHost(lone.page, DECK_PAGE_DUTIES, 'DeckHost.page'));
+    ok('...and the PAGE survives either way — a deck with no player still has to size itself and take its keys',
+      lonePage === null && lone.transport === null,
+      lonePage || `page ok, transport ${lone.transport === null ? 'null' : 'present'}`);
+
+    // ------------------------------------------ what the deck actually reaches
+    /**
+     * READ AS TEXT, like the engine half above it: `extension/ui/embed.js`
+     * builds a whole DOM at module scope and cannot be evaluated from Node.
+     * Comments are stripped first — these are claims about code, and a claim a
+     * doc comment can satisfy is not a claim.
+     */
+    const embedRaw = readFileSync(new URL('./extension/ui/embed.js', import.meta.url), 'utf8');
+    const embedSrc = strip(embedRaw);
+    const hostRaw = readFileSync(new URL('./extension/ui/host.js', import.meta.url), 'utf8');
+    const hostSrc = strip(hostRaw);
+
+    /**
+     * THE CHECKS ARE ONLY WORTH THEIR NAMES IF THE DECK ACTUALLY RUNS THEM, AND
+     * RUNS THEM FIRST — the deck-side twin of "THE ENGINE ITSELF RUNS THE CHECK"
+     * seven hundred lines above, here for the same reason and found the same way.
+     *
+     * Every refusal above drives `assertHost` and `assertHostOption` DIRECTLY,
+     * which proves the two functions work and proves nothing at all about
+     * `extension/ui/embed.js` ever calling them. Review proved the gap by making
+     * the deck stop calling them — `const transport = host.transport || null;`
+     * in place of the `assertHostOption` line, and the `assertHost(host.page, …)`
+     * line deleted: `--quick` stayed GREEN and `unit` stayed at 513 passed, 0
+     * failed, byte-identical, while two assertions above went on naming those
+     * call sites as their entry point. `tools/embed-smoke.mjs` cannot see it
+     * either, and that is not a gap in the browser gate: under THIS Host the
+     * behaviour is identical, because the whole value of the calls is the refusal
+     * a SECOND Host would get at boot instead of a TypeError at a user gesture.
+     * S3 shipped with the same hole under `assertHost(host, DECK_HOST_DUTIES)`,
+     * so all three are checked here and not only this slice's two.
+     *
+     * MATCHED AT THE START OF A LINE, which in this file means module scope. A
+     * check that runs inside a function the deck may or may not reach is not a
+     * boot check, and the `//`-and-`/* *\/`-stripped source is what it is matched
+     * against so that a call commented out reads as a call that is gone.
+     *
+     * FAILS IF IT CANNOT LOOK: a build in which the first use each check is
+     * ordered against cannot be found is a red, not a pass.
+     */
+    const BOOTS = [
+      {
+        call: 'assertHost(host, DECK_HOST_DUTIES, …)',
+        at: /^assertHost\(host, DECK_HOST_DUTIES/m,
+        use: /\bhost\.(send|onMessage)\s*\(/,
+        guards: 'host.send()/host.onMessage()',
+        cost: 'a Host short a bus duty boots, and the first STATUS goes nowhere — a deck that never '
+          + 'leaves idle with nothing in the console',
+      },
+      {
+        call: 'assertHost(host.page, DECK_PAGE_DUTIES, …)',
+        at: /^assertHost\(host\.page, DECK_PAGE_DUTIES/m,
+        use: /\bhost\.page\./,
+        guards: 'host.page.*()',
+        cost: 'a Host short a page duty boots clean and throws at the first height report',
+      },
+      {
+        call: "assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, …)",
+        at: /^const transport = assertHostOption\(host, 'transport'/m,
+        use: /\btransport\s*(\.|!=)/,
+        guards: 'the `transport` binding',
+        cost: 'a misspelled `transport` key reads as "this Host has no player", which follow() reads '
+          + 'as licence to run: a capture and a 109 MB download on a page nobody pressed play on',
+      },
+    ];
+    const boots = BOOTS.map((b) => ({ ...b, i: embedSrc.search(b.at), u: embedSrc.search(b.use) }));
+    const notRun = boots.filter((b) => b.i < 0);
+    ok('THE DECK ITSELF RUNS ALL THREE BOOT CHECKS — they are called at embed.js module scope, not only from here  '
+      + '[entry point: extension/ui/embed.js module scope, comments stripped]',
+      notRun.length === 0,
+      notRun.length
+        ? notRun.map((b) => `${b.call} is NOT called at embed.js module scope — every refusal above still passes and ${b.cost}`).join(' · ')
+        : `3 of 3, at ${boots.map((b) => b.i).join(', ')} chars in`);
+
+    const late = boots.filter((b) => b.i < 0 || b.u < 0 || b.i > b.u);
+    ok('...and each runs BEFORE the deck first reaches for the thing it guards, so a refusal lands at boot',
+      late.length === 0,
+      late.length
+        ? late.map((b) => (b.u < 0
+          ? `cannot look: nothing in embed.js matches /${b.use.source}/, so the ordering claim for ${b.call} has no anchor`
+          : b.i < 0
+            ? `${b.call} is not there to order`
+            : `${b.call} at ${b.i} runs AFTER ${b.guards} at ${b.u} — the Host is already in use by the time it is checked`)).join(' · ')
+        : boots.map((b) => `${b.guards} ${b.i}<${b.u}`).join(' · '));
+
+    /**
+     * THE DECK NO LONGER KNOWS WHAT A FRAME IS, asserted as an ABSENCE and a
+     * PRESENCE together — the shape `tools/tree-check.mjs` uses for the arm
+     * chord, and for the same reason: the absence alone is satisfied by a build
+     * in which the frame test was simply deleted and `hosted` hard-coded.
+     */
+    const hostedLine = /const HOSTED = transport != null;/.test(embedSrc);
+    const framesInDeck = [...embedSrc.matchAll(/\bwindow\.parent\b|\bparent\.postMessage\b/g)].map((m) => m[0]);
+    ok('THE DECK ASKS THE HOST, NOT THE WINDOW: `hosted` comes off the transport and embed.js names no frame at all  '
+      + '[entry point: extension/ui/embed.js, comments stripped]',
+      hostedLine && framesInDeck.length === 0,
+      !hostedLine
+        ? 'no `const HOSTED = transport != null;` in embed.js — the input to follow()`s hosted branch is not the Host'
+        : framesInDeck.length
+          ? `embed.js still names ${framesInDeck.join(', ')} — under a desktop Host that is the wrong question`
+          : 'hosted <- transport != null, and no window.parent anywhere in the deck');
+
+    ok('...and the frame test is the HOST\'s, where it is true: ui/host.js is the one file that asks it',
+      /window\.parent !== window/.test(hostSrc),
+      /window\.parent !== window/.test(hostSrc)
+        ? 'extension/ui/host.js decides FRAMED, and nothing else does'
+        : 'no `window.parent !== window` in extension/ui/host.js — the absence above is then satisfied by a build '
+          + 'that simply stopped asking, and every deck is hosted or none is');
+
+    /**
+     * THE INTERFACE AND ITS ONE CONSUMER MUST NOT DRIFT APART, in either
+     * direction — the deck-side twin of the engine's pair. A duty used but not
+     * declared is a Host that passes the boot check and then throws at a user
+     * gesture; a duty declared but never used is one more thing a second Host
+     * implements for nothing.
+     *
+     * Matched as CALLS. `host.page.` is unambiguous; the transport is reached
+     * through the module-scope `transport` binding `assertHostOption` returns,
+     * which is why the two patterns differ.
+     */
+    const reachedPage = [...new Set([...embedSrc.matchAll(/\bhost\.page\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+    const reachedTr = [...new Set([...embedSrc.matchAll(/\btransport\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+    const undeclared = [
+      ...reachedPage.filter((k) => !pageDuties.includes(k)).map((k) => `host.page.${k}()`),
+      ...reachedTr.filter((k) => !transportDuties.includes(k)).map((k) => `transport.${k}()`),
+    ];
+    ok('EVERY PAGE AND TRANSPORT DUTY THE DECK REACHES FOR IS DECLARED  '
+      + '[entry point: extension/ui/embed.js, comments stripped]',
+      reachedPage.length > 0 && reachedTr.length > 0 && undeclared.length === 0,
+      reachedPage.length === 0 || reachedTr.length === 0
+        ? `the deck reaches ${reachedPage.length} page and ${reachedTr.length} transport duties — either the seam is gone or this scan cannot see it`
+        : undeclared.length
+          ? `undeclared: ${undeclared.join(', ')} — declare it or a Host will pass the boot check and still throw`
+          : `${reachedPage.length} page: ${reachedPage.join(', ')} · ${reachedTr.length} transport: ${reachedTr.join(', ')}`);
+
+    const unreached = [
+      ...pageDuties.filter((k) => !reachedPage.includes(k)).map((k) => `page.${k}`),
+      ...transportDuties.filter((k) => !reachedTr.includes(k)).map((k) => `transport.${k}`),
+    ];
+    ok('...and every declared one is actually reached for, so a second Host implements nothing dead',
+      reachedPage.length > 0 && reachedTr.length > 0 && unreached.length === 0,
+      unreached.length ? `declared but never called: ${unreached.join(', ')}` : `all ${pageDuties.length + transportDuties.length}`);
+
+    // ------------------------------------------------- the outgoing page wire
+    /**
+     * REACHABLE, NOT CONSTRUCTED: every assertion below CALLS the shipped
+     * `extension/ui/host.js` with the stubbed `window` underneath it and reads
+     * what came out on the wire. Nothing here reimplements the module.
+     */
+    framedWin.posted.length = 0;
+    deckHost.page.claimKeys({ armed: true, keys: ['Digit1', 'Escape'] });
+    deckHost.page.setHeight(496);
+    deckHost.page.ready();
+    deckHost.page.close();
+    deckHost.transport.release();
+    const sent = framedWin.posted.map((p) => p.msg);
+    ok('THE PAGE AND TRANSPORT DUTIES POST THE DECK\'S OWN NAMESPACE, one wire type each  '
+      + '[entry point: extension/ui/host.js page/transport, reached from extension/ui/embed.js]',
+      sent.length === 5
+      && sent.every((m) => m.from === 'stem-splitter-live')
+      && sent.map((m) => m.type).join(',') === 'DECK,HEIGHT,READY,CLOSE,VRELEASE',
+      sent.length === 5
+        ? sent.map((m) => `${m.from}/${m.type}`).join(' ')
+        : `${sent.length} messages reached the wire for 5 calls`);
+
+    ok('...and content.js is told which keys are the deck\'s, and how tall it is, verbatim',
+      sent.length === 5 && sent[0].armed === true && Array.isArray(sent[0].keys)
+      && sent[0].keys.join(',') === 'Digit1,Escape' && sent[1].height === 496,
+      sent.length === 5 ? `${JSON.stringify(sent[0])} · ${JSON.stringify(sent[1])}` : 'nothing to read');
+
+    ok('...to `parent` and to nothing else, and with no origin pinned — the deck cannot know at build '
+      + 'time what page it was mounted into',
+      framedWin.posted.length === 5
+      && framedWin.posted.every((p) => p.to === 'parent' && p.targetOrigin === '*'),
+      framedWin.posted.map((p) => `${p.to}@${String(p.targetOrigin)}`).join(' '));
+
+    /**
+     * THE WRITE SET IS CLOSED, AND THIS IS THE ASSERTION THAT HOLDS IT.
+     *
+     * ADR 0001 decision 4 sets the transport's write side at `muted`,
+     * `currentTime` and `playbackRate`; L1 is why that is a rule and not a
+     * preference, because the same channel reaches a `<video>` on somebody
+     * else's page. `drive` therefore names its three fields instead of
+     * spreading its argument — so the extra properties below must NOT appear on
+     * the wire. Spreading is the one-character mistake this exists to catch, and
+     * it would make the write set whatever a call site happened to pass.
+     *
+     * `currentTime -> seekTo` is checked in the same breath: the seam speaks the
+     * ADR's name and the wire keeps content.js's, and a rename that dropped the
+     * field would leave the cached deck unable to seek with no other symptom.
+     */
+    framedWin.posted.length = 0;
+    deckHost.transport.drive({
+      muted: true, currentTime: 12.5, playbackRate: 1.02,
+      src: 'https://example.invalid/v.mp4', volume: 0.1, currentSrc: 'x',
+    });
+    const drove = framedWin.posted.length === 1 ? framedWin.posted[0].msg : null;
+    ok('drive() WRITES ONLY THE THREE FIELDS ADR 0001 DECISION 4 NAMES, and carries currentTime as the wire\'s seekTo  '
+      + '[entry point: extension/ui/host.js transport.drive(), reached from embed.js syncVideoLock()]',
+      drove !== null
+      && Object.keys(drove).sort().join(',') === 'from,muted,playbackRate,seekTo,type'
+      && drove.muted === true && drove.playbackRate === 1.02 && drove.seekTo === 12.5,
+      drove === null
+        ? `drive() put ${framedWin.posted.length} messages on the wire, expected 1`
+        : Object.keys(drove).sort().join(','));
+
+    /**
+     * ...AND THE UNIT CLOSES IT TOO, which is a different claim from the one
+     * above and the reason both are here. The assertion above holds the closure
+     * for THIS Host: it hands `drive()` a deliberately wide object and reads what
+     * survived. But the closure is a mechanism only for the Host that implements
+     * it — a second Host doing the obvious `Object.assign(player, patch)`
+     * inherits whatever the unit passed, and no assertion in this tree would see
+     * it. So the caller names its fields as well, and this is what holds that:
+     * `transport.drive({ playbackRate: c.playbackRate, ...(seek || {}) })` was
+     * the shipped shape, and a spread makes the write set whatever some future
+     * correction happens to carry.
+     *
+     * L1 is a security property (`SECURITY.md`), not a preference: this channel
+     * reaches a `<video>` on somebody else's page.
+     *
+     * FAILS IF IT CANNOT LOOK: zero `transport.drive(` calls in `embed.js` means
+     * the deck no longer drives the player at all, and that is a red here rather
+     * than a vacuous pass.
+     */
+    const driveCalls = [...embedSrc.matchAll(/transport\.drive\([\s\S]{0,240}?\);/g)].map((m) => m[0]);
+    const spread = driveCalls.filter((c) => c.includes('...'));
+    ok('...AND THE DECK HANDS IT A CLOSED OBJECT: every drive() call in embed.js names its fields, none spreads  '
+      + '[entry point: extension/ui/embed.js, comments stripped]',
+      driveCalls.length > 0 && spread.length === 0,
+      driveCalls.length === 0
+        ? 'no `transport.drive(` call in embed.js at all — either the deck stopped driving the player or this scan cannot see it'
+        : spread.length
+          ? `${spread.length} of ${driveCalls.length} spread into the patch: ${spread.join(' | ').replace(/\s+/g, ' ')} — `
+            + 'the write set is then whatever the caller passed, and only this Host would filter it'
+          : `${driveCalls.length} calls, all named`);
+
+    framedWin.posted.length = 0;
+    deckHost.transport.drive({ muted: true });
+    deckHost.transport.requestSpeed(1.5);
+    const two = framedWin.posted.map((p) => p.msg);
+    ok('...and a mute-only acquire stays mute-only, while the USER\'s speed is a different message with a different type',
+      two.length === 2
+      && Object.keys(two[0]).sort().join(',') === 'from,muted,type' && two[0].type === 'VDRIVE'
+      && two[1].type === 'SPEED' && two[1].rate === 1.5,
+      two.map((m) => `${m.type}:${Object.keys(m).sort().join('+')}`).join(' '));
+
+    // ------------------------------------------------- the incoming page wire
+    /**
+     * ONE LISTENER, TWO GUARDS, AND A ROUTE PER WIRE TYPE — all three the
+     * Host's, because all three are facts about the transport rather than about
+     * the deck. The source guard is the one that matters: this document is
+     * embedded in a page running somebody else's JavaScript and any number of
+     * other frames, all of which can postMessage at it.
+     *
+     * PUSH, NEVER POLL, is what the routing proves here: a registered handler
+     * runs on the message, and a poll would have nothing to run on.
+     */
+    ok('INSTRUMENT CHECK: ui/host.js registered exactly one `message` listener on the window, at module scope',
+      framedWin.listeners.length === 1 && framedWin.listeners[0][0] === 'message',
+      framedWin.listeners.map(([t]) => t).join(',') || 'none');
+
+    const heard = [];
+    deckHost.transport.onState((d) => heard.push(['state', d]));
+    deckHost.transport.onJump((d) => heard.push(['jump', d]));
+    deckHost.transport.onSpeedReport((d) => heard.push(['speed', d]));
+    deckHost.page.onKey((d) => heard.push(['key', d]));
+    deckHost.page.onAutonav((d) => heard.push(['autonav', d]));
+
+    /**
+     * ALL FIVE ARE CHECKED BY IDENTITY, not four of them by arrival. The name
+     * says "the payload arrives as the host sent it"; a routing count wearing
+     * that name would be satisfied by a Host that dropped `shift`/`alt` off the
+     * KEY payload, or normalised the SPEED verdict, and both of those are silent
+     * — the deck would read `shift: undefined` as "no solo" forever.
+     */
+    const HOSTNS = 'stem-splitter-live-host';
+    const WIRE = [
+      ['state', { from: HOSTNS, type: 'VIDEO', playing: true, currentTime: 3, duration: 60 }],
+      ['jump', { from: HOSTNS, type: 'JUMP' }],
+      ['speed', { from: HOSTNS, type: 'SPEED', state: 'ad', why: null }],
+      ['key', { from: HOSTNS, type: 'KEY', code: 'Digit1', shift: true, alt: false, repeat: false }],
+      ['autonav', { from: HOSTNS, type: 'AUTONAV', state: 'missing' }],
+    ];
+    for (const [, d] of WIRE) deliver(framedWin, framedWin.parent, d);
+    const routed = heard.length === 5 && heard.every(([k], i) => k === WIRE[i][0]);
+    const kept = heard.length === 5 && heard.every(([, d], i) => d === WIRE[i][1]);
+    ok('EACH WIRE TYPE REACHES ITS OWN DUTY, and all five payloads arrive as the host sent them — the SAME object  '
+      + '[entry point: extension/ui/host.js, the module-scope message listener]',
+      routed && kept,
+      routed && kept
+        ? `${heard.map(([k]) => k).join(',')} — same objects`
+        : heard.length !== 5
+          ? `${heard.length} of 5 delivered`
+          : !routed
+            ? `routed ${heard.map(([k]) => k).join(',')}, wanted ${WIRE.map(([k]) => k).join(',')}`
+            : `the payload was rewritten on the way in for ${heard.filter(([, d], i) => d !== WIRE[i][1]).map(([k]) => k).join(',')}`);
+
+    heard.length = 0;
+    deliver(framedWin, { not: 'the host' }, { from: HOSTNS, type: 'VIDEO', playing: false });
+    deliver(framedWin, framedWin.parent, { from: 'stem-splitter-live', type: 'VIDEO', playing: false });
+    deliver(framedWin, framedWin.parent, { from: HOSTNS, type: 'NOT_A_TYPE' });
+    deliver(framedWin, framedWin.parent, null);
+    ok('...and nothing else does: another frame on the page, the deck\'s own namespace echoing back, an unknown type, and no data at all',
+      heard.length === 0,
+      heard.length === 0
+        ? '4 refused: wrong source, wrong namespace, unrouted type, null'
+        : `${heard.length} got through: ${heard.map(([k]) => k).join(',')}`);
+  }
+  delete globalThis.chrome;
+  if (realWindow) Object.defineProperty(globalThis, 'window', realWindow); else delete globalThis.window;
 }
 
 // ===========================================================================
@@ -6734,6 +7204,7 @@ if (group('verifyModel')) {
     !unitSrc.includes('verifyModel')
       ? 'verifyModel is not in this file — the scan is reading the wrong module'
       : `${unitSrc.split('\n').filter((l) => l.trim()).length} lines of code, no fetch and no Cache API`);
+
 }
 
 // ===========================================================================

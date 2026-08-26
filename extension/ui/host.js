@@ -1,12 +1,28 @@
 /**
  * The deck's Host, as a Chrome extension. This is the ONE module `embed.js` is
- * allowed to import that knows what `chrome` is; the duties it implements and
- * the rules they have to hold are written down in `../shared/host.js`.
+ * allowed to import that knows what `chrome` is or what a frame is; the duties
+ * it implements and the rules they have to hold are written down in
+ * `../shared/host.js`.
  *
- * It is six duties long on purpose. The seam is not an abstraction layer —
- * "no abstraction with one implementation" is a standing rule here — it is the
- * list of things a second application would have to supply, kept short enough
- * that the list itself is the specification.
+ * It is six callable duties and two namespaces long on purpose. The seam is
+ * not an abstraction layer — "no abstraction with one implementation" is a
+ * standing rule here — it is the list of things a second application would
+ * have to supply, kept short enough that the list itself is the specification.
+ *
+ * TWO WIRES LEAVE THROUGH HERE AND THEY ARE NOT THE SAME WIRE.
+ *  - `send` / `onMessage` ride `chrome.runtime`, the EXTENSION BUS: a broadcast
+ *    between the deck, the engine and the service worker. The envelope on it is
+ *    the UNIT's (`{ v, to, from }`) and this file carries it verbatim.
+ *  - `page` / `transport` ride `postMessage` across the IFRAME BOUNDARY to
+ *    `content.js`, which is the host's own other end. That protocol —
+ *    `from: 'stem-splitter-live'` out, `from: 'stem-splitter-live-host'` back —
+ *    is entirely the HOST's, so this file is free to name its own fields, and
+ *    it does: the seam speaks ADR 0001 decision 4's `currentTime` where the
+ *    wire says `seekTo`.
+ *
+ * The remaining four — `storageGet`, `storageSet`, `onStorageChanged` and
+ * `armShortcut` — are not a wire at all. They read and write platform state
+ * (`chrome.storage`, `chrome.commands`) that has no other end to talk to.
  *
  * LATE BINDING IS THE WHOLE POINT OF THE `send` BODY. `chrome.runtime.sendMessage`
  * is looked up when the message is sent, not when this module is imported,
@@ -63,6 +79,74 @@ function assertArea(area) {
   }
   return area;
 }
+
+/**
+ * THE DECK -> HOST NAMESPACE, and the one place in the unit that spells it.
+ *
+ * It used to be typed out at each of the eight posting sites in `embed.js`;
+ * they are all in this file now, so one constant is the honest shape. Its
+ * counterpart is the guard in `content.js`, and `tools/name-check.mjs` pairs
+ * the two — a slice that moved the posters and forgot the guard, or the other
+ * way round, is a rename that half-landed, which is the failure that gate was
+ * written for. Keep it a single-quoted literal on both sides: the gate counts
+ * the literal, so a template string is the same as deleting it.
+ */
+const NS = 'stem-splitter-live';
+
+/**
+ * IS THERE A PAGE ABOVE THIS DECK THAT OWNS A PLAYER?
+ *
+ * For THIS Host that is the same question as "am I in a frame", because the
+ * only thing that ever frames this document is `content.js` on a watch page,
+ * and it is the thing that owns the `<video>`. It is not the same question for
+ * a Host in general — under a desktop Host the deck is the top-level document
+ * and there is still a player — which is exactly why the deck no longer asks it
+ * and asks `host.transport != null` instead. The frame test is a fact about
+ * this Host and it stays inside this Host.
+ *
+ * `window.parent` rather than a bare `parent`, so this module can be driven
+ * from Node with a stubbed `window` — the same discipline `test.js` already
+ * applies to `chrome` and `navigator`.
+ */
+const FRAMED = window.parent !== window;
+
+/**
+ * Every deck -> host message leaves through here, and `'*'` is not laziness:
+ * the deck is served from an extension origin and cannot know at build time
+ * what page it was mounted into. The host's side is pinned — `content.js`
+ * accepts these only from this frame's `contentWindow` — which is where the
+ * check belongs, because that is the side that knows both origins.
+ */
+const post = (msg) => { window.parent.postMessage(msg, '*'); };
+
+/**
+ * Wire type -> the deck's handler. One handler per type: the deck registers
+ * each exactly once as it boots, and a type nobody registered is dropped, which
+ * is what happens today for anything arriving before the deck's own listener
+ * was up.
+ */
+const inbound = new Map();
+
+/**
+ * ONE LISTENER, REGISTERED AT MODULE SCOPE, and the two guards on it are the
+ * host's because both are facts about the transport.
+ *
+ * `ev.source !== window.parent` is the one that matters: this document is
+ * embedded in a page that runs YouTube's own JavaScript and any number of other
+ * frames, all of which can postMessage at us. Only the frame that put us here
+ * is heard. There is deliberately no `ev.origin` check — the source check
+ * carries it, and the host page's origin is not knowable here.
+ */
+window.addEventListener('message', (ev) => {
+  if (ev.source !== window.parent) return;
+  const d = ev.data;
+  if (!d || d.from !== 'stem-splitter-live-host') return;
+  const fn = inbound.get(d.type);
+  if (fn) fn(d);
+});
+
+/** Build one inbound duty: register the deck's handler for one wire type. */
+const on = (type) => (fn) => { inbound.set(type, fn); };
 
 /** @type {import('../shared/host.js').DeckHost} */
 export const host = {
@@ -188,5 +272,69 @@ export const host = {
     const all = await chrome.commands.getAll();
     const cmd = (all || []).find((c) => c.name === 'arm-tab');
     return (cmd && cmd.shortcut) || null;
+  },
+
+  /**
+   * THE PLAYER, or `null` when this deck was not mounted onto a page that has
+   * one. `null` and not "absent": `../shared/host.js`'s `assertHostOption`
+   * refuses a Host that simply never mentioned a transport, because the deck
+   * reads the answer as a fact about the world and boots differently on it.
+   */
+  transport: FRAMED ? {
+    onState: on('VIDEO'),
+    onJump: on('JUMP'),
+    onSpeedReport: on('SPEED'),
+
+    /**
+     * THE WRITE SET IS CLOSED HERE, at the seam, and that is the point of
+     * filtering rather than spreading. ADR 0001 decision 4 sets the transport's
+     * write side at `muted`, `currentTime` and `playbackRate`; L1 is what makes
+     * that a rule rather than a preference, because the same channel reaches a
+     * `<video>` on somebody else's page. Spreading the caller's object would
+     * make the write set whatever a call site happened to pass, and widening it
+     * would then be invisible in review. Three fields, named, and anything else
+     * in the patch is dropped on this side of the wire.
+     *
+     * `seekTo` is this protocol's name for `currentTime`; `content.js` uses it
+     * to tell the deck's own seek from the user's, and it is not renamed there
+     * because `content.js` is not this slice's to edit.
+     */
+    drive(patch) {
+      const p = patch || {};
+      const msg = { from: NS, type: 'VDRIVE' };
+      if (typeof p.muted === 'boolean') msg.muted = p.muted;
+      if (Number.isFinite(p.playbackRate)) msg.playbackRate = p.playbackRate;
+      if (Number.isFinite(p.currentTime)) msg.seekTo = p.currentTime;
+      post(msg);
+    },
+
+    release() { post({ from: NS, type: 'VRELEASE' }); },
+
+    /**
+     * The value is NOT filtered, unlike `drive`'s. A rate this host cannot
+     * apply is refused and reported back through `onSpeedReport` with a reason
+     * the deck prints — see `content.js`'s SPEED arm — and a silent drop here
+     * would replace an explained lockout with a control that looks fine and
+     * does nothing.
+     */
+    requestSpeed(rate) { post({ from: NS, type: 'SPEED', rate }); },
+  } : null,
+
+  /**
+   * THE PAGE THE DECK IS DRAWN INTO. Always present, even for a deck opened
+   * outside a frame: `window.parent` is then this window, the posts land on a
+   * listener that filters them by namespace, and nothing happens — which is
+   * exactly what happened before this seam existed. A deck that had to check
+   * whether it had a page before every height report would be one forgotten
+   * check away from a TypeError at a user gesture, which is the failure
+   * `assertHost` exists to move to boot.
+   */
+  page: {
+    onKey: on('KEY'),
+    onAutonav: on('AUTONAV'),
+    claimKeys(claim) { post({ from: NS, type: 'DECK', armed: claim.armed, keys: claim.keys }); },
+    setHeight(px) { post({ from: NS, type: 'HEIGHT', height: px }); },
+    ready() { post({ from: NS, type: 'READY' }); },
+    close() { post({ from: NS, type: 'CLOSE' }); },
   },
 };

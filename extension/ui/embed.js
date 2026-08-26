@@ -28,13 +28,16 @@ import {
 import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, PREFS_KEY, SR } from '../shared/config.js';
 /**
  * THE HOST. Everything this surface does that is not "draw the numbers it was
- * given" leaves through here — the message bus, the two storage areas and the
- * one question only the platform can answer, which key the user presses to arm.
+ * given" leaves through here — the message bus, the two storage areas, the one
+ * question only the platform can answer (which key the user presses to arm),
+ * the page this deck is drawn into, and the player that page is showing.
  * `ui/host.js` is the extension's implementation of it and the only module this
- * file imports that knows what `chrome` is; `shared/host.js` carries the duty
- * list and the rules a second application would have to hold.
+ * file imports that knows what `chrome` is or what a frame is; `shared/host.js`
+ * carries the duty lists and the rules a second application would have to hold.
  */
-import { assertHost, DECK_HOST_DUTIES } from '../shared/host.js';
+import {
+  assertHost, assertHostOption, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+} from '../shared/host.js';
 import { host } from './host.js';
 import {
   chip, follow, RUNNING, peakTick,
@@ -113,6 +116,17 @@ const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
  * symptom is a deck that never leaves "idle" with nothing in the console.
  */
 assertHost(host, DECK_HOST_DUTIES, 'DeckHost');
+assertHost(host.page, DECK_PAGE_DUTIES, 'DeckHost.page');
+/**
+ * THE PLAYER, IF THIS HOST HAS ONE — and the ONLY thing that decides whether
+ * this deck is hosted. It used to be `window.parent !== window`, which is a
+ * fact about frames and not about hosting: a Host that draws this deck as a
+ * top-level document still reports its player, and `follow()` reads "nobody
+ * will ever tell me" as licence to start the pipeline on boot. See the
+ * `DeckTransport` typedef; `assertHostOption` is what makes a Host that has no
+ * player SAY so rather than merely omit it.
+ */
+const transport = assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost');
 const toOff = (m) => host.send({ v: 1, to: 'off', from: 'ui', ...m });
 const toSw = (m) => host.send({ v: 1, to: 'sw', from: 'ui', ...m });
 
@@ -728,8 +742,11 @@ function stopLive() {
  * that can change the answer: a status message, a session change, the page
  * reporting play/pause, and the switch itself.
  */
-/** Is this deck inside a page that reports its player? See follow(). */
-const HOSTED = window.parent !== window;
+/**
+ * Does this deck have a Host that reports its player? See follow(), and the
+ * `transport` binding at the top of this file for why it is not a frame test.
+ */
+const HOSTED = transport != null;
 
 function reconcile() {
   const what = follow({
@@ -881,13 +898,16 @@ let lastRateSent = 1;
  * tick therefore only acquires and releases; it never computes.
  */
 function syncVideoLock(correct = false) {
+  // No transport, no player to lock to. This is the whole of the guard: with
+  // no transport the lock is never acquired, so there is never one to release.
+  if (!transport) return;
   const want = live.source === 'cache' && live.status === 'running';
   if (!want) {
     if (videoLocked) {
       videoLocked = false;
       // Hand the element back: unmuted, rate 1. A muted 1.02x video left behind
       // is a bug the user cannot explain and cannot undo.
-      parent.postMessage({ from: 'stem-splitter-live', type: 'VRELEASE' }, '*');
+      transport.release();
     }
     return;
   }
@@ -899,7 +919,7 @@ function syncVideoLock(correct = false) {
      * audible material is a 34-cent pitch shift — a quarter-tone against the
      * stems the user is mixing. The ratified thresholds assume silence.
      */
-    parent.postMessage({ from: 'stem-splitter-live', type: 'VDRIVE', muted: true }, '*');
+    transport.drive({ muted: true });
     lastRateSent = 1;
   }
   if (!correct || !live.atMs) return;
@@ -915,12 +935,22 @@ function syncVideoLock(correct = false) {
    * sent on every correcting tick — but only when it CHANGED, because this runs
    * at ~4 Hz and re-posting the same value churns the page for nothing.
    */
-  const seek = c.action === 'seek' ? { seekTo: c.seekTo } : null;
-  if (!seek && c.playbackRate === lastRateSent) return;
+  const jumped = c.action === 'seek';
+  if (!jumped && c.playbackRate === lastRateSent) return;
   lastRateSent = c.playbackRate;
-  parent.postMessage({
-    from: 'stem-splitter-live', type: 'VDRIVE', playbackRate: c.playbackRate, ...(seek || {}),
-  }, '*');
+  /**
+   * NAMED, NEVER SPREAD. `drive`'s write set is ADR 0001 decision 4's three
+   * fields, and THIS Host closes it again on its own side — but the closure is
+   * only mechanical for the Host that implements it, and a second Host doing the
+   * obvious `Object.assign(player, patch)` inherits whatever the unit passed. So
+   * the unit names its fields too: spreading here would make the write set
+   * whatever some future correction happened to carry, and L1 is a security
+   * property (SECURITY.md), not a preference, because this channel reaches a
+   * `<video>` on somebody else's page.
+   */
+  transport.drive(jumped
+    ? { playbackRate: c.playbackRate, currentTime: c.seekTo }
+    : { playbackRate: c.playbackRate });
 }
 
 /**
@@ -1314,15 +1344,17 @@ function closeKeys() {
  */
 let lastDeckPost = '';
 function postDeck() {
-  const msg = {
-    from: 'stem-splitter-live', type: 'DECK',
+  const claim = {
     armed: !!session.tabId,
     keys: hostKeys({ anySolo: anySolo(), overlayOpen: keysOpen() }),
   };
-  const j = JSON.stringify(msg);
+  // The dedupe is on the CLAIM, not on the finished message: the wire's `from`
+  // and `type` are constants that only the host knows now, and comparing them
+  // would be comparing two things that cannot differ.
+  const j = JSON.stringify(claim);
   if (j === lastDeckPost) return;
   lastDeckPost = j;
-  parent.postMessage(msg, '*');
+  host.page.claimKeys(claim);
 }
 
 // ---------------------------------------------------------------- transpose
@@ -1454,9 +1486,8 @@ function paintKey() {
  * second way to write one truth, like a second remote for one television.
  *
  * TWO WIRES, AND THEY ARE NOT ONE FUNCTION:
- *   - `{from:'stem-splitter-live', type:'SPEED', rate}` to the HOST, which owns the
- *     range clamp, the ad neutralisation and the re-assert across an ad
- *     (speed.js);
+ *   - `transport.requestSpeed(rate)` to the HOST, which owns the range clamp,
+ *     the ad neutralisation and the re-assert across an ad (speed.js);
  *   - `{type:'SPEED', deck, rate}` to the ENGINE, which is the only place that
  *     can tell a live deck from a cached one and the only place a refusal can be
  *     said (offscreen.js). It echoes SPEED_STATE on both paths.
@@ -1548,7 +1579,10 @@ function setSpeed(rate) {
   // committed and not yet heard. Pressing again restarts the countdown.
   spPending = { rate: r, atMs: Date.now() };
   paintSpeed();
-  parent.postMessage({ from: 'stem-splitter-live', type: 'SPEED', rate: r }, '*');
+  // Unguarded on purpose: `spGate()` above cannot be ok without a transport.
+  // `speedGate` refuses every state but the host's own `ok`, and only a
+  // transport can report one — so an unhosted deck never reaches this line.
+  transport.requestSpeed(r);
   toOff({ type: 'SPEED', deck: DECK, rate: r });
 }
 
@@ -2106,28 +2140,32 @@ host.onMessage((m) => {
 });
 
 /**
- * THE PAGE'S PLAYER, via content.js. One bit — playing or not — and it is the
- * input the whole follow-the-video behaviour runs on.
+ * THE HOST'S SIDE OF THE SEAM, WIRED UP. Which transport this arrives over, and
+ * which of the many frames on somebody else's page is allowed to speak, are
+ * both the Host's questions and neither of them is asked here any more.
  *
- * `ev.source !== parent` is the guard that matters: this document is embedded
- * in a page that runs YouTube's own JavaScript and any number of other frames,
- * all of which can postMessage at us. Only the frame that put us here is heard.
+ * A key pressed on the host's own page could never have reached this document:
+ * the Host took it out of that page's hands and handed it over. Autoplay is
+ * the Host reporting on its own page. Both are `page` and not `transport`,
+ * because neither is about a player and a Host with no player still has them.
  */
-window.addEventListener('message', (ev) => {
-  if (ev.source !== parent) return;
-  const d = ev.data;
-  if (!d || d.from !== 'stem-splitter-live-host') return;
-  if (d.type === 'VIDEO') onVideoState(d);
-  // speed.js's verdict on the element, forwarded by content.js. It is the
-  // ONLY thing that greys this control, and it is read as "anything that is not
-  // ok" rather than as a list of states — see speedGate.
-  else if (d.type === 'SPEED') onSpeedReport(d);
-  else if (d.type === 'JUMP') onContentJump();
-  // A shortcut pressed on the YouTube page, where the deck could never have
-  // received it: content.js took it out of YouTube's hands and forwarded it.
-  else if (d.type === 'KEY') onHostKey(d);
-  else if (d.type === 'AUTONAV') onAutonav(d);
-});
+host.page.onKey(onHostKey);
+host.page.onAutonav(onAutonav);
+/**
+ * ...and the player, when there is one. PUSH, NOT POLL, and the seek is why:
+ * `onContentJump` is the deck's whole notice that the ~2.4 s already in the
+ * ring is now audio from somewhere else, and a poll would see a seek that
+ * opened and closed between two samples as nothing at all.
+ *
+ * `onSpeedReport` is speed.js's verdict on the element, and it is the ONLY
+ * thing that greys the speed control — read as "anything that is not ok" rather
+ * than as a list of states; see speedGate.
+ */
+if (transport) {
+  transport.onState(onVideoState);
+  transport.onJump(onContentJump);
+  transport.onSpeedReport(onSpeedReport);
+}
 
 // ------------------------------------------------------------------ controls
 $('mdl-go').addEventListener('click', () => {
@@ -2238,9 +2276,9 @@ $('eject').addEventListener('click', () => {
 });
 
 $('close').addEventListener('click', () => {
-  // The frame goes away; the audio does not. Capture and separation live in the
-  // offscreen document and never depended on this page existing.
-  parent.postMessage({ from: 'stem-splitter-live', type: 'CLOSE' }, '*');
+  // The deck goes away; the audio does not. Capture and separation live in the
+  // offscreen document and never depended on this surface existing.
+  host.page.close();
 });
 
 /**
@@ -2288,11 +2326,9 @@ const modalFloor = () => {
   if (!d) return 0;
   return Math.ceil(d.getBoundingClientRect().height) + MODAL_SCRIM * 2;
 };
-const reportHeight = () => parent.postMessage({
-  from: 'stem-splitter-live',
-  type: 'HEIGHT',
-  height: Math.max(Math.ceil(document.body.scrollHeight), modalFloor()),
-}, '*');
+const reportHeight = () => host.page.setHeight(
+  Math.max(Math.ceil(document.body.scrollHeight), modalFloor()),
+);
 /**
  * `body`, not `documentElement`. documentElement.scrollHeight is floored by the
  * viewport — which is the iframe height we set from this very message — so it
@@ -2373,10 +2409,10 @@ toOff({ type: 'STATUS' });
 // already on disk. Preparing a cold cache is a 172 MiB download, which is the
 // user's decision — see the model section above.
 
-// Tell the host page we are listening, so it can send the CURRENT play state.
-// A deck opened on an already-playing video is the common case, and it would
-// otherwise wait for the next play/pause event that may never come.
-parent.postMessage({ from: 'stem-splitter-live', type: 'READY' }, '*');
+// Tell the Host we are listening, so it can send the CURRENT play state. A deck
+// opened on an already-playing video is the common case, and it would otherwise
+// wait for the next play/pause event that may never come.
+host.page.ready();
 
 // The offscreen document may not exist yet, and a message to it before it does
 // is delivered nowhere. Retry until one answers with STATE.

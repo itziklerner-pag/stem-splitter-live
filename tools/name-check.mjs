@@ -52,6 +52,16 @@ const BANNED = [
 /** Binary files have no text to check and reading them proves nothing. */
 const BINARY = /\.(png|jpg|jpeg|gif|ico|wasm|onnx|wav|mp3|zip|woff2?)$/i;
 
+/**
+ * COMMENTS OUT, for the SIDED block at the bottom only. The BANNED sweep above
+ * deliberately reads comments — a dead document cited in a header is exactly the
+ * stale reference it is looking for — but every SIDED claim is a claim about
+ * CODE, and a doc comment that spells the literal must not satisfy it. Same
+ * one-liner as `test.js` and `qa/speed-pitch.mjs`; the `[^:]` is what keeps
+ * `https://` from reading as a line comment.
+ */
+const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
 let checks = 0, fails = 0;
 const ok = (pass, msg) => { checks++; if (!pass) fails++; console.log(`${pass ? 'ok  ' : 'FAIL'} ${msg}`); };
 
@@ -86,21 +96,90 @@ for (const { re, what } of BANNED) {
 }
 
 /**
- * The rename's replacement strings, asserted PRESENT rather than merely
- * asserting the old ones absent. Deleting the line is one way to make an
- * "old name is gone" assertion pass, and it is the wrong way — these are live
- * IPC identifiers with a sender and a receiver, and a tree with neither half
- * present is broken in a way the absence check reads as clean.
+ * THE FOUR IPC PAIRS, EACH SIDE NAMED AND EACH SIDE MATCHED AS CODE — and why
+ * a whole-tree COUNT cannot carry that claim.
+ *
+ * These are live IPC identifiers with a sender and a receiver, and the
+ * replacement string is asserted PRESENT rather than the old one merely absent:
+ * deleting the line is one way to make an "old name is gone" assertion pass, and
+ * it is the wrong way, because a tree with neither half present is broken in a
+ * way the absence check reads as clean.
+ *
+ * IT USED TO BE A WHOLE-TREE COUNT, `found >= 2`, AND THAT COULD NOT FAIL. Every
+ * one of these literals is named by the GATES and by the docs as well as by the
+ * product — `test.js` drives the shipped host and asserts what it stamps on the
+ * wire, `tools/embed-smoke.mjs` queries the injected element by id,
+ * `docs/ARCHITECTURE.md` spells all four in prose. Measured, by renaming every
+ * real site of the host->deck namespace across `content.js` and `ui/host.js`:
+ * `'stem-splitter-live-host' appears 3x` stayed green with NEITHER half of the
+ * pair left in the extension. A count a suite's own fixtures can satisfy is not
+ * evidence about the product.
+ *
+ * NAMING THE SIDES IS NOT ENOUGH EITHER, AND THE S5 REVIEW PAID FOR BOTH HALVES
+ * OF THE FIX:
+ *
+ *  - COMMENTS ARE STRIPPED FIRST. The first version of this check was a
+ *    whole-FILE `includes("'stem-splitter-live'")` on each named side, and BOTH
+ *    sides of that pair spell the literal in a doc comment — `ui/host.js`'s
+ *    header and `content.js`'s SPEED note. Renaming ONLY the executable literal
+ *    on either side left it green, which is the half-landed rename this gate
+ *    exists for. A claim a stale comment can satisfy is not a claim about code;
+ *    `test.js` and `qa/speed-pitch.mjs` strip for the same reason.
+ *  - EACH SIDE MATCHES ITS OWN EXECUTABLE FORM — the sender's `from:`/`type:`
+ *    field or the binding it is read out of, the receiver's `!==` guard. A file
+ *    that merely mentions the string somewhere is not a file that implements its
+ *    half of the pair.
+ *
+ * KEEP BOTH SIDES SINGLE-QUOTED LITERALS. The forms below are matched as
+ * written, so a template string or a computed name is the same as deleting it —
+ * loudly, which is the point.
+ *
+ * FAILS IF IT CANNOT LOOK: a side that is not in the readable tree at all is
+ * reported as missing rather than skipped, so moving a file without moving this
+ * list is a red and not a silent pass.
  */
-const PAIRED = [
-  { s: "'stem-splitter-live-deck'", n: 2, what: 'the injected element id (content.js + the smoke gate)' },
-  { s: "'stem-splitter-live-host'", n: 2, what: 'the host->deck postMessage namespace (sender + guard)' },
-  { s: "'STEM_SPLITTER_LIVE_EMBED'", n: 2, what: 'the SW->content message type (sender + receiver)' },
+const SIDED = [
+  {
+    s: "'stem-splitter-live'",
+    what: 'the deck->host postMessage namespace: the deck stamps it, content.js refuses anything else',
+    sides: [
+      { rel: 'extension/ui/host.js', form: /=\s*'stem-splitter-live'\s*;/, is: "the deck's one `const NS`" },
+      { rel: 'extension/content.js', form: /!==\s*'stem-splitter-live'/, is: "content.js's inbound guard" },
+    ],
+  },
+  {
+    s: "'stem-splitter-live-host'",
+    what: 'the host->deck postMessage namespace: content.js stamps it, the deck refuses anything else',
+    sides: [
+      { rel: 'extension/content.js', form: /from:\s*'stem-splitter-live-host'/, is: "content.js's outbound stamp" },
+      { rel: 'extension/ui/host.js', form: /!==\s*'stem-splitter-live-host'/, is: "the deck's inbound guard" },
+    ],
+  },
+  {
+    s: "'STEM_SPLITTER_LIVE_EMBED'",
+    what: 'the SW->content message type: the worker sends it, content.js is the only thing that acts on it',
+    sides: [
+      { rel: 'extension/sw/service-worker.js', form: /type:\s*'STEM_SPLITTER_LIVE_EMBED'/, is: "the worker's send" },
+      { rel: 'extension/content.js', form: /!==\s*'STEM_SPLITTER_LIVE_EMBED'/, is: "content.js's type guard" },
+    ],
+  },
+  {
+    s: "'stem-splitter-live-deck'",
+    what: 'the injected element id: content.js creates it, the browser gate is what looks for it',
+    sides: [
+      { rel: 'extension/content.js', form: /=\s*'stem-splitter-live-deck'\s*;/, is: "content.js's `const ID`" },
+      { rel: 'tools/embed-smoke.mjs', form: /'#stem-splitter-live-deck'/, is: "the smoke gate's selector" },
+    ],
+  },
 ];
-const all = readable.map((rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8')).join('\n');
-for (const { s, n, what } of PAIRED) {
-  const found = all.split(s).length - 1;
-  ok(found >= n, `${s} appears ${found}x (need >= ${n}) — ${what}`);
+for (const { s, what, sides } of SIDED) {
+  const bad = sides.map((side) => {
+    if (!readable.includes(side.rel)) return `${side.rel} — not in the tracked tree at all`;
+    const src = strip(fs.readFileSync(path.join(ROOT, side.rel), 'utf8'));
+    return side.form.test(src) ? null : `${side.rel} — ${side.is} is gone (no /${side.form.source}/ in its code)`;
+  }).filter(Boolean);
+  ok(bad.length === 0, `${s} is on BOTH sides, in code — ${what}${
+    bad.length ? ` — HALF-LANDED: ${bad.join('; ')}` : ` (${sides.map((x) => x.rel).join(', ')})`}`);
 }
 
 console.log(fails ? `\n${fails} of ${checks} FAILED` : `\nname-check: ${checks} checks passed`);
