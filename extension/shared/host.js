@@ -131,22 +131,44 @@
  *   => Promise<{bytes: Uint8Array, fromCache: boolean}>} modelBytes
  *   Hand over the model weights, from wherever this Host keeps or gets them.
  *   A BYTE SOURCE AND NOTHING MORE — see the three rules below.
+ *   THE UNIT TAKES OWNERSHIP OF `bytes`: it transfers `bytes.buffer` into the
+ *   inference worker, so the Host must hand over a FRESH buffer each call and
+ *   must not read it afterwards. Rule 2 says what that means and why a
+ *   memoizing Host is the shape this catches.
+ *   `onProgress` is OPTIONAL and the Host announces its phase BEFORE any bytes
+ *   move: `fromCache` in the result arrives ~2 minutes too late to choose the
+ *   wording on a progress card, and `ui/welcome.js` reads the phase to decide
+ *   whether the card may quote a percentage at all.
  *
  * @property {() => Promise<boolean>} modelCached
  *   Would `modelBytes()` cost a download? Answered WITHOUT reading the bytes:
  *   the setup page and the deck both ask at boot, before any gesture, and an
  *   answer that costs a 109 MB read is an answer nobody can afford to ask for.
  *   `false` when unsure — the deck's question is "may I spend the user's data",
- *   and a wrong `true` spends it without asking.
+ *   and a wrong `true` spends it without asking. RESOLVES, NEVER REJECTS, and
+ *   that is this duty's alone among the three: `engine.js`'s `STATUS` case
+ *   awaits it before `ensureWorker()`, `echoXf()` and `push()`, so a rejection
+ *   there is not a model error — it is a deck that paints nothing at all, with
+ *   the reason written to a field nothing reads. A Host whose storage can be
+ *   unavailable answers `false` and lets the download offer stand.
  *
  * @property {() => Promise<void>} clearModel
  *   Throw away whatever `modelBytes` would serve from store, so the next call
  *   goes back to source. The unit calls it for exactly one reason: the bytes it
  *   was handed failed the identity check, and bytes that failed must not be
- *   left where the next load finds them. MUST NOT be a no-op — a Host that
- *   silently ignores it turns one corrupt download into a permanently dead
- *   deck, failing identically for ever with no way out but clearing browser
- *   storage by hand.
+ *   left where the next load finds them.
+ *   A HOST THAT EVER REPORTS `fromCache: true` MUST REALLY DROP THAT STORE —
+ *   one that silently ignores this turns one corrupt download into a
+ *   permanently dead deck, failing identically for ever with no way out but
+ *   clearing browser storage by hand. The MUST is scoped that way on purpose,
+ *   because a Host whose bytes are immutable — the file vendored next to the
+ *   binary that `offscreen/host-pin.js` names as a legitimate second shape —
+ *   has nothing to throw away and would otherwise have to satisfy this duty by
+ *   lying. It reports `fromCache: false`, the unit stops after one ask (rule
+ *   3), and its `clearModel` is honestly a no-op.
+ *   MAY REJECT (a locked file, an IPC round trip): the unit does not let a
+ *   failed clear replace the integrity error that caused it, and the two-ask
+ *   ceiling holds regardless.
  */
 
 /**
@@ -165,10 +187,24 @@
  *    catch a Host that got this wrong — only this sentence and the checks that
  *    encode it.
  *
- * 2. `bytes` OWNS ITS WHOLE BUFFER. The unit transfers `bytes.buffer` into the
- *    inference worker, so a `Uint8Array` that is a VIEW into something larger
- *    transfers the larger thing, and the worker binds a session over the wrong
- *    offset. `byteOffset === 0 && byteLength === buffer.byteLength`.
+ * 2. `bytes` OWNS ITS WHOLE BUFFER, AND IT IS FRESH EVERY CALL. The unit
+ *    TRANSFERS `bytes.buffer` into the inference worker, which is the source of
+ *    both halves of this rule.
+ *      - A `Uint8Array` that is a VIEW into something larger transfers the
+ *        larger thing, and the worker binds a session over the wrong offset:
+ *        the unit verified the view and loaded the buffer, so the bytes that
+ *        passed the check are not the bytes that ran.
+ *        `byteOffset === 0 && byteLength === buffer.byteLength`.
+ *      - A transfer DETACHES the buffer, so a Host must return a NEW one per
+ *        call and must not read it after the call returns. Memoizing the bytes
+ *        is the obvious optimisation once they arrive over IPC or off a
+ *        vendored file, and it is wrong here: two decks exist and each one
+ *        asks, so the second load would be handed a 0-byte array.
+ *    `shared/modelcache.js::requireWholeBuffer` ENFORCES both, on every load,
+ *    and names which of the two went wrong — because both surface late and
+ *    under the wrong cause otherwise (an ORT session error long after a green
+ *    integrity check; an integrity failure blaming the Host's bytes for a
+ *    transfer the unit did).
  *
  * 3. `fromCache` IS LOAD-BEARING, NOT TELEMETRY. It is how the unit decides
  *    whether a failed check is worth one retry: bytes from a store can be

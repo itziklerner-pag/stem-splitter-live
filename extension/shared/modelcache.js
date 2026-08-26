@@ -65,6 +65,48 @@ export async function verifyModel(bytes, pin = MODEL) {
 }
 
 /**
+ * RULE 2 OF THE HOST'S MODEL BYTES, CHECKED HERE RATHER THAN TRUSTED
+ * (`shared/host.js`: "`bytes` OWNS ITS WHOLE BUFFER, AND IT IS FRESH EVERY
+ * CALL"). The unit HASHES `bytes` and hands on `bytes.buffer`, and those are
+ * only the same bytes if the view owns the whole buffer — so without this, a
+ * Host could pass `verifyModel` over 4 KB and have the worker bind a session
+ * over the 8 KB it was a window into. That is not a hypothetical shape: it is
+ * what `subarray` returns, and what `Buffer.concat` hands back off Node's pool,
+ * i.e. the first thing a second Host writes.
+ *
+ * A HOST DEFECT IS NOT A CORRUPT STORE. It fails the same way however often it
+ * is asked, so this throws where it stands — no `clearModel`, no second ask —
+ * and the counts in `test.js` say so (1 ask, 0 clears).
+ *
+ * THE THREE MESSAGES ARE THE POINT. Each names the mistake instead of letting it
+ * surface later as something else: a view surfaces as an ORT session error long
+ * after a green integrity check; an `ArrayBuffer` where a `Uint8Array` was meant
+ * hashes perfectly well and then reports `undefined bytes`; and a TRANSFERRED
+ * buffer — what a Host that memoized its bytes hands back on the next load —
+ * reports `0 bytes` against the pin, which blames the Host's bytes for something
+ * the unit did to them.
+ *
+ * @param {Uint8Array} bytes  whatever `host.modelBytes()` handed over
+ */
+function requireWholeBuffer(bytes) {
+  if (!(bytes instanceof Uint8Array)) {
+    const got = bytes === null ? 'null' : ((bytes && bytes.constructor && bytes.constructor.name) || typeof bytes);
+    throw new Error(`the Host's model bytes must be a Uint8Array, not ${got}: `
+      + 'the unit hashes the view and transfers its buffer, and needs both to know they are the same bytes');
+  }
+  if (bytes.byteLength === 0) {
+    throw new Error('the Host handed over 0 model bytes: either nothing arrived, or this is an array kept from an '
+      + 'earlier load whose buffer the unit has since TRANSFERRED into the inference worker — a Host must return a '
+      + 'fresh buffer per call and must not hold on to one');
+  }
+  if (bytes.byteOffset !== 0 || bytes.byteLength !== bytes.buffer.byteLength) {
+    throw new Error(`the Host's model bytes must own their whole buffer: got ${bytes.byteLength} bytes at offset `
+      + `${bytes.byteOffset} of a ${bytes.buffer.byteLength} byte buffer — the unit verifies the view and transfers `
+      + 'the buffer, so a Host that hands over a slice loads bytes nothing checked');
+  }
+}
+
+/**
  * A FRESH ArrayBuffer of VERIFIED weights, out of whatever the Host keeps them
  * in.
  *
@@ -88,9 +130,20 @@ export async function verifyModel(bytes, pin = MODEL) {
  * Two calls to `modelBytes` in the worst case and never three, which is a COUNT
  * the check on this function asserts rather than a timeout it waits out.
  *
- * The buffer is fresh per call by construction: `LOAD_MODEL` transfers it into
- * the inference worker, so two decks physically cannot share one — the second
- * would receive a detached buffer.
+ * A CLEAR THAT FAILS DOES NOT REPLACE THE REASON IT WAS CLEARING. For a second
+ * Host a clear that can fail is ordinary — a locked file, an IPC round trip, a
+ * read-only bundle — and letting its rejection out would lose both the retry and
+ * the integrity error that caused it, turning a recoverable corrupt copy into a
+ * dead deck reported under the wrong cause. The ceiling still holds: a clear
+ * that did nothing means the next ask hands back the same bytes, which is
+ * attempt two, which throws.
+ *
+ * THE BUFFER MUST BE FRESH PER CALL, AND THAT IS THE HOST'S OBLIGATION rather
+ * than a fact about this one: `LOAD_MODEL` TRANSFERS it into the inference
+ * worker (`offscreen/deck.js`), which detaches it, and two decks each ask. A
+ * Host that memoized its bytes — the obvious optimisation once they arrive over
+ * IPC or off a vendored file — would hand back a detached array on the second
+ * load. `requireWholeBuffer` above is what says so, in those words.
  *
  * @param {{modelBytes: Function, clearModel: Function}} host the EngineHost
  * @param {(phase:'cache'|'download'|'verify', got:number, total:number)=>void} onProgress
@@ -104,6 +157,7 @@ export async function loadModel(host, onProgress = () => {}, pin = MODEL) {
   // same corrupt bytes fails rather than downloading them for ever.
   for (let attempt = 1; ; attempt++) {
     const got = await host.modelBytes(onProgress);
+    requireWholeBuffer(got.bytes);
     // `got.bytes.length` and not the pin's: a short buffer reports the length it
     // actually has on its way to failing, rather than one it never had.
     onProgress('verify', got.bytes.length, got.bytes.length);
@@ -111,7 +165,10 @@ export async function loadModel(host, onProgress = () => {}, pin = MODEL) {
       await verifyModel(got.bytes, pin);
       return { buffer: got.bytes.buffer, fromCache: got.fromCache, ms: performance.now() - t0 };
     } catch (bad) {
-      await host.clearModel();
+      // A clear that itself fails must not become the error the user is shown:
+      // `bad` is why we are here, and the ceiling copes with a clear that did
+      // nothing.
+      try { await host.clearModel(); } catch { /* swallowed on purpose — see above */ }
       if (attempt === 2 || !got.fromCache) throw bad;
     }
   }
