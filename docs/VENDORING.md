@@ -28,11 +28,18 @@ document.
 | **the unit** — 35 files | the engine and the deck. `extension/unit.json` declares it; `extension/unit.sha256` fixes it byte for byte | **no.** Edit it and you have forked, not vendored |
 | **the reference Host** — 5 files | `offscreen/host.js`, `ui/host.js`, `offscreen/host-pin.js`, `content.js`, `speed.js`. This repository's Chrome implementation of the seam | **yes — that is the point.** The first two are the *holes* you replace |
 | **the harness** — 14 files | the suites whose subject is the unit, and the two files that run them | **yes**, once you have read §6 |
+| **the committed weights** — 2 files | `extension/models/nmp.onnx` and `extension/models/NOTICE.basic-pitch`. Declared as an `external` entry, like ONNX Runtime, but **in git** — see §6 | **no.** Copy them byte for byte or replace the model deliberately |
 
 `extension/unit.json` is the machine-readable version of that table: `entries`,
 `roots` and `required` are the unit; `holes` are the two modules a Host
 replaces; `suites` and `runners` are the harness, with a `reads` list naming
-every file each one opens across the seam. Step 2 below derives the copy list
+every file each one opens across the seam; and `external` is the fourth group.
+`external` has **two kinds**, and the difference is one field: an entry without
+`committed` is fetched by the script its `fetch` field names (`vendor/ort/`),
+and an entry with `committed: true` is **in git and travels with the copy**
+(`models/`, the Basic Pitch weights — §6). For a committed entry the `fetch`
+field points at this document, because the recipe *is* a document: there is
+nothing to run. Step 2 below derives the copy list
 from it rather than from a list in this document, because a list in a document
 rots and `tools/unit-check.mjs` gates the declaration on every run.
 
@@ -90,15 +97,26 @@ const host    = [...d.holes.map((h) => ext(h.path)),
                  ...d.hostReads.map((r) => ext(r.path)),
                  ...[...d.suites, ...d.runners].flatMap((s) => (s.reads || []).map(ext))];
 const harness = [...d.suites, ...d.runners].map((s) => s.path);
-console.log([...new Set([...unit, ...host, ...harness,
+const weights = d.external.filter((e) => e.committed)
+                 .flatMap((e) => fs.readdirSync(ext(e.prefix)).map((f) => ext(e.prefix) + f));
+console.log([...new Set([...unit, ...host, ...harness, ...weights,
   "extension/unit.sha256", ...d.external.map((e) => e.fetch)])].sort().join("\n"));
 ' > /tmp/vendor-list.txt
-wc -l < /tmp/vendor-list.txt      # 50
+wc -l < /tmp/vendor-list.txt      # print it — the number belongs to the tag, not to this page
 ```
 
-Fifty paths: 35 unit, 5 reference Host, 14 harness (12 suites and 2 runners,
-seven of which are unit files that are their own suite and are therefore already
-counted), plus `extension/unit.sha256` and `tools/fetch-vendor.sh`.
+At `v0.2.0` that printed **50**: 35 unit, 5 reference Host, 14 harness (12
+suites and 2 runners, seven of which are unit files that are their own suite and
+are therefore already counted), plus `extension/unit.sha256` and
+`tools/fetch-vendor.sh`.
+
+**It is larger on any tag carrying the MIDI transcription**, which adds unit
+files, one suite (`qa/midi-pack.mjs`), the two files under `extension/models/`,
+and this document — which is itself in the list, because it is the `fetch` recipe
+the committed weights declare. The count for a later tag is deliberately **not**
+typed in here: the list is derived from the declaration precisely so it cannot
+rot, and a number written into a paragraph is the one part of that which can.
+Print it, and carry the number you printed into step 4.
 
 The unit half comes out of the **sums file** rather than out of `unit.json`'s
 `required` clauses, and that is not an accident of convenience: two of those
@@ -112,7 +130,7 @@ verified one step ago.
 DEST=/path/to/your-product/vendor/stem-splitter-live
 mkdir -p "$DEST"
 tar -cf - -T /tmp/vendor-list.txt | tar -x -C "$DEST"
-find "$DEST" -type f | wc -l      # 50
+find "$DEST" -type f | wc -l      # the same number step 3 printed
 ```
 
 **The layout is part of the contract, not a preference.**
@@ -142,8 +160,47 @@ bash tools/fetch-vendor.sh
 
 ~27 MB into `extension/vendor/ort/`, pinned at `onnxruntime-web@1.27.0` and
 verified against two SHA-256s recorded in the script itself. **Run the script;
-do not copy our drop.** It is not in git for the same reason the model weights
-are not, it is not this project's code, and the script is the pin.
+do not copy our drop.** It is not in git for the same reason the *separator*
+weights are not, it is not this project's code, and the script is the pin.
+
+### The transcription weights under `models/` are the other kind: committed
+
+`extension/models/nmp.onnx` is Spotify's Basic Pitch, and it is **in git**.
+Apache-2.0 covers the code *and* the weights, 225 KiB is not a large binary, and
+committing it removes the single point of failure that the separator's 109 MB
+fetch still has — there is no host to disappear and no fetch to fail. That is
+the owner's ruling, recorded in
+[ADR 0002](adr/0002-midi-transcription-narrows-the-no-file-property.md) and in
+[`NOTICE.md`](../NOTICE.md).
+
+**So: copy those two files verbatim. Do not fetch anything.** Step 3's list
+already contains them; step 4 already copied them. What remains is to check that
+what you copied is what we declared:
+
+```bash
+shasum -a 256 extension/models/nmp.onnx     # 2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec
+wc -c        < extension/models/nmp.onnx    # 230444
+node -e 'const e=require("./extension/unit.json").external.find(x=>x.prefix==="models/");console.log(e.sha256,e.bytes)'
+```
+
+The two must agree, and the declaration is what they are checked against:
+`extension/unit.sha256` authenticates `extension/unit.json`, and `unit.json`
+carries the model's SHA-256 and byte count. **The identity is pinned there and
+not in the sums file** because a `.onnx` is in no import graph, so it is in no
+closure and no crawl can reach it — the same two-step the separator's pin uses
+across `extension/shared/config.js` and `extension/offscreen/host-pin.js`, with
+both halves here describing bytes that are already in your copy.
+
+`extension/models/NOTICE.basic-pitch` travels with the weights and is not
+optional: **Apache-2.0 §4(d) requires the upstream `NOTICE` to be reproduced in
+any distribution**, and a vendored product is a distribution. Keep it beside the
+file it belongs to, and carry its content into your own `NOTICE` document.
+
+If you replace the model, you are changing the product's identity, not its
+packaging: `BASIC_PITCH` in `extension/shared/config.js` pins the geometry as
+well as the bytes, and a different transcriber will not have the same three
+output heads. Change the declaration deliberately, run `node tools/unit-hash.mjs`,
+and expect `node tools/unit-check.mjs` to hold you to it.
 
 ## 7. Run the unit's own gate
 
@@ -168,12 +225,23 @@ exit 0, 12 of 12 steps PASS, **1156 assertions**, about 74 s. Per step:
 | `passthrough` | 16 | `embed-state` | 224 |
 | `pitch` | 23 | `pitchbank` | 28 |
 
+**Those numbers are the `v0.2.0` dry run's, and a later tag moves them.** The
+MIDI transcription adds four unit suites — `resample2`, `notes`, `drumtap` and
+`midi-pack` — so both halves of that line move by four together, and the
+assertion total is higher. Read the line the run prints; do not diff it against
+this page. What is worth checking is the *shape*: `--unit` still ends
+`GREEN (partial …)`, every step still passes, and the two step counts still
+match.
+
 **No `npm install`, no `node_modules`, no `package.json`, no git.** The dry run
 had none of them; `--unit` is the plain-Node plan and spawns nothing that is not
 in the list above. Node 22 or newer.
 
 If a step is red here, before you have changed anything, the copy is wrong —
-re-read step 4. Nothing in `--unit` needs a browser, a GPU or the model weights.
+re-read step 4. Nothing in `--unit` needs a browser or a GPU, and nothing in it
+needs the separator's 109 MB weights. `midi-pack` needs no weights either: it
+builds a pack out of note lists it makes itself, so the committed
+`models/nmp.onnx` is not read by any suite — only by the browser.
 
 ---
 
@@ -279,11 +347,17 @@ translate. It is cosmetic and it is on your first screenshot.
 be true there. Serving the unit from any other scheme means COOP/COEP, or the
 flag, before `offscreen/engine.js` loads.
 
-**The model weights are not in the copy.** 109 MB, not in git, fetched by
+**The separator's weights are not in the copy.** 109 MB, not in git, fetched by
 `tools/fetch-model.sh` here. `modelBytes` / `modelCached` / `clearModel` are
 where your Host says where they come from; the SHA-256 and the byte count stay
 in `shared/config.js`, and the unit checks them over whatever you hand it, every
 load. A Host that verified would be a Host that could decline to.
+
+**The transcription weights are the exception, and they owe your Host nothing.**
+`models/nmp.onnx` came with the copy (§6). The unit resolves it through
+`assetUrl('models/nmp.onnx')` like any other asset, so all your Host owes is an
+`assetUrl` that can address a file inside the copy — there is no fetch, no
+cache bucket and no second pin to implement.
 
 ---
 

@@ -51,8 +51,12 @@ does: `content.js` reads three numbers off the page's `<video>` element — `pau
 `captureStream()`; never touches a byte of audio or video; and never executes in
 the page's JavaScript world.
 
-L1 is also why there is no offline export and no `downloads` permission —
-`tools/tree-check.mjs` asserts the permission's absence.
+L1 is also why there is **no audio export and no `downloads` permission** —
+`tools/tree-check.mjs` asserts the permission's absence. The one file this build
+hands over is a MIDI transcription, which carries no samples and cannot be
+played back as the recording; what holds that line is `qa/midi-pack.mjs` and the
+allowlist in `extension/shared/midi.js`, not the missing permission. See
+[ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md).
 
 ### P1 — No network after the model download
 
@@ -94,8 +98,21 @@ These were each built, argued, or measured, and they are closed. Re-proposing on
 is fine, but start from the reason it was settled rather than from scratch —
 `docs/ARCHITECTURE.md`'s appendix names what was cut and why.
 
-- **One deck, live, drawn into the page.** An offline-export mode and a two-deck
-  console were both built and both cut.
+- **One deck, live, drawn into the page.** An offline **audio**-export mode and a
+  two-deck console were both built and both cut.
+- **The one file this product hands over is a MIDI pack, and that is permanent.**
+  A `.mid` carries note, onset, duration and velocity — no samples, no timbre,
+  no performance — so it cannot be played back as the recording, which is why it
+  ships where audio export does not. It is not held by the absent `downloads`
+  permission (an extension page can mint a `Blob` and click an anchor without
+  one, and always could): it is held by an allowlist of exactly
+  `{application/zip, audio/midi}` in `extension/shared/midi.js` and by
+  `qa/midi-pack.mjs`, which builds a real pack, asserts every zip entry begins
+  `MThd`, and refuses the same pack with a real WAV inside. Widening that
+  allowlist turns the gate red. The rights question a transcription raises is
+  **open** and is recorded as open —
+  [ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md),
+  which supersedes ADR 0001 decision 2.
 - **One `AudioContext` at 44 100 Hz — the model's native rate — and no JS
   resampling anywhere on the live path.** Chrome converts the 48 k tab stream on
   the way in and the 44.1 k bus on the way to the device, both inside its own media
@@ -106,6 +123,20 @@ is fine, but start from the reason it was settled rather than from scratch —
     the mixer* is permitted, subject to three tested conditions: after the model
     never before; `framesIn === framesOut` at 44 100; and its interpolation clears
     the same `docs/AUDIO.md` §6.6 gates used to reject Blink's linear interpolator.
+  - A **read-only tap downstream of the separator** may resample onto its own
+    model's clock, subject to three conditions that are the same discipline as
+    the carve-out above: it is downstream of the separator, never between the
+    capture clock and the model clock; no sample it produces is ever returned
+    to the audio graph — not the mixer, not the master bus, not the worklet;
+    and its output is an opinion, not audio. `extension/engine/resample2.js`
+    is the one instance: a fixed 2:1 half-band decimation, 44 100 → 22 050 mono,
+    feeding Basic Pitch on the clock that model is built on, so the MIDI lanes
+    exist. It is the same class of thing as `engine/keytap.js` and
+    `engine/bpmtap.js` reading planes off the stem ring and forming an opinion
+    about key and tempo. **A general rational resampler is not covered by this**
+    and must not be written: a fixed ratio cannot be pointed at the capture path
+    by the next person, and a general one can, which is the shape the
+    prohibition is actually about.
   - `extension/engine/pitch.js` interpolates **filter coefficients** between
     sub-phase branches, not the signal. Do not read this as "linear interpolation
     is fine now" — signal interpolation measured −8.6 dB and is banned.
@@ -117,8 +148,11 @@ is fine, but start from the reason it was settled rather than from scratch —
   push. `qa/speed-pitch.mjs` holds it at ±2 cents.
 - **WebGPU is the target.** Take ORT Web's automatic WASM fallback if it is free;
   do not spend a day optimising it.
-- **Model weights come from a pinned, hashed upstream host.** Do not self-host, and
-  do not commit the weights. **The pin is split across the Host seam** (S7): the
+- **The separator's weights come from a pinned, hashed upstream host.** Do not
+  self-host `htdemucs_6s`, and do not commit it. That is not a size rule and it
+  is not a preference: the weights are **CC BY-NC 4.0**, nobody can relicense
+  them and nobody may redistribute them, so fetching is the only lawful way to
+  put them on a user's disk. **The pin is split across the Host seam** (S7): the
   URL and the cache bucket live in `extension/offscreen/host-pin.js`, because
   fetching the bytes is a Host's job, and the SHA-256 and byte count live in
   `extension/shared/config.js`, because deciding whether the bytes are the model
@@ -128,6 +162,20 @@ is fine, but start from the reason it was settled rather than from scratch —
   pin in two places because it is: `fetch` and the Cache API are not `chrome.*`,
   so a URL in the unit is a network path no gate on the unit can see, and moving
   it is what makes P1 and M1 hold under a second Host rather than under this one.
+  - **The Basic Pitch weights are the one exception, and they are committed** —
+    `extension/models/nmp.onnx`, 230,444 bytes. Three things distinguish them
+    from the rule above, and a second committed model would have to clear all
+    three. **Apache-2.0 covers the code *and* the weights**, so redistribution
+    is granted rather than assumed — an explicit grant over the WEIGHTS is the
+    only test that decides which model this project may ship, and `NOTICE.md`
+    applies it to every candidate the same way. 225 KiB is not a large binary.
+    And committing removes the single point of failure the Demucs pin openly
+    confesses to in `NOTICE.md` — a third-party re-export that can be deleted
+    out from under new installs. The hash half of the pin still lives in
+    `extension/shared/config.js`, and the file is declared `external` in
+    `extension/unit.json` so a vendoring copy carries the bytes and still
+    checks them. See
+    [ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md).
 - **No tab picker, ever.** `tabCapture` grants are per-tab, and only a
   browser-level invocation *on that tab* mints one — a toolbar click or
   `Ctrl+Shift+9`. A list rendered inside our own page is not one, so a picker could

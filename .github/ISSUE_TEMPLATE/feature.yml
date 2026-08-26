@@ -7,8 +7,11 @@ body:
       value: |
         Before you write this up, two things that will save you the effort:
 
-        - **Saving stems to a file is not coming.** It was built and cut. See the
-          [FAQ](../blob/main/FAQ.md#are-you-going-to-add-a-download-button--offline-export--a-second-deck).
+        - **Saving the stems as audio is not coming.** It was built and cut, and
+          that has not changed. **Saving them as a transcription already
+          shipped** — the deck writes a MIDI pack of the six stems while the
+          video plays. Notes, not sound. See the
+          [FAQ](../blob/main/FAQ.md#can-i-export-the-stems-as-files).
         - **A tab picker cannot be built.** Chrome only grants audio capture on a
           browser-level gesture on the target tab; a list inside our own UI is
           not one, however it is drawn.

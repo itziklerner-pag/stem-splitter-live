@@ -23,6 +23,10 @@ SOFTWARE.
 ---
 
 NOTE: this licence covers the source code in this repository. It does NOT
-cover the machine-learning model weights the extension downloads at runtime,
-which are third-party and carry their own, more restrictive terms. See
-NOTICE.md.
+cover the third-party machine-learning model weights, whether the extension
+downloads them at runtime or they are committed here. Each set carries its own
+terms, and they are not the same terms: the Demucs weights are CC BY-NC 4.0 and
+are fetched, never redistributed; the Basic Pitch weights at
+extension/models/nmp.onnx are Apache-2.0 and ARE redistributed here, under the
+copy of that licence at LICENSES/Apache-2.0.txt. See NOTICE.md for what each
+piece is, where it comes from, and what you may do with it.

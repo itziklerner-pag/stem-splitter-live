@@ -67,6 +67,30 @@ supplies (`createBackend`); today the only implementation is the unit's own
 _Avoid_: model, engine (the **engine** is the whole pipeline), inference server,
 runtime
 
+### Deliverables
+
+**Transcription**:
+A description of what was played — note number, onset, duration, velocity —
+derived from **stems** and carrying none of their audio. The one artifact this
+product hands the user: a MIDI pack. A reader performs it on its own
+synthesiser, so it sounds like that synthesiser and never like the recording.
+_Avoid_: export, bounce, render, rip, copy (a **Copy** is the other thing
+entirely, and this glossary keeps them apart on purpose)
+
+**Copy**:
+Audio that **reproduces** a **Source** — samples, in any container, at any bit
+depth, however derived. This product makes none, and the whole reconciliation in
+[ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)
+rests on this one word: the property was narrowed from *"cannot produce a
+user-accessible file from captured audio"* to *"cannot produce a user-accessible
+file that **reproduces** the captured audio"*. A **Transcription** is derived
+from captured audio and is not a **Copy** of it, so "derived from" is not a
+synonym for "reproduces" here and must not be written as one. The distinction is
+enforced by an allowlist (`extension/shared/midi.js`) and gated by
+`qa/midi-pack.mjs`, not by a permission.
+_Avoid_: export, download, dump, rip (each of those hides which of the two is
+meant)
+
 ### Fixed elsewhere
 
 Where these documents define a term, their definition wins; this file points
@@ -92,15 +116,22 @@ and does not restate (`docs/agents/domain.md`).
 - A **Live source** arrives in real time, as the player plays. The **deck**
   therefore runs behind the picture — about 3.4 s at the default **hop**
   (`FAQ.md`, "Why is it a few seconds behind the video?").
-- Anything derived from a **Live source** — a stem, a cache, an export in a
-  product that allows one — is bound by real time: the player has to play
-  through.
+- Anything derived from a **Live source** — a stem, a cache, a
+  **Transcription**, a **Copy** in a product that allows one — is bound by real
+  time: the player has to play through.
 - A **File source** is available whole, up front, so separation runs at engine
   speed rather than playback speed.
 - **L1** admits exactly one Source: a **Live source** through
   `chrome.tabCapture`. This repository implements no **File source** and no
-  export; both exist only in the separate desktop product
-  (`docs/adr/0001-desktop-app-is-a-separate-product.md`).
+  **Copy**: both exist only in the separate desktop product
+  (`docs/adr/0001-desktop-app-is-a-separate-product.md`). It does deliver one
+  artifact — a **Transcription**, as a MIDI pack — which is why ADR 0002
+  supersedes ADR 0001 decision 2 and narrows the property those documents
+  jointly stated.
+- A **Transcription** is bound by real time exactly as a stem is: it is written
+  off the live stem ring as the player plays. Transcribing by bulk-reading the
+  stem cache would be faster and would falsify "the player has to play through",
+  so it is prohibited rather than merely unimplemented.
 - There is exactly one **Host** per product: the extension host here, the
   desktop host there. The **engine** and the **deck** must not know which
   **Host** they run under.

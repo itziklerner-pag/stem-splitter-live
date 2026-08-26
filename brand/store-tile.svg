@@ -22,6 +22,6 @@
     <text x="32" y="150" font-size="34" font-weight="700" letter-spacing="-1" fill="#f5f7fa">Stem Splitter Live</text>
     <text x="32" y="190" font-size="19" font-weight="500" fill="#b3bcc8">Six stems from any YouTube</text>
     <text x="32" y="215" font-size="19" font-weight="500" fill="#b3bcc8">video, live and on-device.</text>
-    <text x="32" y="252" font-size="15" font-weight="600" fill="#4ce3bb">No upload · No download</text>
+    <text x="32" y="252" font-size="15" font-weight="600" fill="#4ce3bb">No upload · No audio download</text>
   </g>
 </svg>

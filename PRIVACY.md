@@ -1,6 +1,6 @@
 # Privacy Policy
 
-**Stem Splitter Live** · last updated 17 August 2026
+**Stem Splitter Live** · last updated 26 August 2026
 
 ## The short version
 
@@ -45,9 +45,15 @@ project's acceptance tests.
 | Which tab you armed, and the last arming error | `chrome.storage.session` | cleared when you close the browser |
 | The model weights | Cache Storage | so you download 109 MB once, not once per session |
 | Separated stems for tracks you have played | OPFS (origin-private file system) | so replaying a track does not re-run the model. Capped at 4 GiB, oldest evicted first |
+| The MIDI take you are recording, and the finished pack until you save or discard it | the deck's own memory, in the page — **not written to disk at all** | so a cancelled save dialog is not a lost take. Closing the deck, closing the tab or reloading discards it. Nothing about a take is persisted anywhere |
 
 All of it is local. None of it is transmitted. Uninstalling the extension
 removes all of it.
+
+If you do save a MIDI pack, the resulting `.zip` is an ordinary file that goes
+wherever your browser puts downloads. From that point it is your file and the
+extension has no further relationship with it — it cannot read it back, and it
+does not record that you saved one.
 
 To clear it yourself without uninstalling: `chrome://settings/content/all` →
 find the extension → Clear data.
@@ -78,8 +84,18 @@ are enforced in code review and, where testable, by automated gates.
   to keep the deck in sync. It never reads `src`, `currentSrc`, `buffered` or
   `srcObject`, never calls `captureStream()`, and never runs code in the page's
   own JavaScript context.
-- **It cannot save a file.** The extension does not request the `downloads`
-  permission, and an automated check asserts its continued absence.
+- **It cannot produce a file that reproduces the audio it captured.** The one
+  file it hands you is a MIDI transcription: note numbers, onsets, lengths and
+  velocities, and no samples of anything. What holds that line is an allowlist
+  of exactly two file types in `extension/shared/midi.js` and an automated gate,
+  `qa/midi-pack.mjs`, which builds a real pack, asserts every entry of it begins
+  `MThd`, and asserts that the same pack containing a WAV is **refused**. The
+  extension still does not request the `downloads` permission and a check still
+  asserts its continued absence — but that permission is no longer offered as
+  the reason, because it never was one: any extension page can create a `Blob`.
+  This claim was wider until 26 August 2026, and
+  [ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)
+  records what was narrowed and what it cost.
 - **It loads no remote code.** Manifest V3 forbids it; the model and the runtime
   are fetched as *data* and cached, never as executable script from a CDN.
 
@@ -95,6 +111,15 @@ noted in [`CHANGELOG.md`](CHANGELOG.md), and — as Chrome Web Store policy
 requires — users are notified in the extension itself before the change takes
 effect. Given that the current practice is "collect nothing", any change at all
 would be a significant one.
+
+**That last clause is an obligation on this release, and it is not discharged
+yet.** The MIDI transcription added on 26 August 2026 does not change what is
+collected — still nothing — but it does change what the extension can produce,
+and the claim above it ("it cannot save a file") was narrowed to say so. The
+in-extension notice this clause promises is **product work that must land before
+release**, not after it: a clause that describes a mechanism the build does not
+have is exactly the kind of sentence this document exists not to contain. It is
+recorded here, in the document that makes the promise, rather than in a tracker.
 
 ## Verifying any of this yourself
 

@@ -38,7 +38,7 @@
     <text x="80" y="290" font-size="76" font-weight="700" letter-spacing="-2" fill="#f5f7fa">Stem Splitter Live</text>
     <text x="80" y="368" font-size="38" font-weight="500" fill="#b3bcc8">Split any YouTube video into six stems,</text>
     <text x="80" y="418" font-size="38" font-weight="500" fill="#b3bcc8">live and on your own machine.</text>
-    <text x="80" y="516" font-size="27" font-weight="600" fill="#4ce3bb">On-device · No upload · No download · MIT</text>
+    <text x="80" y="516" font-size="27" font-weight="600" fill="#4ce3bb">On-device · No upload · No audio download · MIT</text>
     <text x="80" y="562" font-size="24" font-weight="400" fill="#6c7686">stemsplitter.live</text>
   </g>
 </svg>
