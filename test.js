@@ -2586,7 +2586,7 @@ if (group('cache')) {
       st ? `atMs ${st.atMs} vs now ${Date.now()}` : 'none');
 
     /**
-     * ENTRY POINT: offscreen.js reconcileMaster(), which applies the dual-deck
+     * ENTRY POINT: offscreen/engine.js reconcileMaster(), which applies the dual-deck
      * trim the moment a second deck loads — and for a cached deck that can be
      * BEFORE ensureGraph() has built the node. The live pipeline learned this
      * the expensive way: -3 dB in the field, unity in the worklet.
@@ -2632,7 +2632,7 @@ if (group('cache')) {
      * `offscreen/live.js` wires it. NEITHER of them can see whether a CachedDeck
      * calls `tick()`, hands it THIS deck's ring, puts the payload on the wire, or
      * clears it on the lifecycle — and the cached deck is the one the play-along
-     * user is on, because `offscreen.js` swaps deck A to it on a cache hit, i.e.
+     * user is on, because `offscreen/engine.js` swaps deck A to it on a cache hit, i.e.
      * on the SECOND listen to any track.
      *
      * Every assertion below drives the real `CachedDeck` through `load()`,
@@ -2816,7 +2816,7 @@ if (group('cache')) {
        * reads — `a128.last` is the last LIVE_STATE the 128 BPM cached run actually
        * put on the wire. The live deck's identical claim lives in the `live` group
        * at its own entry point (`LivePipeline.pushState`); this one is here
-       * because `offscreen.js` swaps deck A to a CachedDeck on a cache hit, so the
+       * because `offscreen/engine.js` swaps deck A to a CachedDeck on a cache hit, so the
        * embed reaches THIS file on the second listen to any track, and a pulse
        * that works on first play and is dead on replay is the failure this row
        * exists to prevent.
@@ -3298,7 +3298,7 @@ if (group('cache')) {
 
   head('cache — a cached deck starts where the USER is, not at the top');
   /**
-   * ENTRY POINT: offscreen.js playCachedAtPage(), on both routes into cached
+   * ENTRY POINT: offscreen/engine.js playCachedAtPage(), on both routes into cached
    * audio — the first LIVE_START after a cache hit, and every resume after it.
    * Both defects it prevents are SILENT: one plays the wrong part of the song,
    * the other plays nothing at all.
@@ -3370,7 +3370,7 @@ if (group('cache')) {
 
   head('cache — a prime is all-or-nothing, and "we cannot see" is a refusal');
   /**
-   * ENTRY POINTS: `primeRefusal` is called from offscreen.js beginPrime() on
+   * ENTRY POINTS: `primeRefusal` is called from offscreen/engine.js beginPrime() on
    * LIVE_START; `commitRefusal` from endPrime() on stop. They are separate
    * assertions because they run at different moments on different evidence.
    */
@@ -4428,6 +4428,174 @@ if (group('dual')) {
     ok('and every published frame is accounted for as either separated or passthrough',
       A.done + A.drops === A.k && B.done + B.drops === B.k, `A ${A.done}+${A.drops}=${A.k}  B ${B.done}+${B.drops}=${B.k}`);
   }
+}
+
+// ===========================================================================
+if (group('host')) {
+  head('host — the Host seam: a Host that cannot do the job is refused at boot');
+  /**
+   * WHAT THIS COVERS AND WHY IT IS WORTH A GATE.
+   *
+   * `extension/shared/host.js` declares what the unit asks of whatever is
+   * hosting it, and `assertHost()` refuses a Host that is short a duty at MODULE
+   * EVALUATION. The moment matters: without it, a Host missing `captureStream`
+   * surfaces as `host.captureStream is not a function` thrown from inside
+   * `captureStart`, which is precisely the halfway R5 is about — a capture that
+   * fails after the track exists and leaves the user's tab silent.
+   *
+   * REACHABLE, NOT CONSTRUCTED. The first assertion runs the REAL
+   * `extension/offscreen/host.js` — the module `offscreen/engine.js` imports and
+   * the only EngineHost that ships — through the real `assertHost`. Deleting a
+   * duty from that file turns it red. It is also the CONTROL for the refusals
+   * below: without it, "a broken Host is refused" would be satisfied by a
+   * function that refuses everything.
+   */
+  const { assertHost, ENGINE_HOST_DUTIES } = await import('./extension/shared/host.js');
+  const engineHost = await import('./extension/offscreen/host.js');
+  const duties = Object.keys(ENGINE_HOST_DUTIES);
+  const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
+  /** A Host that owes exactly what is declared, so each case below breaks ONE thing. */
+  const stub = () => Object.fromEntries(duties.map((k) => [k, () => {}]));
+
+  const shipping = threw(() => assertHost(engineHost, ENGINE_HOST_DUTIES, 'EngineHost'));
+  ok('THE SHIPPING EngineHost SATISFIES EVERY DECLARED DUTY  '
+    + '[entry point: extension/offscreen/host.js, the module extension/offscreen/engine.js imports]',
+    duties.length > 0 && shipping === null,
+    duties.length === 0
+      ? 'ENGINE_HOST_DUTIES is empty — this assertion has no coverage at all'
+      : shipping || `${duties.length} duties: ${duties.join(', ')}`);
+
+  const noCapture = stub();
+  delete noCapture.captureStream;
+  const why = threw(() => assertHost(noCapture, ENGINE_HOST_DUTIES, 'EngineHost'));
+  ok('A HOST THAT CANNOT OPEN A CAPTURE IS REFUSED, AND THE ERROR NAMES THE DUTY  '
+    + '[entry point: assertHost(), called at extension/offscreen/engine.js module scope]',
+    why != null && why.includes('captureStream') && why.includes(ENGINE_HOST_DUTIES.captureStream),
+    why == null
+      ? 'a Host with no captureStream was ACCEPTED — the engine would boot and fail at the first arm instead'
+      : why);
+
+  ok('...and it names ONLY the duty that is missing, so the message is a repair instruction',
+    why != null && duties.filter((k) => k !== 'captureStream').every((k) => !why.includes(k)),
+    why == null ? 'nothing was thrown' : why);
+
+  const absent = threw(() => assertHost(undefined, ENGINE_HOST_DUTIES, 'EngineHost'));
+  ok('AN ABSENT HOST IS THE LOUDEST FAILURE HERE, NOT THE QUIETEST  '
+    + '[entry point: assertHost(), the `!host || ...` shape AGENTS.md bans]',
+    absent != null && absent.includes('no host module was supplied'),
+    absent == null
+      ? 'assertHost(undefined) returned without throwing — a seam check that reports coverage exactly when it has none'
+      : absent);
+
+  const notCallable = stub();
+  notCallable.assetUrl = 'vendor/ort/';
+  const nc = threw(() => assertHost(notCallable, ENGINE_HOST_DUTIES, 'EngineHost'));
+  ok('A DUTY THAT IS PRESENT BUT NOT CALLABLE COUNTS AS MISSING',
+    nc != null && nc.includes('assetUrl'),
+    nc == null ? 'a Host whose assetUrl is a string was ACCEPTED' : nc);
+
+  const empty = threw(() => assertHost(stub(), {}, 'EngineHost'));
+  ok('AN EMPTY DUTY LIST IS REFUSED — nothing can be asserted about a Host nothing was asked of',
+    empty != null && empty.includes('no duties were declared'),
+    empty == null ? 'assertHost(host, {}) accepted a Host it checked nothing about' : empty);
+
+  /**
+   * THE INTERFACE AND ITS ONE CONSUMER MUST NOT DRIFT APART, in either
+   * direction. S2 and S7 both add duties to this seam; a duty used but not
+   * declared is a Host that passes `assertHost` and then throws, and a duty
+   * declared but never used is one more thing a second Host must implement for
+   * nothing.
+   *
+   * Matched as CALLS (`host.x(`) rather than as any `host.x`, because
+   * `import * as host from './host.js'` would otherwise contribute a duty named
+   * `js`. Comments are stripped first: this is a claim about code.
+   */
+  const { readFileSync } = await import('node:fs');
+  const engineRaw = readFileSync(new URL('./extension/offscreen/engine.js', import.meta.url), 'utf8');
+  const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const engineSrc = strip(engineRaw);
+  const reached = [...new Set([...engineSrc.matchAll(/\bhost\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+  const undeclared = reached.filter((k) => !duties.includes(k));
+  ok('EVERY HOST DUTY THE ENGINE REACHES FOR IS DECLARED  '
+    + '[entry point: extension/offscreen/engine.js, comments stripped]',
+    reached.length > 0 && undeclared.length === 0,
+    reached.length === 0
+      ? 'the engine calls no host duty at all — either the seam is gone or this scan cannot see it'
+      : undeclared.length
+        ? `undeclared: ${undeclared.map((k) => `host.${k}()`).join(', ')} — declare it in ENGINE_HOST_DUTIES or a Host will pass assertHost and still throw`
+        : `${reached.length} reached: ${reached.join(', ')}`);
+
+  const unreached = duties.filter((k) => !reached.includes(k));
+  ok('...and every declared duty is actually reached for, so a second Host implements nothing dead',
+    reached.length > 0 && unreached.length === 0,
+    unreached.length ? `declared but never called: ${unreached.join(', ')}` : `all ${duties.length}`);
+
+  /**
+   * R5 — TRACK-STOP DISCIPLINE, ASSERTED FOR THE FIRST TIME.
+   *
+   * `docs/ARCHITECTURE.md` R5: holding the MediaStream track IS the tab mute.
+   * Chrome mutes a tab the moment it is captured and releasing the track
+   * unmutes it, so a capture that fails after the stream exists — and does not
+   * stop it — leaves the user's tab permanently silent with no affordance to
+   * fix it. `SECURITY.md` puts that in scope as a vulnerability.
+   *
+   * It had no assertion anywhere before this slice, and the slice is exactly
+   * the edit most likely to break it: the token now crosses a Host boundary
+   * (`host.captureStream`), so the tempting mistake is a null check, a log line
+   * or an early return between the stream arriving and the guard that stops it.
+   *
+   * READ OUT OF THE BUILD rather than reimplemented, the same shape
+   * `qa/speed-pitch.mjs` uses to read the key-lock policy out of `content.js`
+   * and `qa/passthrough-gain.mjs` uses to read `pushGains` out of `live.js`.
+   * `captureStart` cannot be driven from Node — `offscreen/engine.js` builds an
+   * AudioContext, a Worker and a MasterBus at module scope — so the claim is
+   * made where it is checkable. FAILS IF IT CANNOT LOOK: a `captureStart` this
+   * cannot locate, or a second `host.captureStream` call it did not expect, is
+   * a red rather than a silent pass.
+   */
+  const capAt = engineRaw.indexOf('\nasync function captureStart(');
+  const capBody = capAt < 0 ? null : engineRaw.slice(capAt + 1).split(/\n\}\n/)[0];
+  const opened = capBody ? capBody.split(/const s = await host\.captureStream\(/) : [];
+  const afterOpen = opened.length === 2 ? strip(opened[1].replace(/^[^\n]*\n/, '')) : null;
+  ok('R5 — THE CAPTURE TOKEN IS SPENT INSIDE THE GUARD: nothing at all runs between the stream arriving and the try that stops it  '
+    + '[entry point: extension/offscreen/engine.js captureStart(), reached from the CAPTURE_START case]',
+    afterOpen != null && /^\s*try\s*\{/.test(afterOpen),
+    capBody == null
+      ? 'could not locate `async function captureStart(` in extension/offscreen/engine.js. The gate cannot look, so it fails.'
+      : opened.length !== 2
+        ? `expected exactly one \`const s = await host.captureStream(\`, found ${opened.length - 1} — `
+          + 'a second way to open a capture is a second way to leak one'
+        : /^\s*try\s*\{/.test(afterOpen)
+          ? 'the statement after the stream exists is `try {`'
+          : `the statement after the stream exists is ${JSON.stringify(afterOpen.trim().slice(0, 90))}, not a try. `
+            + 'Chrome mutes the tab the moment it is captured: anything that can return or throw here leaves it silent for good.');
+
+  const guard = capBody ? capBody.match(/catch\s*\(\s*(\w+)\s*\)\s*\{([\s\S]*?)\n {2}\}/) : null;
+  const stops = guard ? /\.getTracks\(\)[\s\S]{0,60}\.stop\(\)/.test(guard[2]) : false;
+  const rethrows = guard ? new RegExp(`throw\\s+${guard[1]}\\b`).test(guard[2]) : false;
+  ok('...and that guard STOPS EVERY TRACK AND RETHROWS — a swallowed failure is a muted tab under a deck that reports idle',
+    stops && rethrows,
+    guard == null ? 'no catch block found in captureStart at all'
+      : !stops ? `the catch does not stop the tracks: ${JSON.stringify(guard[2].trim())}`
+        : !rethrows ? `the catch stops the tracks but does not rethrow ${guard[1]}, so the CAPTURE_START case would report success`
+          : `catch (${guard[1]}) stops every track and rethrows`);
+
+  /**
+   * The other end of the same rule: R5's third track-stop site. `pagehide` used
+   * to be written here; it is now `host.onTeardown`, because the moment a
+   * context goes away is the Host's fact and not the engine's — but WHAT must
+   * not be left behind is still the engine's.
+   */
+  const tdAt = engineRaw.indexOf('host.onTeardown(');
+  const tdBody = tdAt < 0 ? null : engineRaw.slice(tdAt).split(/\n\}\);/)[0];
+  ok('R5 — TEARDOWN STOPS THE TRACKS TOO, so a context going away unmutes the tab  '
+    + '[entry point: extension/offscreen/engine.js, the host.onTeardown callback]',
+    tdBody != null && /\.getTracks\(\)\.forEach\(\(t\) => t\.stop\(\)\)/.test(tdBody),
+    tdAt < 0
+      ? 'no host.onTeardown( call in extension/offscreen/engine.js — R5s last-gasp stop is gone entirely'
+      : /\.getTracks\(\)\.forEach\(\(t\) => t\.stop\(\)\)/.test(tdBody)
+        ? 'the teardown callback stops every track on every live deck'
+        : `the teardown callback does not stop the tracks: ${JSON.stringify(tdBody.trim().slice(0, 90))}`);
 }
 
 // ===========================================================================
