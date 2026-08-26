@@ -697,6 +697,18 @@ if (flag('self-check')) {
   shape('qa/live-wire.mjs "5 passed, 0 failed  (abort-path self-check only …)"', 'wire-abort',
     '  \x1b[32mPASS\x1b[0m ...and it names the error\n\n\x1b[32m5 passed, 0 failed\x1b[0m  (abort-path self-check only — run the suite with qa/live-qa.mjs wire)\n',
     'PASS', '5 passed, 0 failed');
+  // Added 2026-08-25 with the `unit-check` step, under the same rule as every
+  // block above: these are the ACTUAL lines the file printed when it was run
+  // from here, not a guess at them. It puts the suite-name prefix on the
+  // passed/failed shape, prints `ok` at THREE spaces, and interleaves un-counted
+  // `   -  ` note lines that must not be read as assertions.
+  shape('unit-check.mjs "unit-check: 55 passed, 0 failed" — suite-name prefix, and a note line in the middle', 'unit-check',
+    'ok   the crawl reached the unit, not a corner of it  33 files\n'
+    + '   -  extension/vendor/ort/ is ABSENT (not in git by design)\n'
+    + '\nunit-check: 55 passed, 0 failed\n', 'PASS', '55 passed, 0 failed');
+  check('...and its un-counted note lines are not mistaken for assertions',
+    JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
+    JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
 
   // The half of the VOID rule the old `\d+` could not see. Both of these are
   // exit-0 runs that assert nothing while printing a summary that LOOKS like a
@@ -902,6 +914,24 @@ const steps = [
    * broken import, and a re-added `arm-tab-b` each turn it red.
    */
   { id: 'tree', title: 'node tools/tree-check.mjs — extension/ loads as an extension: every named path, every import, one deck', args: ['tools/tree-check.mjs'] },
+  /**
+   * Beside `tree` because it crawls the same tree with the same four regexes and
+   * asks the other half of the question. `tree` asks whether `extension/` loads
+   * as an extension; this asks whether the engine and the deck still come OUT of
+   * it — ADR 0001 decision 3's vendored unit, behind decision 4's Host seam.
+   *
+   * The failure it catches is invisible here by construction: a `chrome.` added
+   * to a unit file works perfectly in this repository, because this repository
+   * IS a Chrome extension. It costs nothing until it costs a day in a second one.
+   *
+   * Watched going red before it was gated, on the three mutations the slice
+   * named: `chrome.runtime.id` in `engine/mixer.js` (54 of 55, and the closure
+   * scan names the file and line); a unit file importing `../sw/service-worker.js`
+   * (53 of 55 — the escape and the partition both fire); and deleting a declared
+   * hole from `unit.json` (53 of 55 — `offscreen/host.js`'s own `chrome.` is
+   * suddenly inside the unit).
+   */
+  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, speaks no chrome., and leaves only through a declared hole', args: ['tools/unit-check.mjs'] },
   /**
    * Beside `tree` because it is the same kind of claim about the same tree — a
    * property of the whole published surface rather than of one module — and a
