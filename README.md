@@ -189,7 +189,7 @@ extension/         the extension — load this unpacked
   offscreen/         THE ENGINE — AudioContext, capture ring, worklets
   engine/            pure DSP, each file with its own runnable suite
   workers/           ONNX Runtime inference worker
-  shared/            config, ring buffers, model cache, WAV, stem cache
+  shared/            config, the Host seam, ring buffers, WAV, stem cache
   ui/                the deck (embed.*), the welcome page, display maths
 docs/              ARCHITECTURE, AUDIO (the DSP spec), SIX-STEM-CONTRACT
 tools/             verify + the gates + the fetch scripts

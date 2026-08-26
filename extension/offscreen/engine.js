@@ -56,7 +56,7 @@ import { SR, SEGMENT, STEMS, MODEL, OPFS_DIR, OPFS_DEV_INPUT, OPFS_LIVE_TAP,
   DECKS, DECK_DEFAULT, XF_CURVES, XF_CURVE_DEFAULT, XF_POSITION_DEFAULT, DUAL_MASTER_TRIM_DB,
   XF_TARGETS, RING_FRAMES, STEM_CACHE_MAX_BYTES } from '../shared/config.js';
 import { RingConsumer, ringByteLength } from '../shared/ring.js';
-import { loadModel, isModelCached } from '../shared/modelcache.js';
+import { loadModel } from '../shared/modelcache.js';
 import { encodeWav, decodeWav } from '../shared/wav.js';
 import { GpuScheduler } from '../engine/scheduler.js';
 import { masterTrimDb } from '../engine/mixer.js';
@@ -193,11 +193,20 @@ function fail(stage, err) {
 /**
  * A FRESH ArrayBuffer of verified weights, per call. `LOAD_MODEL` transfers the
  * buffer into the worker, so two decks physically cannot share one — the second
- * would receive a detached buffer. The Cache API read plus SHA-256 costs ~1 s on
- * a warm cache, which is paid once per deck at arm time and never again.
+ * would receive a detached buffer. The Host's read plus the unit's SHA-256 costs
+ * ~1 s on warm bytes, which is paid once per deck at arm time and never again.
  *
  * The download itself (and its progress) happens at most once: the first call
- * populates the cache and every later call short-circuits on `cache.match`.
+ * makes the Host store the bytes and every later call is served from that store.
+ *
+ * WHERE THE BYTES COME FROM IS THE HOST'S (`host.modelBytes`); WHETHER THEY ARE
+ * THE MODEL IS THE UNIT'S (`shared/modelcache.js`). This function owns neither —
+ * it owns the SERIALISATION and the `state.model` progress, which are
+ * orchestration and stay here.
+ *
+ * This `modelBytes()` and `host.modelBytes()` share a name deliberately and are
+ * not the same thing: a deck asks the engine, the engine asks the Host, and the
+ * serialisation below is the whole of the difference between the two.
  */
 let modelChain = Promise.resolve();
 async function modelBytes() {
@@ -218,7 +227,7 @@ async function loadOnce() {
   push(true);
   let last = 0;
   try {
-    const { buffer, fromCache, ms } = await loadModel((phase, got, total) => {
+    const { buffer, fromCache, ms } = await loadModel(host, (phase, got, total) => {
       state.model.phase = phase; state.model.got = got; state.model.total = total;
       const now = performance.now();
       if (now - last > 120) { last = now; push(true); }
@@ -1110,7 +1119,7 @@ async function handle(m) {
     switch (m.type) {
       case 'STATUS':
         if (state.model.status === 'unknown') {
-          state.model.status = (await isModelCached()) ? 'cached' : 'absent';
+          state.model.status = (await host.modelCached()) ? 'cached' : 'absent';
         }
         decks.A.ensureWorker();
         echoXf(true);

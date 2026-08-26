@@ -307,7 +307,7 @@ function main() {
   const found = CANDIDATES.find((p) => fs.existsSync(p)) || null;
   check('the pinned model file is on disk', !!found,
     found ? found : `looked in: ${CANDIDATES.join(', ')} — fetch it with: `
-      + `bash tools/fetch-model.sh   # or: curl -L -o models/htdemucs_6s.onnx '${cfg.MODEL ? cfg.MODEL.url : '<MODEL.url>'}'`);
+      + `bash tools/fetch-model.sh   # or: curl -L -o models/htdemucs_6s.onnx '${globalThis.__PIN_URL || '<offscreen/host-pin.js MODEL_URL>'}'`);
 
   // A missing file must not silently shrink the assertion count: every remaining
   // check is emitted, and each one fails naming the fact it could not look at.
@@ -409,5 +409,13 @@ try {
 } catch (e) {
   globalThis.__CFG = null;
   globalThis.__CFG_ERR = e.message;
+}
+// The URL half of the pin is the extension HOST's since S7 (offscreen/host-pin.js).
+// It is only ever quoted in a "how do I get this file" hint, so it is loaded
+// separately and its absence degrades that one sentence rather than the gate.
+try {
+  globalThis.__PIN_URL = (await import(pathToFileURL(path.join(ROOT, 'extension/offscreen/host-pin.js')).href)).MODEL_URL;
+} catch {
+  globalThis.__PIN_URL = null;
 }
 main();

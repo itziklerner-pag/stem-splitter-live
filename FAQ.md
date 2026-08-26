@@ -177,8 +177,11 @@ discover it. The weights are pinned by commit SHA to a third-party ONNX
 re-export on Hugging Face. Pinning by SHA means the bytes cannot change under us
 — the hash check would catch it — but it does not mean they cannot be *deleted*.
 
-If that happens, the fix is a one-line pin change in
-`extension/shared/config.js` plus a release. Watching for it is on us.
+If that happens, the fix is a one-line pin change plus a release: the URL
+lives in `extension/offscreen/host-pin.js` (fetching the bytes is the Host's
+job), and if the replacement bytes are not identical, the SHA-256 and byte count
+in `extension/shared/config.js` change with it (deciding whether the bytes are
+the model is the unit's job). Watching for it is on us.
 
 ### Are you going to add a download button / offline export / a second deck?
 
