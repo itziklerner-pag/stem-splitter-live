@@ -26,6 +26,15 @@ import {
   normalizeDeck, syncCorrection, audioClockAt,
 } from './audio-math.js';
 import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, SR } from '../shared/config.js';
+/**
+ * THE HOST. Everything this surface does that is not "draw the numbers it was
+ * given" leaves through here — today the message bus, and nothing else yet.
+ * `ui/host.js` is the extension's implementation of it and the only module this
+ * file imports that knows what `chrome` is; `shared/host.js` carries the duty
+ * list and the rules a second application would have to hold.
+ */
+import { assertHost, DECK_HOST_DUTIES } from '../shared/host.js';
+import { host } from './host.js';
 import {
   chip, follow, RUNNING, peakTick,
   shortcut, hostKeys, stemKeyHint, keyPlan, clampSemitones, SEMITONE_MIN, SEMITONE_MAX,
@@ -89,8 +98,22 @@ const text = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
 const wireDb = (db) => (db === -Infinity ? SILENT_DB : db);
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
 
-const toOff = (m) => chrome.runtime.sendMessage({ v: 1, to: 'off', from: 'ui', ...m }).catch(() => {});
-const toSw = (m) => chrome.runtime.sendMessage({ v: 1, to: 'sw', from: 'ui', ...m }).catch(() => {});
+/**
+ * THE ENVELOPE STAYS HERE, ON THE UNIT'S SIDE OF THE SEAM. `to` is routing and
+ * `from` is identity — both are this protocol's, not the transport's — so the
+ * host is handed a finished message and carries it verbatim. A host that
+ * stamped the envelope itself would also be free to normalise it, and the two
+ * `LIVE_STATE` blocks in `tools/embed-smoke.mjs` inject the raw envelope from
+ * the service worker precisely to prove that the real handler, not a stub, is
+ * what reads it.
+ *
+ * `assertHost` runs at boot rather than at the first message because the first
+ * message a broken host drops is a `STATUS` nobody is waiting for, and the
+ * symptom is a deck that never leaves "idle" with nothing in the console.
+ */
+assertHost(host, DECK_HOST_DUTIES, 'DeckHost');
+const toOff = (m) => host.send({ v: 1, to: 'off', from: 'ui', ...m });
+const toSw = (m) => host.send({ v: 1, to: 'sw', from: 'ui', ...m });
 
 // ------------------------------------------------------------------- state
 // The SESSION record carries a title and a url too; this surface reads neither
@@ -1247,9 +1270,9 @@ function postDeck() {
  * ±6 semitones, integer steps, and nothing between them: `engine/pitch.js` ships
  * thirteen rational ratios and has no meaning for 2.4.
  *
- * THE WIRE MESSAGE IS `{ type: 'PITCH', deck, semitones }` — the same
- * `chrome.runtime` shape as every other UI -> engine message this file sends, and
- * the one `offscreen.js` switches on. It is NOT the worklet's `{ t: 'pitch' }`:
+ * THE WIRE MESSAGE IS `{ type: 'PITCH', deck, semitones }` — inside the same
+ * `{ v, to, from }` envelope as every other UI -> engine message this file sends,
+ * and the one `offscreen.js` switches on. It is NOT the worklet's `{ t: 'pitch' }`:
  * that is a different boundary (main thread -> audio thread, over the node's
  * MessagePort) and it stays as it is. Two wires, two shapes, and unifying them
  * would mean one of the two routers has to guess.
@@ -1674,7 +1697,7 @@ function markBpmStale() {
  * shared field name prevents.
  *
  * IT IS ADVANCED, NOT USED RAW. That message is published at 10 Hz and crosses a
- * `chrome.runtime` hop, so the sample is 50-100 ms old by the time this surface
+ * host message hop, so the sample is 50-100 ms old by the time this surface
  * paints it; at 128 BPM one beat is 469 ms, so an uncorrected lag is a fifth of a
  * beat of standing phase error. `Date.now() - at` is that age, and the wall clock
  * is the ONE clock the offscreen document and this page share — their
@@ -1874,8 +1897,14 @@ function paintNav() {
 }
 
 // ------------------------------------------------------------------ messages
-chrome.runtime.onMessage.addListener((m) => {
-  if (!m || m.to !== 'ui') return false;
+/**
+ * Only what is addressed to this context arrives — the host answers that, both
+ * because the extension bus is a broadcast and a desktop one need not be, and
+ * because the `return false` that keeps MV3 from holding the response channel
+ * open is a fact about MV3 and not about the deck. What is left below is the
+ * deck's half: which deck a message is for, and what each type paints.
+ */
+host.onMessage((m) => {
   // The engine is the two-deck one. Nothing addressed to deck B may paint this
   // surface — an absent `deck` means A (normalizeDeck), which is the single-deck
   // engine's own convention.
@@ -2008,7 +2037,6 @@ chrome.runtime.onMessage.addListener((m) => {
     }
     default:
   }
-  return false;
 });
 
 /**

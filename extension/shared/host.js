@@ -15,6 +15,11 @@
  * from a sibling module is the only way a Host object reaches the code that
  * needs it.
  *
+ * THIS FILE HAS NO IMPORTS, NAMES NO `chrome.*` AND TOUCHES NO DOM, and that is
+ * a constraint rather than a coincidence: it is the one file both halves of the
+ * seam share, so it has to stay readable by the unit and by a host that is not
+ * a browser extension at all.
+ *
  * WHY A BOOT-TIME CHECK AND NOT A TYPE. There is no type checker in this
  * build's pipeline, so the typedef below is documentation and nothing more. A
  * Host that forgets a duty would otherwise surface one layer down from the
@@ -24,6 +29,12 @@
  * throws after the track exists must still stop the track, or the tab is left
  * permanently silent). `assertHost()` moves that failure to module evaluation,
  * before any track exists, and names the duty that is missing.
+ *
+ * The deck's half of the seam fails just as late and even more quietly: a
+ * `DeckHost` short `send` throws at a user gesture several minutes in, and one
+ * short `onMessage` is a deck that simply never paints, with nothing in the
+ * console at all. `assertHost()` is the cheapest thing that turns "the deck is
+ * blank" into a sentence.
  */
 
 /**
@@ -115,6 +126,21 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
  *     lost its export — would otherwise wave every object through. Nothing can
  *     be asserted about a Host when nothing was asked of it, so that throws too.
  *
+ * A DUTY MUST BE CALLABLE. `typeof host[k] === 'function'` and nothing weaker:
+ * an object where a function was meant is the likeliest wrong shape — an
+ * Electron preload bridge wrapped one level too deep hands over `{ send: fn }`
+ * — and waving it through returns the seam to the failure this check exists to
+ * move, `host.send is not a function` at the first gesture. A future duty that
+ * is genuinely a namespace (S4's `storage`, which carries `get`/`set`/
+ * `onChanged`) is therefore declared as its own callable duties, or this check
+ * is widened deliberately and the widening is asserted. It is not widened by
+ * accident.
+ *
+ * IT HAS TWO CALLERS — `offscreen/engine.js` for `ENGINE_HOST_DUTIES` and
+ * `ui/embed.js` for `DECK_HOST_DUTIES`. AGENTS.md counts five defects here that
+ * were a value being right at one call site and wrong at another, so the
+ * assertions in `test.js` name the list they check, never "a host".
+ *
  * @param {object} host    the module namespace the context imported
  * @param {Record<string, string>} duties  duty name -> what it is for
  * @param {string} what    the interface's name, for the message
@@ -137,3 +163,93 @@ export function assertHost(host, duties, what = 'Host') {
   }
   return host;
 }
+
+/* ========================================================================= */
+/* DeckHost — the deck's Host (S3, issue #3). APPEND BELOW, do not reorder.  */
+/* ========================================================================= */
+
+/**
+ * The deck's Host. Two duties today; S4 adds storage and the arm shortcut, S5
+ * adds the transport to the page.
+ *
+ * @typedef {object} DeckHost
+ *
+ * @property {(msg: object) => void} send
+ *   Put one FINISHED message on the bus. Returns nothing, and delivery failure
+ *   is the Host's to swallow.
+ *
+ * @property {(fn: (msg: object) => void) => void} onMessage
+ *   Call `fn` for each message addressed to THIS context, with the raw
+ *   envelope. What `fn` returns is dropped.
+ */
+
+/**
+ * THE FOUR RULES A `DeckHost` HAS TO HOLD. Each one is here because breaking it
+ * is silent — the deck goes on looking exactly as it does now.
+ *
+ * 1. `send` TAKES A FINISHED MESSAGE. The `{ v: 1, to, from, ...payload }`
+ *    envelope is the UNIT's protocol, not the host's: `to` is routing and the
+ *    host is only the transport. A host that stamps, rewrites, normalises or
+ *    filters the envelope breaks the two blocks in `tools/embed-smoke.mjs`
+ *    that inject a raw `{v:1,to:'ui',from:'off',type:'LIVE_STATE',…}` from the
+ *    service worker — and it breaks them QUIETLY, because a `LIVE_STATE` that
+ *    never arrives leaves the previous value on screen.
+ *
+ * 2. `send` RESOLVES THE TRANSPORT AT CALL TIME, never at module load. Stated
+ *    portably: a Host must not capture its transport at import. The reason it
+ *    is a RULE and not a preference is local to this Host and lives with it, in
+ *    `ui/host.js`: `tools/embed-smoke.mjs` replaces the *property*
+ *    `chrome.runtime.sendMessage` after the deck has booted, and that patch is
+ *    the only window onto the outgoing wire. A host that bound the function at
+ *    import leaves the recorder empty, and `[].every()` and `![].some()` are
+ *    both true, so the transpose-ceiling and speed/ad-gate assertions go GREEN
+ *    while inspecting nothing.
+ *
+ * 3. `send` RETURNS NOTHING AND IS NEVER AWAITED, and delivery failure is the
+ *    host's to swallow. On the extension bus there is frequently no listener
+ *    at all, and one unhandled rejection per message — at 10 Hz, for the
+ *    heartbeat — floods the console.
+ *
+ * 4. `onMessage` DELIVERS ONLY WHAT IS ADDRESSED HERE, and ignores what `fn`
+ *    returns. Both are transport facts, and both are why they are the host's
+ *    and not the deck's: the extension bus is a BROADCAST, so every context
+ *    hears every message; and MV3 reads a truthy return from a listener as "I
+ *    will call `sendResponse` later" and holds the channel open for it.
+ *
+ * WHICH CONTEXT IS "HERE" is the one piece of unit protocol a second DeckHost
+ * has to know, and today it is a literal in `ui/host.js` (`const ME = 'ui'`)
+ * with its counterpart `from: 'ui'` on the other side of the seam in
+ * `embed.js`. Note also that rule 1 is true of a BROADCAST transport and only
+ * of one: on a point-to-point transport the Host must read `msg.to` to route
+ * `'off'` from `'sw'`, which is envelope knowledge rule 1 otherwise says is not
+ * the host's. Both are inputs to S11, which freezes this interface and owns
+ * exporting the address set from `shared/config.js`.
+ */
+export const DECK_HOST_DUTIES = Object.freeze({
+  send: 'put one finished message from the deck on the bus',
+  onMessage: 'hand the deck every message addressed to it',
+});
+
+/**
+ * WHY `EngineHost.send` AND `DeckHost.send` ARE NOT THE SAME CONTRACT, now that
+ * both are written down in one file and S11 is about to freeze them.
+ *
+ * `EngineHost.send` STAMPS the envelope (`{ v: 1, to: 'ui', from: 'off' }`);
+ * `DeckHost.send` carries a finished one. Same bytes on the wire, two contracts
+ * under one duty name, and that is deliberate rather than an oversight of the
+ * integration:
+ *
+ *   - The engine has exactly ONE correspondent. Every message it sends is
+ *     `to: 'ui'`, so an address parameter would be a constant at all 22 call
+ *     sites, and `engine.js` keeps a non-host `send()` wrapper over the duty
+ *     precisely so those sites stay `return send({ type: … })`.
+ *   - The deck has TWO (`'off'` and `'sw'`). A stamping `DeckHost.send` would
+ *     need the address passed in, which is the envelope crossing the seam by
+ *     another route, and it would put the Host in a position to normalise what
+ *     it stamps — the thing rule 1 exists to forbid.
+ *
+ * Reconciling them means changing behaviour on one side, so it is S11's call
+ * and not the integrator's. What is not deferred is saying so: the asymmetry is
+ * now a sentence in the file that gets frozen, rather than a difference a
+ * second-host author discovers by reading both implementations.
+ */
