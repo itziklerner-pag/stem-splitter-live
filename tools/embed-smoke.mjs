@@ -53,11 +53,31 @@ const ok = (c, what) => { checks++; console.log(`${c ? 'ok  ' : 'FAIL'} ${what}`
 
 /**
  * A REAL `<video>`, because the thing under test is `paused` and event
- * plumbing, and a stub that never actually plays would prove neither. Half a
- * second of 8 kHz silence, inline: no fixture file, no network, and `play()` on
- * a muted element is allowed without a user gesture.
+ * plumbing, and a stub that never actually plays would prove neither. 8 kHz
+ * silence, inline: no fixture file, no network, and `play()` on a muted element
+ * is allowed without a user gesture.
+ *
+ * SIXTY SECONDS, AND THE LENGTH IS LOAD-BEARING — do not trim it back.
+ *
+ * This was half a second on a `loop`ing element. Every wrap fires `seeking`,
+ * `content.js` reports `seeking` as a content JUMP (`JUMP_EVENTS`), and the
+ * deck restarts its pipeline on a jump exactly as it does when a user scrubs.
+ * So the fixture injected a seek into EVERY assertion whose window was longer
+ * than half a second — events no assertion in this file is about. It cost one
+ * of them outright: the `data-pending` latency pair below was red on this box
+ * because a wrap restarted the deck mid-window, a real capture attached, and
+ * the engine's own 10 Hz LIVE_STATE overwrote the injected `latencySec: 1.5`
+ * with 0 before the press could be measured.
+ *
+ * Sixty seconds is longer than the whole suite takes to run (~25 s), so no
+ * window can reach the end of the clip. The element does NOT loop either, and
+ * that is the belt to this brace: a clip that somehow does run out pauses the
+ * video, which is a red on the very next `deckSees()`, rather than silently
+ * going on generating seeks. The one assertion that needs a jump drives it
+ * itself by writing `currentTime`, and so does the one that needs a jump NOT to
+ * start anything.
  */
-function silentWavDataUri(seconds = 0.5, rate = 8000) {
+function silentWavDataUri(seconds = 60, rate = 8000) {
   const n = Math.round(seconds * rate);
   const buf = Buffer.alloc(44 + n * 2);
   buf.write('RIFF', 0); buf.writeUInt32LE(36 + n * 2, 4); buf.write('WAVE', 8);
@@ -92,7 +112,9 @@ function silentWavDataUri(seconds = 0.5, rate = 8000) {
  *    inserts against. If YouTube moves them that is a real failure this test
  *    cannot see, and the ponytail note in content.js names it.
  *  - a REAL `<video>`, because the thing under test is `paused` and event
- *    plumbing, and a stub that never plays would prove neither.
+ *    plumbing, and a stub that never plays would prove neither. It is sixty
+ *    seconds long and it does NOT loop, and both of those are load-bearing —
+ *    see `silentWavDataUri` for the assertion a looping half-second cost.
  *  - **YouTube's ambient-mode glow**, `#cinematics` — a `position: absolute`,
  *    `pointer-events: none` box inside the `position: relative` `#player`,
  *    INFLATED past the player on every side so a blur has room. Measured on a
@@ -155,7 +177,7 @@ const PAGE = `<html dark><head><meta charset="utf-8"><style>
 </style></head><body><div id="columns"><div id="primary"><div id="primary-inner">
   <div id="player">
     <div id="player-container-inner"><div id="movie_player">
-      <video id="v" muted playsinline loop src="${silentWavDataUri()}"></video>
+      <video id="v" muted playsinline src="${silentWavDataUri()}"></video>
       <div class="ytp-right-controls">
         <div class="ytp-right-controls-left">
           <button class="ytp-button ytp-autonav-toggle" aria-label="Autoplay is on">
@@ -1214,6 +1236,50 @@ try {
   const pendingOff = await frame.locator('#spbox').getAttribute('data-pending');
   ok(pendingOn === 'true' && pendingOff === 'false' && pendingShown === '1.02×',
     `the value is OUTLINED on the press and FILLS when the audio catches up — data-pending ${pendingOn} -> ${pendingOff} across a 1.5 s latency, and it paints the new rate straight away ("${pendingShown}")`);
+
+  // ------------------------------------------- a jump does not undo the "no"
+  /**
+   * DECLINING IS AN ANSWER, AND A SEEK IS NOT A NEW QUESTION.
+   *
+   * The block at the top of this file proves that answering "no" to the
+   * one-time download starts nothing. It proves it for ONE route: the play
+   * gesture, which reaches `startLive()` through `reconcile()`'s
+   * `modelInTheWay()` gate. `onContentJump()` is the other route — it reaches
+   * `startLive()` through `restartLive()`, with no gesture behind it at all,
+   * because a seek is the page's event and not the user's consent. Ungated, a
+   * scrub on a deck the user had just said "no" to attached a capture and put
+   * the weights on the wire; the UI settled back within a second and every
+   * screenful after that was correct, which is the same way the first defect
+   * hid (see `deck A capture started` above).
+   *
+   * This is the state where the two can disagree and the only one: the deck
+   * believes it is `running` (injected above, and still injected — nothing real
+   * is running) while the model is `absent` and declined.
+   *
+   * The jump is DRIVEN, by writing `currentTime`. The fixture no longer
+   * produces seeks of its own (see `silentWavDataUri`), and a claim left to a
+   * clock would be measuring the fixture instead of the guard.
+   */
+  const jBefore = await jumps();
+  const stAtJump = await frame.locator('body').evaluate(() => globalThis.__embed.status);
+  await page.locator('#v').evaluate((v) => { v.currentTime = 12; });
+  await page.waitForTimeout(700);
+  const jAfter = await jumps();
+  const jumpLog = await frame.locator('body').evaluate(() => globalThis.__embed.log);
+  /**
+   * THE INSTRUMENT CHECK, and it is not decoration: the line under it asserts
+   * that NOTHING happened, and "nothing happened" is what a message that never
+   * arrived also looks like. `RUNNING.has(live.status)` is `onContentJump()`'s
+   * own first guard, so a deck that had fallen back to `idle` would take the
+   * early return and pass the next line without ever reaching `restartLive()`.
+   * Both halves have to be true before the silence below means anything, and so
+   * does having an engine log to read.
+   */
+  ok(jAfter === jBefore + 1 && stAtJump === 'running' && jumpLog.length > 0,
+    `INSTRUMENT CHECK: the seek arrived at onContentJump() on a RUNNING deck, past its own status guard, with an engine log to read  status ${stAtJump}, jumps ${jBefore} -> ${jAfter}, ${jumpLog.length} log lines`);
+  const stJumped = await modelStatus();
+  ok(!jumpLog.some((l) => /capture started/.test(l)) && stJumped === 'absent',
+    `...and that jump started NO capture and NO fetch on a deck whose model was DECLINED — onContentJump() -> restartLive() must carry reconcile()'s model gate, or a scrub spends the download the user just refused  model ${stJumped}`);
 
   // Leave the page and the deck as they were found: home, paused, idle.
   await frame.locator('#sp-v').click();

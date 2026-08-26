@@ -705,14 +705,20 @@ function reconcile() {
   });
   if (what === 'start') {
     /**
-     * THE MODEL GATE LIVES HERE, on the only path that starts a pipeline, and
-     * not on the play handler alone.
+     * THE MODEL GATE LIVES HERE, on a path that starts a pipeline, and not on
+     * the play handler alone.
      *
      * Attaching a capture makes the engine fetch the weights immediately
      * (offscreen.js captureStart -> ensureSession), so ANY route to `start`
      * with no model on disk is a 172 MiB download the user did not ask for.
      * Gating the gesture instead of the effect is how the first version leaked
      * one: a stray start during boot never went through the play handler.
+     *
+     * `restartLive()` IS THE OTHER SUCH ROUTE and carries the same gate — this
+     * line used to say "the only path", and it was wrong for as long as
+     * `onContentJump()` has existed. The gate belongs on each route INTO
+     * `startLive()` rather than inside it, because `startLive()` cannot refuse
+     * without also making the optimistic `priming` two lines below a lie.
      */
     if (modelInTheWay()) return;
     err = null;
@@ -909,11 +915,27 @@ function onContentJump() {
 }
 
 /**
- * Restart, unconditionally — stop then start whatever the UI currently believes.
+ * Restart — stop then start whatever the UI currently believes.
  * QA-16: a control that says restart must restart, including from a state the
  * next status message was about to clear.
+ *
+ * THE ONE THING THAT CAN STOP IT IS THE MODEL, and it is `reconcile()`'s gate,
+ * verbatim, for `reconcile()`'s reason: `startLive()` below attaches a capture,
+ * and attaching a capture makes the engine fetch the weights. This is the
+ * SECOND route into `startLive()` and the only one with no gesture behind it —
+ * `onContentJump()` gets here from a seek, which is the page's event and not
+ * the user's consent — so ungated it spent the one-time download on a deck
+ * whose prompt the user had just DECLINED. `tools/embed-smoke.mjs` asserts both
+ * halves: that declining downloads nothing, and that a jump does not undo it.
+ *
+ * QA-16 is not weakened by returning here. With the weights on disk
+ * `modelInTheWay()` is false and every latch below still clears; without them
+ * there is nothing to restart into but a stall.
+ *
+ * [entry points: onContentJump(), and the error banner's Restart button]
  */
 function restartLive() {
+  if (modelInTheWay()) return;
   err = null;
   waiting = false;
   halted = false;      // Restart is also "clear the latch" — the failure set it.
