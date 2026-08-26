@@ -17,7 +17,7 @@ you may do with it.
 | **weights licence** | **CC BY-NC 4.0 — non-commercial** |
 | distributed here? | **No.** `.gitignore` excludes `*.onnx`; the repository carries only the pin |
 | fetched from | an ONNX re-export on Hugging Face, pinned by commit SHA |
-| pin | URL, SHA-256 and byte count in [`extension/shared/config.js`](extension/shared/config.js) — the single source of truth every script derives from |
+| pin | split across the Host seam: the URL and the cache bucket in [`extension/offscreen/host-pin.js`](extension/offscreen/host-pin.js), the SHA-256 and byte count in [`extension/shared/config.js`](extension/shared/config.js) — each half a single source of truth every script derives from |
 | size | 114,559,139 bytes (109 MiB) |
 
 **This is the constraint that matters most, so it is stated plainly:**
