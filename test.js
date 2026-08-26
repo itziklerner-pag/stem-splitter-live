@@ -5323,10 +5323,29 @@ if (group('host')) {
      * to prefer it was that `typeof host[k] === 'function'` stays exactly as
      * strong as it was.
      *
-     * So the namespace shape must be REFUSED, and refused by name. A future
-     * widening that quietly accepted `{ storage: { get, set, onChanged } }` would
-     * take the not-callable refusal above down with it — this is the line that
-     * makes that a red instead of a discovery.
+     * So the namespace shape must be REFUSED, and refused by name.
+     *
+     * WHAT ACTUALLY TURNS THIS LINE RED, stated because the first version of the
+     * PR body claimed the wrong mutation for it and review caught that:
+     *
+     *   - `assertHost` widened to MAP the namespace — `typeof host[k] !==
+     *     'function' && !(host.storage && /^(storageGet|storageSet|
+     *     onStorageChanged)$/.test(k))`, which is the accidental widening a
+     *     namespace migration actually arrives as. Watched: 1 red, this one,
+     *     `… was ACCEPTED — the boot check has been widened without an
+     *     assertion saying so`.
+     *   - The DUTY-LIST half — `DECK_HOST_DUTIES` declaring a `storage` entry in
+     *     place of the three flat duties. Watched: the shipped `ui/host.js` is
+     *     then short a duty and the group dies at `assertHost` before reaching
+     *     this line, which is a louder red than this one and not a substitute
+     *     for it.
+     *
+     * WHAT DOES NOT REACH IT: widening the CALLABILITY test alone, e.g. to
+     * `host[k] == null`. That is caught by the two not-callable checks above and
+     * NOT here, because the three flat duties are `undefined` in this fixture and
+     * `undefined == null` is still missing. Two halves, two assertions; neither
+     * stands in for the other, and saying otherwise is reported coverage sitting
+     * one assertion away from where it is claimed.
      */
     const nsShaped = threw({
       ...stubDeck(), storageGet: undefined, storageSet: undefined, onStorageChanged: undefined,
@@ -5583,6 +5602,78 @@ if (group('host')) {
         ? 'it threw synchronously — the boot `.catch` never sees it and the rest of the deck never runs'
         : String(badArea && badArea.message));
 
+    /**
+     * P1, HELD AS A REFUSAL RATHER THAN AS A CONVENTION — and the review that
+     * asked for this named the exact hazard: `chrome.storage[area]` is an
+     * unvalidated index into the WHOLE namespace, so making the area a parameter
+     * turned `sync` — a NETWORK WRITE, which CONTRIBUTING.md P1 forbids after
+     * the model download and SECURITY.md promotes to a security property — from
+     * structurally unreachable into a one-token typo. Before the parameter every
+     * call site read `chrome.storage.local` literally and there was nothing to
+     * get wrong.
+     *
+     * THE CONTROL CAN LOSE, WHICH IS THE POINT OF THE FIXTURE: `chrome.storage`
+     * here really does carry a working `sync` area that records what it is
+     * handed. Drop the guard and the read resolves, the write LANDS IN
+     * `syncWrites`, and the listener registers — so this is not "an area that
+     * happens not to exist", which is the version of this test that would pass
+     * on `undefined.get` throwing and prove nothing about the policy.
+     *
+     * ALL THREE DUTIES, because the guard is per-duty and "right at one call
+     * site, wrong at another" is the defect AGENTS.md counts five of here.
+     */
+    {
+      const syncWrites = [];
+      const syncListeners = [];
+      const platform = globalThis.chrome.storage;
+      globalThis.chrome.storage = {
+        local: platform.local,
+        session: platform.session,
+        onChanged: { addListener: (f) => syncListeners.push(f) },
+        sync: {
+          get: () => Promise.resolve({ prefs: { autoplayNext: 'FROM THE NETWORK' } }),
+          set: (o) => { syncWrites.push(o); return Promise.resolve(); },
+        },
+      };
+      let getThrewSync = false;
+      let getSettled = 'never settled';
+      try {
+        await deckHost.storageGet('sync', 'prefs')
+          .then((v) => { getSettled = `RESOLVED ${JSON.stringify(v)}`; }, (e) => { getSettled = e; });
+      } catch (e) { getThrewSync = true; getSettled = e; }
+      let setOutcome = 'RETURNED';
+      try { deckHost.storageSet('sync', 'prefs', { autoplayNext: true }); } catch (e) { setOutcome = e; }
+      let feedOutcome = 'RETURNED';
+      try { deckHost.onStorageChanged('sync', 'prefs', () => {}); } catch (e) { feedOutcome = e; }
+      globalThis.chrome.storage = platform;
+
+      const refused = [getSettled, setOutcome, feedOutcome].filter((o) => o instanceof Error).length;
+      ok('NO DUTY WILL TOUCH AN AREA THE UNIT NEVER NAMED: all three refuse `sync`, and nothing reached it  '
+        + '[entry point: extension/ui/host.js storageGet/storageSet/onStorageChanged, called with an area no call site spells]',
+        refused === 3 && syncWrites.length === 0 && syncListeners.length === 0,
+        `${refused} of 3 refused; ${syncWrites.length} write(s) reached sync${syncWrites.length ? ` (${JSON.stringify(syncWrites)})` : ''}`
+        + `, ${syncListeners.length} listener(s) registered — sync is a NETWORK write and P1 forbids the network here`);
+
+      /**
+       * AND EACH REFUSES IN THE SHAPE ITS OWN CALL SITE CAN SURVIVE, which is
+       * the asymmetry review asked to have declared instead of inherited.
+       * `storageGet` is `async` so its refusal arrives as a rejection — the
+       * deck's preferences read is a module-scope `.then(…).catch(…)` that a
+       * synchronous throw jumps straight past, taking the rest of boot with it,
+       * and one duty must not answer two ways at its two call sites. The other
+       * two throw where they were called, which is the cheapest place to be told
+       * that the deck asked for a lifetime it has no word for.
+       */
+      ok('...and each refuses in the shape its call site can survive: storageGet REJECTS, the write and the feed THROW where they were called',
+        !getThrewSync && getSettled instanceof Error
+        && setOutcome instanceof Error && feedOutcome instanceof Error,
+        getThrewSync
+          ? 'storageGet threw SYNCHRONOUSLY — the deck\'s boot `.catch` never sees it'
+          : `get ${getSettled instanceof Error ? 'rejected' : String(getSettled)}`
+            + `, set ${setOutcome instanceof Error ? 'threw' : String(setOutcome)}`
+            + `, onChanged ${feedOutcome instanceof Error ? 'threw' : String(feedOutcome)}`);
+    }
+
     // ---- writes
     const ret = deckHost.storageSet('session', 'armError', { code: 'TAB_BUSY' });
     ok('storageSet-WRITES-TO-THE-AREA-IT-WAS-GIVEN and returns nothing, so no call site can start awaiting a preference  '
@@ -5740,6 +5831,45 @@ if (group('host')) {
       + '[entry point: extension/ui/embed.js and extension/ui/host.js, comments stripped]',
       inDeck === 0 && inHost > 0,
       `${inDeck} in embed.js, ${inHost} in host.js${inHost === 0 ? ' — THE CONTROL CANNOT LOSE, so this assertion is reading nothing' : ''}`);
+
+    /**
+     * WHICH LIFETIME EACH CALL SITE ASKED FOR, PINNED — the half of the storage
+     * seam that nothing else can see.
+     *
+     * `test.js` proves the Host HONOURS whatever area it is handed (the
+     * same-key-in-both-areas fixture above is the arrangement that catches a
+     * Host that ignored it). The browser proves the WRITE lands somewhere the
+     * content script reads. Nothing proved the deck hands over the right area at
+     * the two sites where it is only READ — and review flipped each of them to
+     * `'session'` on its own and watched the whole tree stay green.
+     *
+     * BOTH FAILURE MODES ARE SILENT, WHICH IS WHY THEY ARE WORTH FOUR LINES. A
+     * boot read on `'session'` means preferences never survive a browser
+     * restart: the defaults are re-applied every morning and nothing anywhere
+     * says so. A change feed on `'session'` means a second deck's change never
+     * arrives. Neither is a crash, neither is visible in one sitting, and both
+     * are one token.
+     *
+     * THE PAIRS, NOT A COUNT — because "four storage call sites" is satisfied by
+     * four wrong ones. A slice that adds a fifth is meant to fail here: the area
+     * is a lifetime decision (`shared/host.js` rule 5) and this is where the
+     * decision gets written down.
+     */
+    const storageSites = [...deckSrc.matchAll(/\bhost\.(storageGet|storageSet|onStorageChanged)\(\s*'([a-z]+)'\s*,\s*(\w+)/g)]
+      .map((m) => `${m[1]}('${m[2]}', ${m[3]})`).sort();
+    const WANT_SITES = [
+      "onStorageChanged('local', PREFS_KEY)",
+      "storageGet('local', PREFS_KEY)",
+      "storageGet('session', ARM_ERROR_KEY)",
+      "storageSet('local', PREFS_KEY)",
+    ];
+    ok('EVERY STORAGE CALL SITE SPELLS ITS OWN LIFETIME, and these are the four  '
+      + '[entry point: extension/ui/embed.js, comments stripped — boot read, change feed, writePrefs(), and the durable arm refusal]',
+      storageSites.length === WANT_SITES.length
+      && storageSites.every((v, i) => v === WANT_SITES[i]),
+      storageSites.length === 0
+        ? 'the deck reaches storage through no literal area at all — either the seam moved or this scan cannot see it'
+        : `got ${storageSites.join(' | ')}${storageSites.join() === WANT_SITES.join() ? '' : ` — want ${WANT_SITES.join(' | ')}`}`);
   }
 
   delete globalThis.chrome;

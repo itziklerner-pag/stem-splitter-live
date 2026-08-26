@@ -324,6 +324,22 @@ export function assertHost(host, duties, what = 'Host') {
  *   preferences" on precisely the run where it could not tell — the
  *   green-on-nothing shape AGENTS.md is written against. Both readers carry
  *   their own catch already, so rejecting costs nothing and says something.
+ *   WHAT THE HOST MUST ORIGINATE — the undeclared half of the deck's storage,
+ *   and the counterpart of the clause `EngineHost.onMessage` carries above. One
+ *   of the two keys the deck reads is written by NOBODY IN THE UNIT: the durable
+ *   arm refusal at `ARM_ERROR_KEY` (`shared/config.js`) in the `'session'` area
+ *   is written and removed entirely by the Host — in this Host by the service
+ *   worker (`sw/service-worker.js`: `raiseArm()` writes
+ *   `{ code, message, at, seq }` — `at` in EPOCH milliseconds, because the
+ *   record is written in one context and read in another and
+ *   `performance.now()`'s origin is per-context; `seq` monotonic, because it is
+ *   the record's identity on the dismissal path. The reader also accepts an
+ *   optional `deck`. `clearArm()` removes the record on every successful arm,
+ *   which is what stops a stale refusal outliving the problem it described). A Host that implements all six
+ *   duties perfectly and never writes that record is not broken in any way a
+ *   gate can see: the deck simply never explains a refusal to arm, which is the
+ *   one failure this read exists for. The other key, `PREFS_KEY` in `'local'`,
+ *   the unit writes itself and the Host need only store.
  *
  * @property {(area: 'local'|'session', key: string, value: unknown) => void} storageSet
  *   Store `value` at `key`. Fire and forget, exactly like `send`: MUST return
@@ -331,6 +347,9 @@ export function assertHost(host, duties, what = 'Host') {
  *   caller is a checkbox and a picker whose truth is already on screen; there is
  *   nothing a rejected write could tell the user that the next read would not
  *   tell them better.
+ *   SWALLOWING IS FOR A WRITE THAT FAILED, NOT FOR AN AREA THAT WAS NEVER ASKED
+ *   FOR: see rule 5 for the area refusal, which is the deck being wrong rather
+ *   than the platform, and is loud on purpose.
  *
  * @property {(area: 'local'|'session', key: string, fn: (value: unknown) => void) => void} onStorageChanged
  *   Call `fn` with the NEW VALUE whenever `key` changes in `area`. The Host owns
@@ -356,6 +375,25 @@ export function assertHost(host, duties, what = 'Host') {
  *   Host, outside the gate that caught it.
  *   `null` RATHER THAN `''`, because "no chord is bound" is a different sentence
  *   for the caller to print, not an empty key cap.
+ *   RAW IS NOT THE SAME AS ARBITRARY, and this is the implicit half of the
+ *   contract made explicit: the unit spells the string with `chordLabel()`,
+ *   whose vocabulary is `MacCtrl`, `Ctrl`, `Command`, `Alt` and `Shift` — the
+ *   `chrome.commands` manifest tokens — plus the four glyphs `⌃ ⌘ ⌥ ⇧` that
+ *   Chrome hands back already drawn on macOS. `'+'` separates tokens; glyphs may
+ *   simply be concatenated. ANYTHING ELSE IS DRAWN ON THE KEY CAP VERBATIM, so a
+ *   Host answering in its own accelerator grammar — Electron's
+ *   `'CommandOrControl+Shift+9'`, or `'Super+…'` — puts the word
+ *   "CommandOrControl" in front of the user. It renders, so nothing goes red;
+ *   the failure is entirely cosmetic and entirely silent, which is why the token
+ *   set is written down here rather than left to be discovered.
+ *   AND THE SENTENCE AROUND THE CHORD IS STILL THIS PLATFORM'S. The deck's
+ *   not-armed hint reads "Click the Stem Splitter Live toolbar icon on this tab
+ *   to arm it, or press <chord>", and a Host with no toolbar and no tabs has no
+ *   truthful version of the first half — `null` here is exactly the branch such
+ *   a Host takes, and it prints that sentence alone. The string predates the
+ *   seam and is left in the unit deliberately for now; S11 owns deciding whether
+ *   host-specific instruction prose is sourced from the Host or declared out of
+ *   scope when it freezes Host interface v1.
  *
  * THE TWO STORAGE AREAS ARE A LIFETIME, AND THE UNIT NAMES WHICH ONE IT MEANT.
  * `'local'` outlives the browser; `'session'` lasts as long as this run of it.
@@ -407,6 +445,18 @@ export function assertHost(host, duties, what = 'Host') {
  *    the more expensive of the two defects because it teaches the user to ignore
  *    the banner. A Host that picked one area for everything would be picking
  *    which of those two mistakes to make, silently, for both call sites.
+ *    AND AN AREA OUTSIDE THOSE TWO IS REFUSED, not honoured and not ignored.
+ *    `'local'` and `'session'` are the whole set the unit has words for, so a
+ *    third is a call site that is wrong about a value it wrote itself — and on
+ *    THIS Host it is also a P1 hazard, because `chrome.storage.sync` is a
+ *    network write and the areas being a parameter is what first made it
+ *    reachable from the deck at all. `storageGet` REJECTS (the deck's
+ *    preferences read is a module-scope `.then().catch()` that a synchronous
+ *    throw would jump past, taking the rest of boot with it, and one duty must
+ *    not answer two ways); `storageSet` and `onStorageChanged` THROW at the call
+ *    site, which is the cheapest place to be told. A Host that
+ *    quietly substituted an area it did have would be inventing a lifetime the
+ *    deck never asked for.
  *
  * 6. `storageGet` SEPARATES ABSENT FROM UNREADABLE — `null` for the first, a
  *    rejection for the second. Folding them together is the `!x || (real check)`
