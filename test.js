@@ -21,6 +21,11 @@
  *            and overruns under a simulated slow producer
  *   mix      fader law round trip, mute/solo truth table, per-sample gain
  *            smoothing settle time, soft clipper transfer function
+ *   verifyModel  the model pin the UNIT keeps (S7): a mismatching buffer is
+ *            refused naming both hashes, a truncated one naming both byte
+ *            counts, the load policy re-fetches a corrupt stored copy exactly
+ *            once and never twice, and nothing under extension/ names the
+ *            model's upstream host except the extension host's own pin
  *   host     the Host seam, both halves. The boot check names a missing duty
  *            and refuses a Host that is short one, the engine really runs it
  *            before it builds anything, R5's track-stop survives every failing
@@ -4553,6 +4558,13 @@ if (group('host')) {
   const engineRaw = readFileSync(new URL('./extension/offscreen/engine.js', import.meta.url), 'utf8');
   const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
   const engineSrc = strip(engineRaw);
+  /**
+   * The SECOND unit file that reaches for a Host duty, since S7. `loadModel`
+   * takes the Host as a parameter and calls `modelBytes`/`clearModel` on it, so
+   * a scan that read only `engine.js` would report those two duties as declared
+   * but never used and go red for a reason that is not true.
+   */
+  const cacheSrc = strip(readFileSync(new URL('./extension/shared/modelcache.js', import.meta.url), 'utf8'));
 
   /**
    * THE CHECK IS ONLY WORTH ITS NAME IF THE ENGINE ACTUALLY RUNS IT — AND RUNS
@@ -4612,13 +4624,14 @@ if (group('host')) {
    * `import * as host from './host.js'` would otherwise contribute a duty named
    * `js`.
    */
-  const reached = [...new Set([...engineSrc.matchAll(/\bhost\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+  const dutyCalls = (src) => [...src.matchAll(/\bhost\.(\w+)\s*\(/g)].map((m) => m[1]);
+  const reached = [...new Set([...dutyCalls(engineSrc), ...dutyCalls(cacheSrc)])].sort();
   const undeclared = reached.filter((k) => !duties.includes(k));
-  ok('EVERY HOST DUTY THE ENGINE REACHES FOR IS DECLARED  '
-    + '[entry point: extension/offscreen/engine.js, comments stripped]',
+  ok('EVERY HOST DUTY THE UNIT REACHES FOR IS DECLARED  '
+    + '[entry points: extension/offscreen/engine.js and extension/shared/modelcache.js, comments stripped]',
     reached.length > 0 && undeclared.length === 0,
     reached.length === 0
-      ? 'the engine calls no host duty at all — either the seam is gone or this scan cannot see it'
+      ? 'the unit calls no host duty at all — either the seam is gone or this scan cannot see it'
       : undeclared.length
         ? `undeclared: ${undeclared.map((k) => `host.${k}()`).join(', ')} — declare it in ENGINE_HOST_DUTIES or a Host will pass assertHost and still throw`
         : `${reached.length} reached: ${reached.join(', ')}`);
@@ -4755,6 +4768,8 @@ if (group('host')) {
    * Node. The globals are removed again in the `finally`.
    */
   const realNavigator = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+  const realCaches = Object.getOwnPropertyDescriptor(globalThis, 'caches');
   const wire = [];
   const registered = [];
   let inbox = null;
@@ -4784,6 +4799,56 @@ if (group('host')) {
   globalThis.addEventListener = (type, fn) => { registered.push([type, fn]); };
   Object.defineProperty(globalThis, 'navigator', {
     value: { mediaDevices: { getUserMedia: (c) => { gumArg = c; return gum(); } } },
+    configurable: true,
+    writable: true,
+  });
+  /**
+   * THE PLATFORM UNDER THE MODEL DUTIES — the Cache API and `fetch`, stubbed the
+   * same way and for the same reason as `chrome` above: they are the part that
+   * cannot be present in Node, and everything they stand under is the shipping
+   * `extension/offscreen/host.js`.
+   *
+   * The stub COUNTS rather than times: how many network requests, how many body
+   * reads, which key was stored under. Every claim below is a count, which is
+   * what AGENTS.md asks for and what makes these reproducible on a loaded box.
+   *
+   * The body arrives in TWO chunks and both are `subarray` VIEWS, because that
+   * is what a real stream hands over and because a Host that passes a view
+   * straight through would satisfy a one-chunk stub and then transfer the wrong
+   * buffer into the inference worker.
+   */
+  const store = { entry: null, opened: [], matched: [], put: [], deleted: [], bodyReads: 0 };
+  const fetched = [];
+  let served = null;
+  const streamed = (bytes) => ({
+    ok: true,
+    status: 200,
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-length' ? String(bytes.length) : null) },
+    body: {
+      getReader() {
+        store.bodyReads++;
+        const cut = Math.floor(bytes.length / 2);
+        const chunks = [bytes.subarray(0, cut), bytes.subarray(cut)];
+        let i = 0;
+        return { read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true, value: undefined }) };
+      },
+    },
+  });
+  globalThis.caches = {
+    open: async (name) => {
+      store.opened.push(name);
+      return {
+        match: async (url) => { store.matched.push(url); return store.entry ? streamed(store.entry) : undefined; },
+        put: async (url, res) => { store.put.push(url); store.entry = new Uint8Array(await res.arrayBuffer()); },
+      };
+    },
+    delete: async (name) => { store.deleted.push(name); store.entry = null; return true; },
+  };
+  Object.defineProperty(globalThis, 'fetch', {
+    value: async (url) => {
+      fetched.push(url);
+      return served ? streamed(served) : { ok: false, status: 404 };
+    },
     configurable: true,
     writable: true,
   });
@@ -4944,10 +5009,107 @@ if (group('host')) {
             ? "the registered handler is a wrapper, not the engine's callback — teardown does not await, "
               + 'so a wrapper that returns a promise drops the track stop'
             : `${registered[0][0]}, the engine's own function`);
+
+    /**
+     * THE MODEL BYTES — the P1 surface, and the half of this seam no grep for
+     * `chrome.` can see (S7, issue #5).
+     *
+     * `fetch` and the Cache API are not `chrome.*`. Before S7 the URL lived in
+     * `shared/config.js` and the fetch in `shared/modelcache.js`, so the unit
+     * carried a network path that the S9 unit gate — a grep for `chrome.` — was
+     * structurally incapable of noticing. Moving `MODEL.url` to
+     * `offscreen/host-pin.js` is what removed it, and these are the assertions
+     * that hold the split in place from the HOST's side. The UNIT's side is the
+     * `verifyModel` group below, and the two are complementary on purpose:
+     * together they say the bytes come from here and the judgement happens
+     * there, and neither one alone says it.
+     *
+     * REACHABLE, NOT CONSTRUCTED, like everything else in this block: the
+     * shipping `extension/offscreen/host.js` is what runs, and only the Cache
+     * API and `fetch` under it are stubbed.
+     */
+    const PIN_URL = (await import('./extension/offscreen/host-pin.js')).MODEL_URL;
+    const PIN_BUCKET = (await import('./extension/offscreen/host-pin.js')).MODEL_CACHE_NAME;
+    const aprobe = async (f, ...a) => {
+      try { return { ok: true, v: await f(...a) }; } catch (e) { return { ok: false, e: String((e && e.message) || e) }; }
+    };
+    const same = (a, b) => a instanceof Uint8Array && a.length === b.length && a.every((v, i) => v === b[i]);
+    /** Not the real weights and deliberately not their size: the pin is the unit's, and this block never touches it. */
+    const weights = new Uint8Array(4096);
+    for (let i = 0; i < weights.length; i++) weights[i] = (i * 37 + 11) & 0xff;
+
+    store.entry = weights; store.bodyReads = 0;
+    const cachedYes = await aprobe(engineHost.modelCached);
+    store.entry = null;
+    const cachedNo = await aprobe(engineHost.modelCached);
+    ok('modelCached() ANSWERS WITHOUT READING THE BYTES — the deck asks at boot, before any gesture, and an answer that costs a 109 MB read is one nobody can afford to ask for  '
+      + '[entry point: extension/offscreen/host.js modelCached(), reached from engine.js STATUS]',
+      cachedYes.v === true && cachedNo.v === false && store.bodyReads === 0,
+      !cachedYes.ok || !cachedNo.ok
+        ? `modelCached() could not be called at all: ${cachedYes.e || cachedNo.e}`
+        : store.bodyReads !== 0
+          ? `it read the body ${store.bodyReads} time(s) to answer a yes/no question`
+          : `stored -> ${cachedYes.v}, empty -> ${cachedNo.v}, 0 body reads`);
+
+    store.entry = weights; store.bodyReads = 0; fetched.length = 0; served = null;
+    const hit = await aprobe(engineHost.modelBytes);
+    ok('modelBytes() SERVES A STORED COPY WITHOUT TOUCHING THE NETWORK — P1 is held by the ORDER of these lines, and by nothing else  '
+      + '[entry point: extension/offscreen/host.js modelBytes(), reached from shared/modelcache.js loadModel()]',
+      hit.ok && fetched.length === 0 && hit.v.fromCache === true && same(hit.v.bytes, weights),
+      !hit.ok
+        ? `modelBytes() rejected on a stored copy: ${hit.e}`
+        : fetched.length !== 0
+          ? `it made ${fetched.length} network request(s) with the bytes already on disk — that is P1, once per browser start`
+          : `${weights.length} B from the store, fromCache=${hit.v.fromCache}, 0 fetches`);
+
+    store.entry = null; fetched.length = 0; store.put.length = 0; served = weights;
+    const miss = await aprobe(engineHost.modelBytes);
+    ok('...and on a MISS it fetches the PINNED url exactly once, and stores what it fetched under that same key',
+      miss.ok && fetched.length === 1 && fetched[0] === PIN_URL
+        && store.put.length === 1 && store.put[0] === PIN_URL && miss.v.fromCache === false,
+      !miss.ok
+        ? `modelBytes() rejected on a cold store: ${miss.e}`
+        : `${fetched.length} fetch(es) ${JSON.stringify(fetched)}, ${store.put.length} put(s) ${JSON.stringify(store.put)}, fromCache=${miss.v.fromCache}`);
+
+    ok('...and the bytes it hands over OWN THEIR WHOLE BUFFER — the unit transfers `bytes.buffer` into the inference worker, so a VIEW would transfer the wrong thing',
+      miss.ok && miss.v.bytes.byteOffset === 0
+        && miss.v.bytes.byteLength === miss.v.bytes.buffer.byteLength && same(miss.v.bytes, weights),
+      !miss.ok
+        ? 'there are no bytes to look at'
+        : `byteOffset ${miss.v.bytes.byteOffset}, ${miss.v.bytes.byteLength} of a ${miss.v.bytes.buffer.byteLength} B buffer, `
+          + `content ${same(miss.v.bytes, weights) ? 'intact across the two chunks' : 'DIFFERENT from what was served'}`);
+
+    store.entry = new Uint8Array(8); fetched.length = 0;
+    const unjudged = await aprobe(engineHost.modelBytes);
+    ok('THE HOST HANDS OVER WHATEVER IT HAS AND NEVER JUDGES IT — verification did NOT follow the fetch across the seam  '
+      + '[entry point: extension/offscreen/host.js modelBytes(); the refusal is shared/modelcache.js verifyModel()]',
+      unjudged.ok && unjudged.v.bytes.length === 8,
+      !unjudged.ok
+        ? `the Host refused eight zero bytes itself (${unjudged.e}) — a Host that CAN verify is a Host that can decline to, `
+          + 'and M1 is not a property the unit may delegate'
+        : `8 B of nothing handed straight over; the verifyModel group is where they are refused`);
+
+    store.entry = weights; store.deleted.length = 0;
+    const cleared = await aprobe(engineHost.clearModel);
+    const afterClear = await aprobe(engineHost.modelCached);
+    ok('clearModel() REALLY DROPS THE STORE — a no-op turns one corrupt download into a permanently dead deck, failing identically for ever',
+      cleared.ok && store.deleted.length === 1 && store.deleted[0] === PIN_BUCKET && afterClear.v === false,
+      !cleared.ok
+        ? `clearModel() could not be called at all: ${cleared.e}`
+        : `deleted ${JSON.stringify(store.deleted)}, modelCached() -> ${afterClear.v}`);
+
+    store.entry = null; served = null; fetched.length = 0;
+    const http = await aprobe(engineHost.modelBytes);
+    ok('...and an HTTP failure REJECTS naming the status, instead of resolving with an empty buffer that fails the hash a minute later somewhere else',
+      http.ok === false && http.e.includes('404'),
+      http.ok ? `a 404 resolved as ${JSON.stringify(http.v && http.v.bytes && http.v.bytes.length)} bytes` : http.e);
   } finally {
     delete globalThis.chrome;
     delete globalThis.addEventListener;
     Object.defineProperty(globalThis, 'navigator', realNavigator);
+    Object.defineProperty(globalThis, 'fetch', realFetch);
+    if (realCaches) Object.defineProperty(globalThis, 'caches', realCaches);
+    else delete globalThis.caches;
   }
 
   head('host — the DECK half of the same seam: the boot check, and the transport it hides');
@@ -5703,6 +5865,206 @@ if (group('host')) {
         ? 'ensurePlaybackWorklet() SWALLOWED a load failure — the deck would then build a node for a processor that is not there'
         : broken);
   }
+}
+
+// ===========================================================================
+if (group('verifyModel')) {
+  head('verifyModel — the model pin the UNIT keeps, held over whatever a Host hands over');
+  /**
+   * WHAT THIS COVERS AND WHY IT IS WORTH A GATE (S7, issue #5).
+   *
+   * P1 says exactly one network request is ever made and M1 says the weights are
+   * data, never script. Both are properties of the UNIT — but until S7 they were
+   * enforced by code that also owned `MODEL.url`, so the whole download lived on
+   * the unit's side of the seam, and `fetch` plus the Cache API are not
+   * `chrome.*`: the S9 unit gate, a grep for `chrome.`, is structurally
+   * incapable of seeing a network path shaped like that one. S7 moved the URL to
+   * `extension/offscreen/host-pin.js` and left the judgement here. These are the
+   * assertions that the judgement really did stay.
+   *
+   * WHICH KIND OF TEST THIS IS — the RENDERING vs REACHABILITY rule at the head
+   * of this file. Reachable by construction, in both halves:
+   *
+   *   1. `verifyModel` is the SHIPPED function, driven over buffers that are
+   *      actually built here rather than described. The pin is a PARAMETER for
+   *      exactly this reason — hard-coding the real SHA-256 beside a fabricated
+   *      buffer would put a second copy of the pin in this file, which is what
+   *      `shared/config.js` exists to prevent. The parametrised pin is computed
+   *      from the bytes by the same primitive the function uses, so a control is
+   *      needed and there is one: the DEFAULT pin is the shipped one, and the
+   *      same bytes fail against it.
+   *   2. `loadModel` is the SHIPPED policy, driven over a fake Host whose only
+   *      job is to hand over bytes and count how often it was asked. Every claim
+   *      about the retry is a COUNT — `modelBytes` calls, `clearModel` calls —
+   *      never a clock and never a timeout.
+   *
+   * The Host's side of the same seam is the `host` group above: that the bytes
+   * come from `offscreen/host.js`, and that it never judges them. Neither group
+   * alone says the split holds; together they do.
+   */
+  const { verifyModel, loadModel } = await import('./extension/shared/modelcache.js');
+  const sha256 = async (b) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b))]
+    .map((v) => v.toString(16).padStart(2, '0')).join('');
+  const threwAsync = (p) => p.then(() => null, (e) => String((e && e.message) || e));
+
+  /** Not the real weights, and deliberately not their size — the real pin is never re-typed here. */
+  const weights = new Uint8Array(4096);
+  for (let i = 0; i < weights.length; i++) weights[i] = (i * 37 + 11) & 0xff;
+  const PIN = { sha256: await sha256(weights), bytes: weights.length };
+
+  const wrongContent = Uint8Array.from(weights);
+  wrongContent[2048] ^= 0x01;                       // one bit, same length
+  const truncated = Uint8Array.from(weights.subarray(0, weights.length - 1));
+
+  const resolved = await verifyModel(weights, PIN).then((v) => v, (e) => e);
+  ok('A MATCHING BUFFER RESOLVES, WITH THE BYTES — so a caller can check and use in one expression  '
+    + '[entry point: shared/modelcache.js verifyModel(), reached from loadModel() on every load]',
+    resolved === weights,
+    resolved === weights
+      ? `${weights.length} B accepted against the pin computed from them`
+      : `verifyModel rejected bytes that match their own pin: ${resolved}`);
+
+  const flippedSha = await sha256(wrongContent);
+  const flipped = await threwAsync(verifyModel(wrongContent, PIN));
+  ok('ONE FLIPPED BIT IS REFUSED, AND THE MESSAGE NAMES BOTH HASHES — the one it got and the one it wanted',
+    flippedSha !== PIN.sha256 && flipped != null && flipped.includes(flippedSha) && flipped.includes(PIN.sha256),
+    flipped == null
+      ? 'a buffer differing from the pin by one bit was ACCEPTED — this is the check that stands between a corrupt '
+        + 'download and InferenceSession.create'
+      : flipped);
+
+  const short = await threwAsync(verifyModel(truncated, PIN));
+  ok('...and A TRUNCATED BUFFER IS REFUSED NAMING BOTH BYTE COUNTS, not as an unexplained hash mismatch  '
+    + '[the byte count is NEW in S7: before it, a cut-short download reported only a sha256 nobody could interpret]',
+    short != null && short.includes(String(truncated.length)) && short.includes(String(PIN.bytes))
+      && !short.includes('sha256'),
+    short == null ? `${truncated.length} of ${PIN.bytes} bytes was ACCEPTED` : short);
+
+  const againstShipped = await threwAsync(verifyModel(weights));
+  ok('THE CONTROL: the DEFAULT pin is the SHIPPED one, so the pass above is the pin doing work and not verifyModel accepting anything',
+    againstShipped != null && againstShipped.includes(String(MODEL.bytes)),
+    againstShipped == null
+      ? '4096 fabricated bytes passed as the model — verifyModel() with no pin argument is checking nothing'
+      : againstShipped);
+
+  /**
+   * THE LOAD POLICY, over a Host that is a byte source and a call counter.
+   *
+   * The queue is what makes the retry observable: every case below is about what
+   * happens on the SECOND ask, and a Host that answered identically twice could
+   * not tell "retried once" from "retried never". The counters are the claim.
+   */
+  const fakeHost = (...queue) => {
+    const h = {
+      asks: 0,
+      clears: 0,
+      modelBytes: async (onProgress = () => {}) => {
+        const next = queue[Math.min(h.asks, queue.length - 1)];
+        h.asks++;
+        // A Host announces its own phase before the bytes move — see the
+        // `EngineHost.modelBytes` typedef. Reported here so the ordering claim
+        // below has something to order against.
+        onProgress(next.fromCache ? 'cache' : 'download', next.bytes.length, next.bytes.length);
+        return { bytes: next.bytes, fromCache: next.fromCache };
+      },
+      clearModel: async () => { h.clears++; },
+    };
+    return h;
+  };
+  const stored = (bytes) => ({ bytes, fromCache: true });
+  const wire = (bytes) => ({ bytes, fromCache: false });
+
+  const clean = fakeHost(stored(weights));
+  const cleanOut = await loadModel(clean, () => {}, PIN).then((v) => v, (e) => e);
+  ok('A GOOD STORED COPY IS STILL VERIFIED, AND NOTHING IS THROWN AWAY: 1 ask, 0 clears  '
+    + '[entry point: shared/modelcache.js loadModel(), reached from engine.js modelBytes()]',
+    !(cleanOut instanceof Error) && clean.asks === 1 && clean.clears === 0
+      && cleanOut.fromCache === true && cleanOut.buffer.byteLength === weights.length,
+    cleanOut instanceof Error
+      ? `loadModel rejected good bytes: ${cleanOut.message}`
+      : `${clean.asks} ask, ${clean.clears} clears, ${cleanOut.buffer.byteLength} B, fromCache=${cleanOut.fromCache}`);
+
+  const heals = fakeHost(stored(wrongContent), wire(weights));
+  const healed = await loadModel(heals, () => {}, PIN).then((v) => v, (e) => e);
+  ok('A CORRUPT STORED COPY COSTS ONE RE-DOWNLOAD AND NOT A DEAD DECK: the store is dropped and the Host asked once more — 2 asks, 1 clear',
+    !(healed instanceof Error) && heals.asks === 2 && heals.clears === 1 && healed.fromCache === false,
+    healed instanceof Error
+      ? `a corrupt stored copy became a permanent failure: ${healed.message} (${heals.asks} asks, ${heals.clears} clears)`
+      : `${heals.asks} asks, ${heals.clears} clear, fromCache=${healed.fromCache}`);
+
+  const offWire = fakeHost(wire(wrongContent));
+  const wireOut = await threwAsync(loadModel(offWire, () => {}, PIN));
+  ok('...but BYTES STRAIGHT OFF THE WIRE ARE NOT ASKED FOR TWICE — a second 109 MB fails the same way, so it throws after 1 ask',
+    wireOut != null && wireOut.includes(PIN.sha256) && offWire.asks === 1 && offWire.clears === 1,
+    wireOut == null
+      ? `corrupt bytes off the wire were ACCEPTED (${offWire.asks} asks)`
+      : `${offWire.asks} ask, ${offWire.clears} clear — ${wireOut}`);
+
+  const rotten = fakeHost(stored(wrongContent));
+  const rottenOut = await threwAsync(loadModel(rotten, () => {}, PIN));
+  ok('AND NEVER A THIRD ATTEMPT: a Host that keeps handing back the same corrupt bytes fails at 2 asks rather than downloading for ever',
+    rottenOut != null && rotten.asks === 2 && rotten.clears === 2,
+    rottenOut == null
+      ? `corrupt bytes were ACCEPTED on the retry (${rotten.asks} asks)`
+      : `${rotten.asks} asks, ${rotten.clears} clears — ${rottenOut}`);
+
+  const phases = [];
+  await loadModel(fakeHost(stored(weights)), (phase) => phases.push(phase), PIN);
+  ok("...and the load announces 'verify' AFTER the Host's own phase, so the deck's progress card can say what the wait past the last byte is for",
+    phases.length === 2 && phases[0] === 'cache' && phases[1] === 'verify',
+    phases.length ? phases.join(' -> ') : 'the loader reported no progress at all');
+
+  /**
+   * THE UNIT NAMES NO MODEL URL — the checkbox this slice exists for, asserted
+   * rather than promised.
+   *
+   * A `grep`, deliberately, and over the RAW text rather than with comments
+   * stripped: the claim is that knowledge of where the bytes come from lives in
+   * ONE file, and a comment in `shared/config.js` naming the upstream host is a
+   * second copy of that knowledge even when it is not a code path. Prose in the
+   * unit that needs to refer to it says "the pinned upstream host".
+   *
+   * FAILS IF IT CANNOT LOOK, which is the failure this shape is most prone to:
+   * the needle is read out of the pin itself so it cannot go stale, and the one
+   * file ALLOWED to contain it must actually contain it. A scan for a string
+   * nothing has would otherwise report a clean unit most confidently at the
+   * moment it stopped looking at anything.
+   *
+   * `extension/manifest.json` is not scanned and must not be: `host_permissions`
+   * and the CSP `connect-src` name the same origin because MV3 refuses the fetch
+   * otherwise, and the manifest is the extension HOST's declaration about
+   * itself. `offscreen/host-pin.js` says so, next to the URL.
+   */
+  const { readFileSync: readSrc, readdirSync } = await import('node:fs');
+  const PIN_FILE = 'extension/offscreen/host-pin.js';
+  const ORIGIN = new URL((await import('./extension/offscreen/host-pin.js')).MODEL_URL).hostname;
+  const walk = (dir, out = []) => {
+    for (const e of readdirSync(new URL(`./${dir}/`, import.meta.url), { withFileTypes: true })) {
+      if (e.name === 'vendor' || e.name === 'node_modules') continue;
+      if (e.isDirectory()) walk(`${dir}/${e.name}`, out);
+      else if (e.name.endsWith('.js')) out.push(`${dir}/${e.name}`);
+    }
+    return out;
+  };
+  const jsFiles = walk('extension');
+  const namesOrigin = jsFiles.filter((f) => readSrc(new URL(`./${f}`, import.meta.url), 'utf8').includes(ORIGIN));
+  ok(`NO FILE UNDER extension/ NAMES THE MODEL'S UPSTREAM HOST EXCEPT ${PIN_FILE} — that move is what took the network path out of the unit  `
+    + '[entry point: a grep over every .js under extension/, vendor excluded; the needle is read out of the pin]',
+    jsFiles.length > 10 && namesOrigin.length === 1 && namesOrigin[0] === PIN_FILE,
+    jsFiles.length <= 10
+      ? `only ${jsFiles.length} files were scanned — this walk is not seeing extension/`
+      : namesOrigin.includes(PIN_FILE)
+        ? `${jsFiles.length} files scanned, ${ORIGIN} in ${namesOrigin.join(', ')}`
+        : `${PIN_FILE} does not contain ${ORIGIN} — the scan is looking for a string nothing has, so it proves nothing`);
+
+  const unitSrc = readSrc(new URL('./extension/shared/modelcache.js', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  ok('...and the unit module the bytes pass through says neither `fetch` nor `caches` — the two words no `chrome.` grep would have caught  '
+    + '[entry point: extension/shared/modelcache.js, comments stripped]',
+    unitSrc.includes('verifyModel') && !/\bfetch\s*\(/.test(unitSrc) && !/\bcaches\b/.test(unitSrc),
+    !unitSrc.includes('verifyModel')
+      ? 'verifyModel is not in this file — the scan is reading the wrong module'
+      : `${unitSrc.split('\n').filter((l) => l.trim()).length} lines of code, no fetch and no Cache API`);
 }
 
 // ===========================================================================
