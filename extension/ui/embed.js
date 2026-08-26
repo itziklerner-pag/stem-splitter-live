@@ -935,10 +935,22 @@ function syncVideoLock(correct = false) {
    * sent on every correcting tick — but only when it CHANGED, because this runs
    * at ~4 Hz and re-posting the same value churns the page for nothing.
    */
-  const seek = c.action === 'seek' ? { currentTime: c.seekTo } : null;
-  if (!seek && c.playbackRate === lastRateSent) return;
+  const jumped = c.action === 'seek';
+  if (!jumped && c.playbackRate === lastRateSent) return;
   lastRateSent = c.playbackRate;
-  transport.drive({ playbackRate: c.playbackRate, ...(seek || {}) });
+  /**
+   * NAMED, NEVER SPREAD. `drive`'s write set is ADR 0001 decision 4's three
+   * fields, and THIS Host closes it again on its own side — but the closure is
+   * only mechanical for the Host that implements it, and a second Host doing the
+   * obvious `Object.assign(player, patch)` inherits whatever the unit passed. So
+   * the unit names its fields too: spreading here would make the write set
+   * whatever some future correction happened to carry, and L1 is a security
+   * property (SECURITY.md), not a preference, because this channel reaches a
+   * `<video>` on somebody else's page.
+   */
+  transport.drive(jumped
+    ? { playbackRate: c.playbackRate, currentTime: c.seekTo }
+    : { playbackRate: c.playbackRate });
 }
 
 /**

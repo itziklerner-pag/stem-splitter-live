@@ -302,8 +302,20 @@ export function assertHost(host, duties, what = 'Host') {
 /* ========================================================================= */
 
 /**
- * The deck's Host. Six duties today — the bus, storage, and the arm chord; S5
- * adds the transport to the page.
+ * The deck's Host. EIGHT members: the bus (`send` + `onMessage`), storage
+ * (`storageGet`, `storageSet`, `onStorageChanged`) and the arm chord
+ * (`armShortcut`) from S4, plus the page the deck is drawn into and the player
+ * above it when there is one, from S5.
+ *
+ * `page` and `transport` are NAMESPACES rather than callable duties, so they are
+ * deliberately not in `DECK_HOST_DUTIES` — `assertHost` requires
+ * `typeof host[k] === 'function'` and nothing weaker, which is also why S4's
+ * storage is three flat duties rather than a `storage` namespace. Each of the
+ * two is gated by its own duty list at the deck's boot instead:
+ * `assertHost(host.page, DECK_PAGE_DUTIES, …)` and `assertHostOption(host,
+ * 'transport', DECK_TRANSPORT_DUTIES, …)`, both at `extension/ui/embed.js`
+ * module scope, and `test.js` asserts that the deck really does call all three
+ * there rather than only that they refuse when called from a suite.
  *
  * @typedef {object} DeckHost
  *
@@ -394,6 +406,20 @@ export function assertHost(host, duties, what = 'Host') {
  *   seam and is left in the unit deliberately for now; S11 owns deciding whether
  *   host-specific instruction prose is sourced from the Host or declared out of
  *   scope when it freezes Host interface v1.
+ *
+ * @property {DeckPage} page
+ *   Where the deck is drawn: its keys, its height, its life on the page, and the
+ *   host's autoplay-next report. EVERY DeckHost owes this, including one with no
+ *   player at all — a deck still has to size itself and take its keys. Declared
+ *   below, with `DECK_PAGE_DUTIES` as the list it must satisfy.
+ *
+ * @property {DeckTransport|null} transport
+ *   The player the host's page is showing, or `null` — SPELLED, never merely
+ *   omitted. `host.transport != null` is the single question that decides
+ *   whether this deck is hosted, so a Host that meant to supply one and
+ *   misspelled the key must not read as a Host that deliberately has none;
+ *   `assertHostOption` below is what refuses the omission. Declared below, with
+ *   `DECK_TRANSPORT_DUTIES` as its list.
  *
  * THE TWO STORAGE AREAS ARE A LIFETIME, AND THE UNIT NAMES WHICH ONE IT MEANT.
  * `'local'` outlives the browser; `'session'` lasts as long as this run of it.
@@ -556,6 +582,15 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   The host's report on suppressing its page's autoplay-next. Advisory: three
  *   of the states mean the feature is not working, and none of them may stop
  *   the deck.
+ *   FLAGGED, NOT RECONCILED: THIS IS ONLY THE REPORT HALF. What actually tells
+ *   the host to suppress is not a duty at all — the deck writes
+ *   `prefs.autoplayNext` into `chrome.storage.local` and `content.js` reads the
+ *   same key back, live, through an `onChanged` listener. A shared storage key
+ *   is doing the work of a deck -> host instruction, so a second Host that
+ *   implements all six page duties still has a dead autoplay checkbox. S4
+ *   (issue #6) puts storage behind a duty, which does not by itself close this:
+ *   the unit and the host would still be agreeing on a key name out of band.
+ *   S11 owns declaring the instruction, the way it owns the `send` asymmetry.
  *
  * @property {(claim: {armed: boolean, keys: string[]}) => void} claimKeys
  *   Which key codes are the deck's right now, and whether a deck is armed at
@@ -591,11 +626,16 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   The payload this Host sends is `{playing, currentTime, duration, ended,
  *   playbackRate, hasMedia, adShowing, seeking}`, on every media event that can
  *   move any of them plus a ~4 Hz tick.
+ *   WHAT THE DECK ACTUALLY READS is `playing`, `currentTime`, `duration`,
+ *   `ended`, `playbackRate` and `seeking`. `hasMedia` and `adShowing` are on the
+ *   wire but the unit never looks at them: they are consumed HOST-side, by
+ *   `content.js`/`speed.js`, before the SPEED verdict is composed. A second Host
+ *   that has no notion of an ad break owes them nothing beyond a value its own
+ *   speed logic can read.
  *   FLAGGED, NOT RECONCILED: ADR 0001 decision 4 words the READ side as three
  *   values — `paused`, `currentTime`, `duration` — and the shipped payload is
- *   wider than that wording. Nothing here widens it; `ended`, `playbackRate`,
- *   `hasMedia` and `adShowing` are all reported today and the speed control and
- *   the cache commit both read them. S11 freezes Host interface v1 and owns the
+ *   wider than that wording, by `ended`, `playbackRate` and `seeking`, all three
+ *   of which the deck reads today. S11 freezes Host interface v1 and owns the
  *   reconciliation; narrowing the payload is an L1 decision and belongs to the
  *   owner, not to a seam slice.
  *
@@ -609,6 +649,17 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   right now, what it applied, and why not. It is the ONLY thing that greys
  *   the deck's speed control, and `why: 'yield'` is the only signal that can
  *   tell the page's own speed menu from the deck's write still in flight.
+ *   `state` MUST BE THE LITERAL `'ok'` when a rate can be set. `speedGate`
+ *   (`ui/embed-state.js`) ungreys on that one string and locks on every other,
+ *   showing the state name to the user — so a Host that implements this
+ *   signature faithfully and reports `state: 'playing'` ships a control that is
+ *   permanently greyed, with no error anywhere. A transport that never reports
+ *   at all leaves it locked as `'unreported'` forever.
+ *   IT IS ALSO THE DECK'S PROOF THAT A TRANSPORT EXISTS. Only a transport can
+ *   report, and `onSpeedReport` is the only writer of the state `speedGate`
+ *   reads, which is why `setSpeed` calls `requestSpeed` with no
+ *   `host.transport &&` in front of it. Anything that lets another path report
+ *   `'ok'` breaks that, silently, at a user gesture.
  *
  * @property {(patch: {muted?: boolean, playbackRate?: number,
  *   currentTime?: number}) => void} drive
@@ -618,6 +669,14 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   it was given and ignores anything else in the patch — so that widening it
  *   is an edit to a Host and to this list, and never a field a caller smuggles
  *   through.
+ *   IT IS A MECHANISM PER HOST, NOT ONE MECHANISM FOR ALL HOSTS, and until S11
+ *   says otherwise both ends carry it: `ui/host.js` filters what it puts on the
+ *   wire, AND the unit names its three fields at the call site rather than
+ *   spreading a patch object into it (`test.js` holds both halves). A Host that
+ *   did the obvious `Object.assign(player, patch)` would reopen the write set
+ *   with nothing in this tree to see it — which is why the caller-side closure
+ *   is not redundant. L1 is a security property (`SECURITY.md`): this channel
+ *   reaches a `<video>` on somebody else's page.
  *
  * @property {() => void} release
  *   Hand the player back the way it was found: unmuted, rate 1, key lock on.

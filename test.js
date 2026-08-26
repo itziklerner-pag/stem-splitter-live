@@ -5247,15 +5247,25 @@ if (group('host')) {
    * `posted` is the outgoing postMessage wire and `listeners` the incoming one.
    * A LONE window is one whose `parent` is itself — a document opened outside a
    * frame, where a post to `parent` lands back on its own listener.
+   *
+   * WHICH WINDOW IT WENT TO IS TAGGED, and that tag is the whole difference
+   * between an assertion and a name. Both sinks land in the same `posted` array,
+   * so without `to` a Host that posted to its OWN window instead of its parent —
+   * every deck -> host message reaching `content.js` never — is indistinguishable
+   * from a correct one. Review measured exactly that: `window.postMessage(msg,
+   * '*')` in place of `window.parent.postMessage` left `node test.js host` at
+   * 58 passed, 0 failed, under an assertion whose name says "to `parent`".
+   * On a LONE window `parent` IS the window, so `to: 'self'` there is the truth
+   * and not a miss.
    */
   const makeWindow = (framed) => {
     const w = {
       listeners: [], posted: [],
       addEventListener(type, fn) { w.listeners.push([type, fn]); },
-      postMessage(msg, targetOrigin) { w.posted.push({ msg, targetOrigin }); },
+      postMessage(msg, targetOrigin) { w.posted.push({ to: 'self', msg, targetOrigin }); },
     };
     w.parent = framed
-      ? { postMessage: (msg, targetOrigin) => w.posted.push({ msg, targetOrigin }) }
+      ? { postMessage: (msg, targetOrigin) => w.posted.push({ to: 'parent', msg, targetOrigin }) }
       : w;
     return w;
   };
@@ -6607,6 +6617,78 @@ if (group('host')) {
     const hostSrc = strip(hostRaw);
 
     /**
+     * THE CHECKS ARE ONLY WORTH THEIR NAMES IF THE DECK ACTUALLY RUNS THEM, AND
+     * RUNS THEM FIRST — the deck-side twin of "THE ENGINE ITSELF RUNS THE CHECK"
+     * seven hundred lines above, here for the same reason and found the same way.
+     *
+     * Every refusal above drives `assertHost` and `assertHostOption` DIRECTLY,
+     * which proves the two functions work and proves nothing at all about
+     * `extension/ui/embed.js` ever calling them. Review proved the gap by making
+     * the deck stop calling them — `const transport = host.transport || null;`
+     * in place of the `assertHostOption` line, and the `assertHost(host.page, …)`
+     * line deleted: `--quick` stayed GREEN and `unit` stayed at 513 passed, 0
+     * failed, byte-identical, while two assertions above went on naming those
+     * call sites as their entry point. `tools/embed-smoke.mjs` cannot see it
+     * either, and that is not a gap in the browser gate: under THIS Host the
+     * behaviour is identical, because the whole value of the calls is the refusal
+     * a SECOND Host would get at boot instead of a TypeError at a user gesture.
+     * S3 shipped with the same hole under `assertHost(host, DECK_HOST_DUTIES)`,
+     * so all three are checked here and not only this slice's two.
+     *
+     * MATCHED AT THE START OF A LINE, which in this file means module scope. A
+     * check that runs inside a function the deck may or may not reach is not a
+     * boot check, and the `//`-and-`/* *\/`-stripped source is what it is matched
+     * against so that a call commented out reads as a call that is gone.
+     *
+     * FAILS IF IT CANNOT LOOK: a build in which the first use each check is
+     * ordered against cannot be found is a red, not a pass.
+     */
+    const BOOTS = [
+      {
+        call: 'assertHost(host, DECK_HOST_DUTIES, …)',
+        at: /^assertHost\(host, DECK_HOST_DUTIES/m,
+        use: /\bhost\.(send|onMessage)\s*\(/,
+        guards: 'host.send()/host.onMessage()',
+        cost: 'a Host short a bus duty boots, and the first STATUS goes nowhere — a deck that never '
+          + 'leaves idle with nothing in the console',
+      },
+      {
+        call: 'assertHost(host.page, DECK_PAGE_DUTIES, …)',
+        at: /^assertHost\(host\.page, DECK_PAGE_DUTIES/m,
+        use: /\bhost\.page\./,
+        guards: 'host.page.*()',
+        cost: 'a Host short a page duty boots clean and throws at the first height report',
+      },
+      {
+        call: "assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, …)",
+        at: /^const transport = assertHostOption\(host, 'transport'/m,
+        use: /\btransport\s*(\.|!=)/,
+        guards: 'the `transport` binding',
+        cost: 'a misspelled `transport` key reads as "this Host has no player", which follow() reads '
+          + 'as licence to run: a capture and a 109 MB download on a page nobody pressed play on',
+      },
+    ];
+    const boots = BOOTS.map((b) => ({ ...b, i: embedSrc.search(b.at), u: embedSrc.search(b.use) }));
+    const notRun = boots.filter((b) => b.i < 0);
+    ok('THE DECK ITSELF RUNS ALL THREE BOOT CHECKS — they are called at embed.js module scope, not only from here  '
+      + '[entry point: extension/ui/embed.js module scope, comments stripped]',
+      notRun.length === 0,
+      notRun.length
+        ? notRun.map((b) => `${b.call} is NOT called at embed.js module scope — every refusal above still passes and ${b.cost}`).join(' · ')
+        : `3 of 3, at ${boots.map((b) => b.i).join(', ')} chars in`);
+
+    const late = boots.filter((b) => b.i < 0 || b.u < 0 || b.i > b.u);
+    ok('...and each runs BEFORE the deck first reaches for the thing it guards, so a refusal lands at boot',
+      late.length === 0,
+      late.length
+        ? late.map((b) => (b.u < 0
+          ? `cannot look: nothing in embed.js matches /${b.use.source}/, so the ordering claim for ${b.call} has no anchor`
+          : b.i < 0
+            ? `${b.call} is not there to order`
+            : `${b.call} at ${b.i} runs AFTER ${b.guards} at ${b.u} — the Host is already in use by the time it is checked`)).join(' · ')
+        : boots.map((b) => `${b.guards} ${b.i}<${b.u}`).join(' · '));
+
+    /**
      * THE DECK NO LONGER KNOWS WHAT A FRAME IS, asserted as an ABSENCE and a
      * PRESENCE together — the shape `tools/tree-check.mjs` uses for the arm
      * chord, and for the same reason: the absence alone is satisfied by a build
@@ -6691,9 +6773,11 @@ if (group('host')) {
       && sent[0].keys.join(',') === 'Digit1,Escape' && sent[1].height === 496,
       sent.length === 5 ? `${JSON.stringify(sent[0])} · ${JSON.stringify(sent[1])}` : 'nothing to read');
 
-    ok('...to `parent`, and with no origin pinned — the deck cannot know at build time what page it was mounted into',
-      framedWin.posted.length === 5 && framedWin.posted.every((p) => p.targetOrigin === '*'),
-      framedWin.posted.map((p) => String(p.targetOrigin)).join(' '));
+    ok('...to `parent` and to nothing else, and with no origin pinned — the deck cannot know at build '
+      + 'time what page it was mounted into',
+      framedWin.posted.length === 5
+      && framedWin.posted.every((p) => p.to === 'parent' && p.targetOrigin === '*'),
+      framedWin.posted.map((p) => `${p.to}@${String(p.targetOrigin)}`).join(' '));
 
     /**
      * THE WRITE SET IS CLOSED, AND THIS IS THE ASSERTION THAT HOLDS IT.
@@ -6724,6 +6808,37 @@ if (group('host')) {
       drove === null
         ? `drive() put ${framedWin.posted.length} messages on the wire, expected 1`
         : Object.keys(drove).sort().join(','));
+
+    /**
+     * ...AND THE UNIT CLOSES IT TOO, which is a different claim from the one
+     * above and the reason both are here. The assertion above holds the closure
+     * for THIS Host: it hands `drive()` a deliberately wide object and reads what
+     * survived. But the closure is a mechanism only for the Host that implements
+     * it — a second Host doing the obvious `Object.assign(player, patch)`
+     * inherits whatever the unit passed, and no assertion in this tree would see
+     * it. So the caller names its fields as well, and this is what holds that:
+     * `transport.drive({ playbackRate: c.playbackRate, ...(seek || {}) })` was
+     * the shipped shape, and a spread makes the write set whatever some future
+     * correction happens to carry.
+     *
+     * L1 is a security property (`SECURITY.md`), not a preference: this channel
+     * reaches a `<video>` on somebody else's page.
+     *
+     * FAILS IF IT CANNOT LOOK: zero `transport.drive(` calls in `embed.js` means
+     * the deck no longer drives the player at all, and that is a red here rather
+     * than a vacuous pass.
+     */
+    const driveCalls = [...embedSrc.matchAll(/transport\.drive\([\s\S]{0,240}?\);/g)].map((m) => m[0]);
+    const spread = driveCalls.filter((c) => c.includes('...'));
+    ok('...AND THE DECK HANDS IT A CLOSED OBJECT: every drive() call in embed.js names its fields, none spreads  '
+      + '[entry point: extension/ui/embed.js, comments stripped]',
+      driveCalls.length > 0 && spread.length === 0,
+      driveCalls.length === 0
+        ? 'no `transport.drive(` call in embed.js at all — either the deck stopped driving the player or this scan cannot see it'
+        : spread.length
+          ? `${spread.length} of ${driveCalls.length} spread into the patch: ${spread.join(' | ').replace(/\s+/g, ' ')} — `
+            + 'the write set is then whatever the caller passed, and only this Host would filter it'
+          : `${driveCalls.length} calls, all named`);
 
     framedWin.posted.length = 0;
     deckHost.transport.drive({ muted: true });
@@ -6757,17 +6872,34 @@ if (group('host')) {
     deckHost.page.onKey((d) => heard.push(['key', d]));
     deckHost.page.onAutonav((d) => heard.push(['autonav', d]));
 
+    /**
+     * ALL FIVE ARE CHECKED BY IDENTITY, not four of them by arrival. The name
+     * says "the payload arrives as the host sent it"; a routing count wearing
+     * that name would be satisfied by a Host that dropped `shift`/`alt` off the
+     * KEY payload, or normalised the SPEED verdict, and both of those are silent
+     * — the deck would read `shift: undefined` as "no solo" forever.
+     */
     const HOSTNS = 'stem-splitter-live-host';
-    const video = { from: HOSTNS, type: 'VIDEO', playing: true, currentTime: 3, duration: 60 };
-    deliver(framedWin, framedWin.parent, video);
-    deliver(framedWin, framedWin.parent, { from: HOSTNS, type: 'JUMP' });
-    deliver(framedWin, framedWin.parent, { from: HOSTNS, type: 'SPEED', state: 'ad', why: null });
-    deliver(framedWin, framedWin.parent, { from: HOSTNS, type: 'KEY', code: 'Digit1' });
-    deliver(framedWin, framedWin.parent, { from: HOSTNS, type: 'AUTONAV', state: 'missing' });
-    ok('EACH WIRE TYPE REACHES ITS OWN DUTY, and the payload arrives as the host sent it  '
+    const WIRE = [
+      ['state', { from: HOSTNS, type: 'VIDEO', playing: true, currentTime: 3, duration: 60 }],
+      ['jump', { from: HOSTNS, type: 'JUMP' }],
+      ['speed', { from: HOSTNS, type: 'SPEED', state: 'ad', why: null }],
+      ['key', { from: HOSTNS, type: 'KEY', code: 'Digit1', shift: true, alt: false, repeat: false }],
+      ['autonav', { from: HOSTNS, type: 'AUTONAV', state: 'missing' }],
+    ];
+    for (const [, d] of WIRE) deliver(framedWin, framedWin.parent, d);
+    const routed = heard.length === 5 && heard.every(([k], i) => k === WIRE[i][0]);
+    const kept = heard.length === 5 && heard.every(([, d], i) => d === WIRE[i][1]);
+    ok('EACH WIRE TYPE REACHES ITS OWN DUTY, and all five payloads arrive as the host sent them — the SAME object  '
       + '[entry point: extension/ui/host.js, the module-scope message listener]',
-      heard.map(([k]) => k).join(',') === 'state,jump,speed,key,autonav' && heard[0][1] === video,
-      heard.length === 5 ? heard.map(([k]) => k).join(',') : `${heard.length} of 5 delivered`);
+      routed && kept,
+      routed && kept
+        ? `${heard.map(([k]) => k).join(',')} — same objects`
+        : heard.length !== 5
+          ? `${heard.length} of 5 delivered`
+          : !routed
+            ? `routed ${heard.map(([k]) => k).join(',')}, wanted ${WIRE.map(([k]) => k).join(',')}`
+            : `the payload was rewritten on the way in for ${heard.filter(([, d], i) => d !== WIRE[i][1]).map(([k]) => k).join(',')}`);
 
     heard.length = 0;
     deliver(framedWin, { not: 'the host' }, { from: HOSTNS, type: 'VIDEO', playing: false });
