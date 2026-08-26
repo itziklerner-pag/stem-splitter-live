@@ -395,16 +395,44 @@ export class WorkerBackend {
    * and must not be reported as one, so the rejection here is silent to
    * everything except the calls it settles.
    *
-   * THE REASON IS RECORDED AS WELL AS THROWN. `serialiseBackend` does NOT queue
-   * `dispose()` — teardown is the moment you most need to stop a backend that is
-   * not answering — so calls can still be sitting in that queue when this runs,
-   * and each of them reaches `separate()` afterwards. `require()` is what refuses
-   * them, out of `deadReason`; without a reason recorded here it would tell a
-   * caller the backend "is not running and reported no reason" about a teardown
-   * this very method performed.
+   * THE REASON IS RECORDED AS WELL AS THROWN, for the calls that arrive after
+   * this. `require()` is what refuses those, out of `deadReason`; without a
+   * reason recorded here it would tell a caller the backend "is not running and
+   * reported no reason" about a teardown this very method performed. Since S8
+   * the seam refuses them one layer up as well — `serialiseBackend`'s own
+   * `dispose()` — so this is defence in depth rather than the only guard; it
+   * stays because it is THIS backend's duty on the `Backend` typedef, and a
+   * backend that only refuses when something else is holding its coat has not
+   * discharged it.
+   *
+   * ...AND THE RUNTIME PROBE GOES WITH IT. `load()` awaits `this.probe` BEFORE
+   * it calls `require()`, so a probe left behind answers first: on a checkout
+   * with no `extension/vendor/ort/`, a `load()` reaching a disposed backend said
+   * "ONNX Runtime is missing from this build — run `bash tools/fetch-vendor.sh`"
+   * about a backend that was deliberately given back. That is the same
+   * wrong-cause failure `deadReason` exists to prevent, one line above the line
+   * that reads it. `spawn()` re-runs the probe, and nothing else reads it.
    *
    * BOTH MESSAGES NAME THE BACKEND. Two decks own one each, they fail
    * independently, and "the inference worker is gone" names neither.
+   *
+   * WHAT THE IN-FLIGHT REJECTION LOOKS LIKE FROM THE DECK, since this crosses
+   * "the extension behaves identically" on purpose and the reader deserves the
+   * whole route rather than its first frame. `live.js:864` catches it as
+   * `fail('CHUNK_FAILED', e)`, and `fail()` does more than log: it puts
+   * `{type:'LIVE_ERROR', code:'CHUNK_FAILED'}` on the wire, `CHUNK_FAILED` is
+   * NOT in the console's `ADVISORY_CODES`, and `embed.js` therefore paints a
+   * fatal banner with a Restart button. Neither suppression path fires —
+   * `fail()`'s early-out needs `status === 'error' && stopped` and
+   * `LivePipeline.stop()` leaves `status = 'idle'`, and `runChunk`'s
+   * `gen !== this.gen` early return cannot fire because only `start()` bumps
+   * `gen`. So: one banner where there used to be a promise that never settled.
+   * In the shipped build that is close to unreachable — the only route to
+   * `Deck.dispose()` is the `TEARDOWN` message, which nothing in `extension/`
+   * sends, and `host.onTeardown` runs at `pagehide` with the document dying —
+   * but it IS reachable through `engine.js`'s `DEV_DECK_DISPOSE` probe hook,
+   * where a fault-injection harness now sees one deck-level fault it did not see
+   * before. A hang reported as nothing was the worse of the two.
    */
   async dispose() {
     const w = this.worker;
@@ -417,6 +445,7 @@ export class WorkerBackend {
     this.pending.clear();
     if (this.loadGate) { const g = this.loadGate; this.loadGate = null; g.rej(gone); }
     this.progress = null;
+    this.probe = null;
     if (w) { w.onmessage = null; w.onerror = null; w.terminate(); }
   }
 }

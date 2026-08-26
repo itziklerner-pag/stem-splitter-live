@@ -7825,6 +7825,13 @@ if (group('backend')) {
     f.backend.separate = () => new Promise((res) => { hung = res; });
     const b = serialiseBackend(f.backend, 'fake');
     const never = b.separate(new ArrayBuffer(8), new ArrayBuffer(8));
+    // THE CALL IS LET INTO THE BACKEND FIRST, and that is what this block is
+    // about: the queue dispatches one microtask turn after the call is made, so
+    // disposing in the SAME turn would test a call still sitting in the queue —
+    // which S8 (#9) made the wrapper refuse itself, and which is a different
+    // claim, gated in tools/seam-check.mjs. `hung !== null` below is what says
+    // the call really is inside the backend and not merely submitted.
+    for (let i = 0; i < 4; i++) await Promise.resolve();
     // NOT awaited: a queued `dispose()` would never settle behind a `separate()`
     // that never lands, and this suite would HANG rather than report. A hang is
     // the same defect wearing a worse costume — verify.mjs would kill the step
@@ -7835,11 +7842,17 @@ if (group('backend')) {
     ok('dispose() IS NOT QUEUED — a backend that has stopped answering must still be stoppable  '
       + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.dispose() and engine.js onTeardown]',
       f.st.disposed === 1 && hung !== null,
-      f.st.disposed === 1
-        ? 'disposed while a separate() was still outstanding'
-        : 'dispose() waited behind an inference that never lands — teardown hangs and the tab stays muted');
-    hung({ mix: new ArrayBuffer(8), stems: new ArrayBuffer(8), prepMs: 0, inferMs: 0, postMs: 0 });
-    await never;
+      hung === null
+        ? 'the separate() never reached the backend, so nothing was outstanding and this inspected nothing'
+        : f.st.disposed === 1
+          ? 'disposed while a separate() was still outstanding'
+          : 'dispose() waited behind an inference that never lands — teardown hangs and the tab stays muted');
+    // The wrapper settles what it still owes at `dispose()` (S8, #9), so `never`
+    // is ALREADY REJECTED — the fake's own resolution below lands on a promise
+    // nobody is waiting on any more. Adopted rather than awaited bare, because
+    // `await never` is now an unhandled rejection that would kill the suite.
+    if (hung) hung({ mix: new ArrayBuffer(8), stems: new ArrayBuffer(8), prepMs: 0, inferMs: 0, postMs: 0 });
+    await never.then(() => {}, () => {});
     await disposing;
   }
 
