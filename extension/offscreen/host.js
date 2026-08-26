@@ -230,7 +230,7 @@ export const modelBytes = async (onProgress = () => {}) => {
  * `false` WHEN IT CANNOT LOOK, which is the duty's own wording and is why the
  * `catch` is here rather than at the call site. Both awaits below can reject —
  * the Cache API is unavailable when storage is blocked or partitioned away —
- * and `engine.js`'s `STATUS` case awaits this BEFORE `ensureWorker()`,
+ * and `engine.js`'s `STATUS` case awaits this BEFORE `ensureBackend()`,
  * `echoXf()` and `push()`, so a rejection does not become a model error: it
  * abandons the rest of the case, and `handle()`'s catch writes the reason to
  * `state.job.error`, which nothing paints. The deck simply stays blank. `false`

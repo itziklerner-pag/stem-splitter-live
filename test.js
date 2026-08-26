@@ -108,7 +108,18 @@ import {
 
 let pass = 0, fail = 0;
 const only = process.argv.slice(2);
-const group = (n) => !only.length || only.includes(n);
+/**
+ * EVERY NAME `group()` IS ASKED ABOUT, whether or not it ran. It is what makes
+ * the two checks at the foot of this file possible: a filter that matches no
+ * group, and a header list that has drifted from the groups it describes. Both
+ * are the mechanism that let `ola`, `sum` and `wav` sit in that list for months
+ * while `node test.js ola wav` printed `0 passed, 0 failed` and exited 0 —
+ * verify.mjs's VOID rule wearing a summary line. Every `if (group('…'))` at top
+ * level is evaluated on every run, filter or no filter, so this set is complete
+ * by the time the checks read it.
+ */
+const known = new Set();
+const group = (n) => { known.add(n); return !only.length || only.includes(n); };
 
 function ok(name, cond, detail = '') {
   if (cond) { pass++; console.log(`  \x1b[32mPASS\x1b[0m ${name}${detail ? '  ' + detail : ''}`); }
@@ -4750,9 +4761,14 @@ if (group('host')) {
    * TWO SHAPES, because a duty can be reached for in two ways and S6 added the
    * second. A CALL is `host.x(`. A HAND-OFF is `host.x` passed by reference —
    * `assetUrl: host.assetUrl` and `createBackend: host.createBackend` on the
-   * `shared` bundle, `new MasterBus(null, host.assetUrl)` — and those duties are
-   * never called through the namespace at all, so a calls-only scan reports the
-   * newest duty on this seam as dead code.
+   * `shared` bundle, `new MasterBus(null, host.assetUrl)`.
+   *
+   * WHAT THE SECOND SHAPE ACTUALLY ADDED, measured rather than described:
+   * exactly one name, `createBackend`. `assetUrl` was already in the calls-only
+   * set — `engine.js` both hands it off AND calls it, at
+   * `host.assetUrl('offscreen/capture-processor.js')` — so it is `createBackend`
+   * alone that the engine never calls through the namespace, and a calls-only
+   * scan reports it, and only it, as dead code.
    *
    * The hand-off pattern requires a `,`/`)`/`]`/`}` after the identifier rather
    * than matching any `host.x`, because `import * as host from './host.js'`
@@ -5150,7 +5166,7 @@ if (group('host')) {
     const dirCall = probe(engineHost.assetUrl, 'vendor/ort/');
     const dirUrl = dirCall.v;
     ok('...AND A PATH ENDING IN `/` COMES BACK AS A DIRECTORY URL, trailing slash intact  '
-      + '[entry point: extension/offscreen/host.js assetUrl(), reached from deck.js ensureWorker() as the '
+      + '[entry point: extension/offscreen/host.js assetUrl(), reached from workerbackend.js spawn() as the '
       + "worker's INIT wasmDirUrl]",
       dirCall.ok && typeof dirUrl === 'string' && dirUrl.endsWith('/vendor/ort/'),
       !dirCall.ok
@@ -6690,7 +6706,7 @@ if (group('host')) {
      * hole exactly: delete the single line `assetUrl: host.assetUrl` from the
      * `shared` bundle and `--quick` stays GREEN at 18 of 20 steps and
      * `embed-smoke` stays at 122/122, while the shipped extension dies at
-     * module evaluation — `engine.js` calls `decks.A.ensureWorker()` at module
+     * module evaluation — `engine.js` calls `decks.A.ensureBackend()` at module
      * scope and it throws `this.s.assetUrl is not a function`. No INIT, no
      * HELLO, no engine, and nothing red anywhere. That is the exact shape
      * AGENTS.md names as the source of five defects here: a value right at four
@@ -6729,7 +6745,7 @@ if (group('host')) {
         ? 'cannot look: no `const shared = {` in extension/offscreen/engine.js, so there is no bundle to inspect'
         : !onBundle
           ? 'the `shared` bundle does NOT carry `assetUrl: host.assetUrl`. Every deck then reads undefined: '
-            + 'engine.js calls decks.A.ensureWorker() at module scope, so the engine does not boot at all — no INIT '
+            + 'engine.js calls decks.A.ensureBackend() at module scope, so the engine does not boot at all — no INIT '
             + 'to the inference worker and no HELLO to the deck'
           : takers.length !== constructions
             ? `cannot look: ${constructions} deck constructions in engine.js but only ${takers.length} could be read, `
@@ -6776,7 +6792,7 @@ if (group('host')) {
       shortLive != null && shortLive.includes('assetUrl'),
       shortLive == null
         ? 'new Deck(id, {…no assetUrl}) was ACCEPTED. The deck then reads undefined and throws `this.s.assetUrl is not '
-          + 'a function` inside ensureWorker(), three layers from the mistake — and because that construction is at '
+          + 'a function` inside ensureBackend(), three layers from the mistake — and because that construction is at '
           + 'engine.js module scope, the browser gate is the only thing that could have seen it'
         : shortLive);
 
@@ -8218,5 +8234,57 @@ if (group('backend')) {
 }
 
 // ===========================================================================
+/**
+ * THE FILTER HAS TO MATCH SOMETHING. `node test.js nosuchgroup` used to print
+ * `0 passed, 0 failed` and exit 0 — a suite that asserted nothing while
+ * reporting success, which is exactly what `tools/verify.mjs`'s VOID rule calls
+ * a hard failure one level up. A typo'd or renamed group is the same event as a
+ * suite that could not look.
+ *
+ * NOT an `ok()`, because it must not exist as an assertion on a normal run: on
+ * an unfiltered run `only` is empty and there is nothing to check.
+ */
+const unmatched = only.filter((n) => !known.has(n));
+if (unmatched.length) {
+  fail += unmatched.length;
+  console.log(`\n  \x1b[31mFAIL\x1b[0m no group is called ${unmatched.map((n) => `\`${n}\``).join(', ')} — `
+    + `this run would otherwise assert nothing and exit 0. Groups: ${[...known].sort().join(', ')}`);
+}
+
+/**
+ * AND THE HEADER LIST IS COMPUTED AGAINST THEM RATHER THAN MAINTAINED BESIDE
+ * THEM. Three names — `ola`, `sum`, `wav` — described groups that had not
+ * existed for months, and nothing could have noticed: the list is a comment.
+ * The same file argues this for HOST_MODULES 4 000 lines up ("a list that is
+ * COMPUTED cannot be forgotten"), and the argument does not stop at the top of
+ * the file.
+ *
+ * Read out of this file's own header, from the sentence that says the list is
+ * load-bearing to the end of that comment. FAILS IF IT CANNOT LOOK: a header
+ * whose shape this no longer recognises reports zero names, which is a red.
+ */
+{
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./test.js', import.meta.url), 'utf8');
+  const from = src.indexOf('THE GROUP NAMES BELOW');
+  const to = from < 0 ? -1 : src.indexOf('*/', from);
+  const listed = from < 0 || to < 0
+    ? []
+    : [...src.slice(from, to).matchAll(/^ \* {3}(\w+) {2,}\S/gm)].map((m) => m[1]);
+  const groups = [...known].sort();
+  const missing = groups.filter((n) => !listed.includes(n));
+  const stale = listed.filter((n) => !known.has(n));
+  ok('THE HEADER’S GROUP LIST IS THE GROUPS THIS FILE ACTUALLY HAS  '
+    + '[entry point: test.js’s own header, against every name group() was asked about]',
+    listed.length > 0 && missing.length === 0 && stale.length === 0,
+    listed.length === 0
+      ? 'the header list could not be read at all, so this inspected nothing — the block it parses has moved or changed shape'
+      : missing.length || stale.length
+        ? `${stale.length ? `listed but no such group: ${stale.join(', ')}. ` : ''}`
+          + `${missing.length ? `a group nobody documented: ${missing.join(', ')}. ` : ''}`
+          + '`node test.js <a stale name>` asserts nothing and exits 0'
+        : `${groups.length} groups, all described: ${groups.join(', ')}`);
+}
+
 console.log(`\n${fail ? '\x1b[31m' : '\x1b[32m'}${pass} passed, ${fail} failed\x1b[0m`);
 process.exit(fail ? 1 : 0);

@@ -93,9 +93,11 @@
  *   THREE OBLIGATIONS THAT THE TYPE DOES NOT SHOW, each broken by accident by a
  *   plausible second Host, and none of them inferable from `=> string`:
  *   1. A PATH ENDING IN `/` RESOLVES TO A DIRECTORY URL AND KEEPS THE TRAILING
- *      SLASH. `offscreen/deck.js` hands `assetUrl('vendor/ort/')` to the
+ *      SLASH. `workers/workerbackend.js` hands `assetUrl('vendor/ort/')` to the
  *      inference worker's `INIT` and ONNX Runtime appends its own file names to
- *      it. `path.join()` and `url.pathToFileURL()` — the first two things a
+ *      it. (It was `offscreen/deck.js` until S6 put the worker behind
+ *      `createBackend`; the obligation did not move, the caller did.)
+ *      `path.join()` and `url.pathToFileURL()` — the first two things a
  *      Node or Electron Host reaches for — both drop a trailing slash, and R0
  *      measured what that costs: ORT throws "w is not a function" several
  *      layers from the mistake. Review measured the gate's blind spot as well:
@@ -103,11 +105,14 @@
  *      green, because each one resolves through a stub of its own. `test.js`'s
  *      `host` group therefore holds the shipped implementation to this rule
  *      directly, not only through the graph.
- *   2. THE RESULT MUST BE FETCHABLE, with a readable `.ok`. `deck.js` probes the
- *      ORT bundle with `fetch(url, { method: 'HEAD' })` before it spawns a
- *      worker, because a module worker that cannot resolve its static import
- *      fires `onerror` with an EMPTY message. A scheme `fetch` refuses turns
- *      that probe into a false report about a file that is present: `file://`
+ *   2. THE RESULT MUST BE FETCHABLE, with a readable `.ok`.
+ *      `workers/workerbackend.js` probes the ORT bundle with
+ *      `fetch(url, { method: 'HEAD' })` — started in `spawn()` alongside the
+ *      worker and awaited in `load()`, so the diagnosis overlaps the worker's
+ *      own module load instead of serialising in front of it — because a module
+ *      worker that cannot resolve its static import fires `onerror` with an
+ *      EMPTY message. A scheme `fetch` refuses turns that probe into a false
+ *      report about a file that is present: `file://`
  *      is refused outright in Chromium, and an Electron custom scheme needs
  *      `registerSchemesAsPrivileged({ privileges: { supportFetchAPI: true } })`.
  *   3. THE URL MUST BE LOCAL TO THE UNIT'S OWN BUNDLE. M1 — no remote code — is
@@ -147,7 +152,7 @@
  *   `false` when unsure — the deck's question is "may I spend the user's data",
  *   and a wrong `true` spends it without asking. RESOLVES, NEVER REJECTS, and
  *   that is this duty's alone among the three: `engine.js`'s `STATUS` case
- *   awaits it before `ensureWorker()`, `echoXf()` and `push()`, so a rejection
+ *   awaits it before `ensureBackend()`, `echoXf()` and `push()`, so a rejection
  *   there is not a model error — it is a deck that paints nothing at all, with
  *   the reason written to a field nothing reads. A Host whose storage can be
  *   unavailable answers `false` and lets the download offer stand.

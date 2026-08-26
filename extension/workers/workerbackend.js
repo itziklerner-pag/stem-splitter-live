@@ -55,6 +55,27 @@
  * once per capture tick, for ever.
  *
  * DO NOT CHANGE WHICH BUFFERS ARE TRANSFERRED AND WHICH ARE NOT.
+ *
+ * ---------------------------------------------------------------------------
+ * IT IS UNIT CODE THAT NO IMPORT CRAWL OF THE UNIT REACHES — read this before
+ * computing the unit's file list
+ * ---------------------------------------------------------------------------
+ *
+ * This file's ONLY importer in the tree is `offscreen/host.js`, the Host, which
+ * is a declared HOLE in the unit. So a crawl that starts at
+ * `offscreen/engine.js` and stops at the Host — which is what a hole means —
+ * misses this file, and with it `workers/inference.worker.js`,
+ * `engine/demucs.js`, the tensor contract and the six-stem layout: the most
+ * unit-ish code in the repository, sitting behind the one edge a crawl must not
+ * follow. `inference.worker.js` has the same property for a different reason
+ * (`new URL(..., import.meta.url)` is not an import either), which is why
+ * ADR 0001 decision 3 enumerates the unit's worker files BY NAME rather than by
+ * graph. `workerbackend.js` is named there too, as of S6.
+ *
+ * A closure computed rather than listed must therefore SEED this file
+ * explicitly. It is the Host's choice of backend and the unit's implementation
+ * of one at the same time: which is the point of the seam, and the reason the
+ * two facts have to be written down separately.
  */
 
 /**
