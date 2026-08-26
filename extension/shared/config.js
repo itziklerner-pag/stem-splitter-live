@@ -346,6 +346,66 @@ export const MODEL = {
   label: 'HT-Demucs v4 (htdemucs_6s)',
 };
 
+/**
+ * Spotify Basic Pitch (icassp_2022 `nmp`) — the MIDI transcription pin.
+ *
+ * It is here, and not in the three files that read it, because it has THREE
+ * readers and CONTRIBUTING.md's "no config for a value that never changes" cuts
+ * the other way once a value is read twice: `workers/transcribe.worker.js`
+ * (tensor names, input shape, session options), `engine/notes.js` (bin map,
+ * frame counts, thresholds) and `offscreen/transcribe.js` (window/hop
+ * scheduling). It is the same KIND of object as `MODEL` above — an identity plus
+ * a geometry that the unit decides over whatever the Host hands it — and it is
+ * frozen for the same reason.
+ *
+ * ADR 0002 / the owner's ruling R3.
+ */
+export const BASIC_PITCH = Object.freeze({
+  // ---- identity (the pin). ADR 0002 / the owner's ruling R3.
+  asset: 'models/nmp.onnx',        // unit-relative; resolved by EngineHost.assetUrl
+  sha256: '2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec',
+  bytes: 230444,
+  label: 'Spotify Basic Pitch (icassp_2022 nmp)',
+
+  // ---- geometry (verified; DO NOT re-derive)
+  sr: 22050,                       // Hz, MONO, un-normalised
+  window: 43844,                   // samples in, AUDIO_N_SAMPLES, 1.98839 s
+  hop: 36164,                      // samples between window starts, 1.6400907 s
+  preroll: 3840,                   // zeros prepended before the FIRST window
+  fftHop: 256,                     // samples per output frame
+  fps: 22050 / 256,                // 86.1328125 frames/s, exact in binary
+  frames: 172,                     // frames out per window, 1.99692 s
+  trim: 15,                        // frames dropped from EACH end of a window
+  keep: 142,                       // 172 - 2*15
+  bins: 88,                        // note/onset bins
+  contourBins: 264,                // 88 * 3
+  midiLow: 21,                     // note/onset bin i -> MIDI 21 + i
+                                   // contour bin j    -> MIDI 21 + (j - 1) / 3
+
+  // ---- tensors. THE OUTPUT ORDER IS A TRAP: the session declares them
+  // :2, :1, :0 and the SEMANTIC order is note, onset, contour. Bind BY NAME.
+  input: 'serving_default_input_2:0',       // float32 [1, 43844, 1]
+  noteOut: 'StatefulPartitionedCall:1',     // [1, 172,  88]
+  onsetOut: 'StatefulPartitionedCall:2',    // [1, 172,  88]
+  contourOut: 'StatefulPartitionedCall:0',  // [1, 172, 264]
+
+  // ---- decode. These are FUNCTION-SIGNATURE DEFAULTS in
+  // basic_pitch/inference.py::predict, NOT named DEFAULT_* constants.
+  // Do not cite them as constants upstream; cite them as the signature defaults.
+  onsetThreshold: 0.5,
+  frameThreshold: 0.3,
+  minNoteMs: 127.70,               // -> round(0.1277 * fps) = 11 frames
+  energyTol: 11,                   // frames below frameThreshold that end a note
+
+  // ---- session. WASM ONLY. WebGPU CANNOT run this graph:
+  //   [WebGPU] Kernel "[Mul] model_1/cq_t2010v2_1/mul_1;model_1/cq_t2010v2_1/mul_1"
+  //   failed. Error: Can't perform binary op on the given tensors
+  // That string is recorded here so nobody "optimises" the EP list later.
+  executionProviders: ['wasm'],
+  threads: 2,
+  freeDimensionOverrides: { unk__749: 1, unk__750: 1, unk__751: 1, unk__752: 1 },
+});
+
 /** OPFS filenames for finished stems. */
 export const OPFS_DIR = 'exports';
 export const OPFS_DEV_INPUT = 'dev-input.wav';

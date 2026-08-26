@@ -4,7 +4,7 @@
  * it implements and the rules they have to hold are written down in
  * `../shared/host.js`.
  *
- * It is six callable duties and two namespaces long on purpose. The seam is
+ * It is seven callable duties and two namespaces long on purpose. The seam is
  * not an abstraction layer — "no abstraction with one implementation" is a
  * standing rule here — it is the list of things a second application would
  * have to supply, kept short enough that the list itself is the specification.
@@ -20,9 +20,12 @@
  *    it does: the seam speaks ADR 0001 decision 4's `currentTime` where the
  *    wire says `seekTo`.
  *
- * The remaining four — `storageGet`, `storageSet`, `onStorageChanged` and
- * `armShortcut` — are not a wire at all. They read and write platform state
- * (`chrome.storage`, `chrome.commands`) that has no other end to talk to.
+ * The remaining five — `storageGet`, `storageSet`, `onStorageChanged`,
+ * `armShortcut` and `deliver` — are not a wire at all. They read and write
+ * platform state (`chrome.storage`, `chrome.commands`) that has no other end to
+ * talk to, or — for `deliver` — hand one finished file to the browser's own
+ * download machinery through an anchor in this document. See `deliver` below
+ * for why that route needs no permission and no manifest change.
  *
  * LATE BINDING IS THE WHOLE POINT OF THE `send` BODY. `chrome.runtime.sendMessage`
  * is looked up when the message is sent, not when this module is imported,
@@ -34,6 +37,16 @@
  */
 
 import { BUS } from '../shared/host.js';
+/**
+ * THE UNIT DECIDES IDENTITY, THIS FILE DOES THE TRANSPORT. `assertDeliverable`
+ * is the allowlist (`{application/zip, audio/midi}`, ADR 0002 / the owner's
+ * ruling R2) and it lives in the unit precisely so that a second Host cannot
+ * forget to make the check — a guard that lived in a Host would have to be
+ * re-implemented, correctly, once per Host. `qa/midi-pack.mjs` reads THIS FILE
+ * as text and asserts the call happens before the first `new Blob(`, because a
+ * guard the transport can skip is decoration.
+ */
+import { assertDeliverable } from '../shared/midi.js';
 
 /**
  * This context's address on the bus, READ OUT OF THE SEAM'S OWN DECLARATION.
@@ -98,6 +111,17 @@ function assertArea(area) {
  * the literal, so a template string is the same as deleting it.
  */
 const NS = 'stem-splitter-live';
+
+/**
+ * HOW LONG THE PACK'S `blob:` URL IS KEPT ALIVE AFTER THE ANCHOR IS CLICKED.
+ *
+ * A minute, and it is not a round number chosen for looks: the click starts a
+ * fetch of the blob that Chrome completes on its own schedule, and there is no
+ * event on this page that says it finished. Sixty seconds is far beyond the
+ * milliseconds a few hundred KB actually take and far short of leaking for the
+ * life of the deck. See `deliver` below for what a shorter one does.
+ */
+const DELIVER_REVOKE_MS = 60_000;
 
 /**
  * IS THERE A PAGE ABOVE THIS DECK THAT OWNS A PLAYER?
@@ -278,6 +302,76 @@ export const host = {
     const all = await chrome.commands.getAll();
     const cmd = (all || []).find((c) => c.name === 'arm-tab');
     return (cmd && cmd.shortcut) || null;
+  },
+
+  /**
+   * THE ONE FILE THIS PRODUCT HANDS BACK, and the whole of how it leaves.
+   *
+   * NO `downloads` PERMISSION, AND NONE IS NEEDED. An extension page can mint a
+   * `blob:` URL at its own origin and click an anchor at it; the browser's own
+   * download machinery does the rest. `chrome.downloads` buys a filename the
+   * user cannot change, a directory and a progress event — none of which this
+   * gesture wants — at the price of a permission in the install prompt that
+   * `tools/tree-check.mjs` asserts is absent. That absence is load-bearing:
+   * it is the platform withholding what a grep cannot (ADR 0002 / ruling R6).
+   *
+   * THE ORDER OF THE FOUR STEPS IS THE CONTRACT. `assertDeliverable` runs
+   * BEFORE the Blob exists, so there is never a moment where bytes this product
+   * has not vouched for have a URL. `qa/midi-pack.mjs`'s last section reads this
+   * function as text and compares the two positions; move the guard below the
+   * Blob and it goes red.
+   *
+   * IT THROWS RATHER THAN REPORTS. A refusal here is the call site being wrong
+   * about a file it built itself — the same shape as the storage-area refusal
+   * above — so it is loud at the line that made the mistake and is not
+   * swallowed into a boolean nobody checks.
+   *
+   * THE ANCHOR HAS TO BE IN THE DOCUMENT. A detached `<a>` does not dispatch a
+   * download in Chrome; `document.body.append` then `.remove()` is the smallest
+   * thing that does. `rel="noopener"` because this is a navigation-shaped
+   * element even though the download never opens a window.
+   *
+   * NO SANDBOX APPLIES. Chrome blocks downloads started from a sandboxed frame
+   * unless `allow-downloads` is present, and this deck's frame carries no
+   * `sandbox` attribute at all (`content.js` sets only `frame.allow = ''`), so
+   * that rule is not in play. It is written down because a future slice adding
+   * `sandbox` to that iframe would break this silently — the click would simply
+   * do nothing, with a console warning on the HOST page rather than here.
+   *
+   * AND `saved` IS NOT `on disk`. Nothing observable to this page says whether
+   * the user completed or cancelled the browser's save dialog, so this returns
+   * undefined and the deck's `saved` state means "handed over" and leaves
+   * `Save again` live. Inventing a boolean here is exactly the lie the Host
+   * freeze was judged against.
+   */
+  deliver(name, bytes, mime) {
+    assertDeliverable(name, bytes, mime);
+    const url = URL.createObjectURL(new Blob([bytes], { type: mime }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.rel = 'noopener';
+    document.body.append(a);
+    a.click();
+    a.remove();
+    /**
+     * WHY THIS IS A TIMER AND NOT A SYNCHRONOUS REVOKE, because it is the one
+     * line of `deliver` whose reason cannot be seen from the code.
+     * `.click()` only STARTS the browser's fetch of the blob. Revoking in the
+     * same turn pulls the source out from under a download that has not begun,
+     * and the file then simply never appears — with nothing logged on either
+     * side, which is what makes it expensive to find. The URL has to outlive
+     * the turn that started it. (ADR 0002 / the owner's ruling R6, which fixes
+     * this route; not re-measured here.)
+     *
+     * ponytail: ceiling — the pack (a few hundred KB) is held alive for
+     * DELIVER_REVOKE_MS after every save, and a user who saves ten times holds
+     * ten copies for a minute. Upgrade path: there is no event on the page for
+     * "the download has begun", so the honest fix is a bigger change — hand the
+     * bytes to a Host duty that owns the file system and can answer — which is
+     * `deliver`'s v2 shape and needs a caller behind it, not a shorter timer.
+     */
+    setTimeout(() => URL.revokeObjectURL(url), DELIVER_REVOKE_MS);
   },
 
   /**

@@ -17,6 +17,18 @@
     "not listed as a root: it is reachable, and a rename of it is an unresolved",
     "reference rather than a hand-written path that quietly stopped matching.",
     "",
+    "workers/transcribe.worker.js (ADR 0002) is the SAME case and is deliberately",
+    "NOT a root either. offscreen/transcribe.js starts it with",
+    "new URL('../workers/transcribe.worker.js', import.meta.url), and that",
+    "referrer is itself a unit file the crawl reaches — offscreen/engine.js",
+    "imports it — so the worker joins the closure by being referenced, which was",
+    "measured rather than assumed: before this file declared anything about it,",
+    "tools/unit-check.mjs already named it among the closure files no clause",
+    "covered. What makes workerbackend.js a root is its REFERRER, not the form of",
+    "the reference: its only importer is a hole, and a crawl stops where a hole",
+    "starts. Seeding a reachable file as a root anyway would buy nothing and cost",
+    "the assertion that its referrer still names it.",
+    "",
     "workerbackend.js IS a root, for the opposite reason: since S6 (#8) its only",
     "importer in the tree is offscreen/host.js, a declared hole, so a crawl that",
     "stops where a hole starts — which is what a hole means — misses it, and with",
@@ -129,6 +141,15 @@
       "entry": "vendor/ort/ort.all.bundle.min.mjs",
       "fetch": "tools/fetch-vendor.sh",
       "why": "ONNX Runtime Web. Not in git, not in the unit, and not this project's code: fetched at a pinned version and verified against a recorded SHA-256 by tools/fetch-vendor.sh. A vendoring product runs that script rather than copying the drop. The crawl stops at this prefix — walking 27 MB of minified runtime looking for `chrome.` would only ever produce a false red."
+    },
+    {
+      "prefix": "models/",
+      "entry": "models/nmp.onnx",
+      "fetch": "docs/VENDORING.md",
+      "committed": true,
+      "sha256": "2c3c1d144bfa61ad236e92e169c13535c880469a12a047d4e73451f2c059a0ec",
+      "bytes": 230444,
+      "why": "Spotify Basic Pitch (icassp_2022 nmp), from spotify/basic-pitch @ 9991303bba609a3b93089d13ec80d1d495083596 (tag v0.4.0), path basic_pitch/saved_models/icassp_2022/nmp.onnx. THE SECOND KIND OF EXTERNAL, and the field that says which is `committed`. vendor/ort/ is fetched and never redistributed; this one is IN GIT and travels with the copy, which is ADR 0002 / the owner's ruling R3: Apache-2.0 covers the code AND the weights, 225 KiB is not a large binary, and committing it removes the single point of failure, the fetch-script edit, the CI cache widening and the README install line in one move. .gitignore's blanket *.onnx carries a whole-path exception for exactly this file — a whole path rather than a glob, so it can re-include nothing else — and makes the same argument in its own words. `fetch` therefore points at a DOCUMENT rather than a script, because for a committed entry the recipe is `copy these bytes` and there is nothing to run — docs/VENDORING.md §6 is that recipe, it names this prefix, and tools/unit-check.mjs holds it to that. TWO CONSEQUENCES A READER SHOULD NOT DISCOVER LATER. One: the `note` line tools/unit-check.mjs prints for every external entry reads `not in git by design`, which is true of vendor/ort/ and FALSE of this one; that file is frozen (S11/#12) and the line is a note rather than an assertion, so it is recorded here instead of edited there. Two: `entry` means something different for a committed entry. vendor/ort/'s names the module the unit imports; this one names the file the unit ASKS THE HOST FOR — shared/config.js's BASIC_PITCH.asset, resolved through EngineHost.assetUrl — so no crawl reaches it and the sha256 and bytes above are the only thing that says these bytes are the model. The prefix is declared so the crawl stops here and so the partition at the end of tools/unit-check.mjs does not read 225 KiB of tracked weights as an unclassified orphan; NOTICE.basic-pitch sits under the same prefix and travels for the same reason, and Apache §4(d) is why it is not optional."
     }
   ],
 
@@ -225,14 +246,15 @@
         "offscreen/worklets.js",
         "offscreen/capture-processor.js",
         "offscreen/playback-processor.js",
-        "offscreen/master-meter-processor.js"
+        "offscreen/master-meter-processor.js",
+        "offscreen/transcribe.js"
       ],
-      "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it."
+      "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it. offscreen/transcribe.js joins the list with ADR 0002: it is the MIDI take's orchestration — the ring tap, the lanes, the anchor, the seq and the worker — and it is engine-side for the same reason live.js is, so this hand list is where it has to be added. A clause this directory could take wholesale would have swept host.js in with it, which is the whole reason it is a list."
     },
     {
-      "adr": "extension/workers/ — inference.worker.js and, since S6 (#8), workerbackend.js",
-      "paths": ["workers/inference.worker.js", "workers/workerbackend.js"],
-      "why": "ADR 0001 decision 3, verbatim, including the sentence S6 added to it. Named rather than taken wholesale for the reason the ADR gives in the same breath: neither file is reachable by import from the unit's entry point, so an enumeration is the only thing that can carry them — inference.worker.js because new URL(..., import.meta.url) is not an import, workerbackend.js because its one importer is a hole."
+      "adr": "extension/workers/ — inference.worker.js, workerbackend.js since S6 (#8), and transcribe.worker.js since ADR 0002",
+      "paths": ["workers/inference.worker.js", "workers/workerbackend.js", "workers/transcribe.worker.js"],
+      "why": "ADR 0001 decision 3, verbatim, including the sentence S6 added to it, plus the third worker ADR 0002 adds under the same `extension/workers/` heading. Named rather than taken wholesale for the reason the ADR gives in the same breath: neither of the first two is reachable by import from the unit's entry point, so an enumeration is the only thing that can carry them — inference.worker.js because new URL(..., import.meta.url) is not an import, workerbackend.js because its one importer is a hole. THE THIRD IS HERE FOR A DIFFERENT REASON, and the difference matters when the next worker lands: transcribe.worker.js IS reached — offscreen/transcribe.js names it with new URL(..., import.meta.url) and the crawl follows that form — so it is in the closure on its own, and it is enumerated here only because this clause is a hand list and the clauses must cover the closure. That is also why it is not in `roots`: a root is for a file no crawl can reach, and seeding a reachable one would cost the assertion that its referrer still names it. See the doc block above."
     },
     {
       "adr": "the deck is extension/ui/embed*.js",
@@ -303,6 +325,32 @@
       "step": "bpmtap",
       "path": "extension/engine/bpmtap.js",
       "why": "A unit file that is its own suite: the onset envelope, the octave tie-break, beat phase."
+    },
+    {
+      "step": "drumtap",
+      "path": "extension/engine/drumtap.js",
+      "why": "A unit file that is its own suite, and bpmtap's neighbour rather than its reuse: it shares the 150/3000 Hz crossover and the 441-frame hop, and it KEEPS the three pre-normalisation band envelopes that bpmtap.js sums away — that file's own header says the per-band normalisation is the octave fix, which is precisely the cue a drum classifier needs. The suite carries the control the owner's ruling R4 asks for: a stub detector that answers GM_KICK for everything is run over the backbeat fixture and asserted to FAIL it, so the classification assertion is a measurement and not a second copy of itself."
+    },
+    {
+      "step": "resample2",
+      "path": "extension/engine/resample2.js",
+      "why": "A unit file that is its own suite: the 2:1 decimator and mono sum that feed the pitched lanes at 22 050 Hz. Pure, and it travels because it is unit. Its stopband assertion has a control that can lose — the naive decimator is written into the suite, run over the same 18 kHz stimulus, and asserted to fail the same threshold the FIR path passes — and its phase-continuity claim is an exact array comparison across a split block, a COUNT with no clock anywhere in it."
+    },
+    {
+      "step": "notes",
+      "path": "extension/engine/notes.js",
+      "why": "A unit file that is its own suite: Basic Pitch's three heads decoded into closed notes, and the frame grid that turns kept frame k of window w into a lane sample. The grid is the assertion that matters to a copy — the naive `(w*142 + k)*256` map is written into the suite as a negative control and asserted to disagree by exactly 188 samples per window, which is the 0.52 % drift the contract fixed. It speaks lane samples and nothing else: no ORT, no worker, no stem, which is what lets it be checked under plain node at all."
+    },
+    {
+      "step": "transcribe",
+      "path": "extension/offscreen/transcribe.js",
+      "why": "A unit file that is its own suite, and the ORCHESTRATION the three above are parts of: it taps the stem ring, clocks the five pitched lanes at 22 050 Hz, cuts model windows out of the lane ring, numbers what it publishes and latches a fault. It is unit for the same reason offscreen/live.js is — it reaches for its Host and for nothing else — and it is checked under plain node because every assertion in it is a COUNT: sample indices, window boundaries, seq numbers, coverage spans, message shapes, over a fake worker port. It had no step for a batch while it self-checked 87 assertions and exited non-zero on failure, and it was RED (86 passed, 1 failed) the moment a runner was pointed at it, which is the §3 rule in tools/verify.mjs meeting the newest code in the tree."
+    },
+    {
+      "step": "midi-pack",
+      "path": "qa/midi-pack.mjs",
+      "reads": ["ui/host.js"],
+      "why": "THE ACCEPTANCE GATE FOR ADR 0002 / the owner's ruling R2, and the unit's because its subject is shared/midi.js and shared/zip.js — the SMF writer, the pack layout, the deck's take and the delivery guard, all four of them unit files. It builds a REAL pack and asserts every zip entry begins MThd, and then it builds a pack containing a WAV from this repo's own encodeWav and asserts assertDeliverable REFUSES it: a control that can lose, which is what makes the allowlist a gate rather than a convention. It carries its own SMF parser, written from the format rather than from the writer, because a writer checked by its own reader checks that the two agree. THE ONE READ ACROSS THE SEAM is ui/host.js, a hole, and it is there because the last claim in the file spans both sides: DECK_HOST_DUTIES (unit) declaring `deliver` and ui/host.js (Host) implementing it must land together, and where it is implemented the guard must run before the first Blob. A copy supplies its own file at that path — it must; it is a hole — so the read succeeds and grades the copy's own Host, which is the honest outcome for a claim about a duty the copy discharges itself."
     },
     {
       "step": "speed-pitch",

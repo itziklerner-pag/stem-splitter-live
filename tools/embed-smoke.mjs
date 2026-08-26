@@ -1490,6 +1490,241 @@ try {
     + `  ${hFinal} px frame, ${bodyH} px content, settled in ${settleMs} ms of ${SETTLE_BUDGET_MS}`);
   ok(hFinal < 900, `...and inside the clamp with room to spare (${hFinal} px)`);
 
+  // ============================================================== the MIDI row
+  /**
+   * THE MIDI ROW, THE THREE GESTURES AND THE FILE THIS PRODUCT HANDS OVER —
+   * driven in a real browser for the first time.
+   *
+   * WHY THIS BLOCK EXISTS. Until it did, this file — the repo's ONLY browser
+   * gate — contained the string "midi" zero times. `#midi-arm`, `#midi-go`,
+   * `#midi-x`, `armTake`, `flushTake`, `savePack`, `MidiTake.accept`,
+   * `packEntries`, `zipStore` and `host.deliver` had never been executed in a
+   * browser by any gate at all, and two blocking defects in the engine half of
+   * the same feature lived through a batch behind that gap.
+   *
+   * THE NOTES ARE INJECTED FROM THE SERVICE WORKER, which is this file's existing
+   * technique for putting a real message on a real bus (see `runState` and the
+   * key block): `chrome.runtime.sendMessage` out of the worker is the only way to
+   * reach this frame, and what arrives is the same `MIDI_NOTES` the engine sends
+   * into the same handler. Nothing is stubbed on the deck's side.
+   *
+   * WHY THE TAKE IS CLOSED BY AN INJECTED `MIDI_FLUSHED` RATHER THAN BY PRESSING
+   * "Convert now", and it is a constraint rather than a shortcut. `MIDI_START`
+   * really does open a take in the offscreen engine, and that take has its own
+   * `seq` counter starting at 0. Press Convert and the engine answers with ITS
+   * `MIDI_NOTES` seq 1 — which, against a deck whose stream this harness has
+   * already seeded, is a genuine gap and turns the row red. So the save path is
+   * driven on a take the harness closes itself, and the CONVERT gesture gets its
+   * own take below, where the engine's answer is the thing being asserted.
+   */
+  const midiView = () => frame.locator('body').evaluate(() => globalThis.__embed.midi);
+  const midiSay = async (label) => `${label} ${JSON.stringify(await midiView())}`;
+  /** One `MIDI_NOTES` on the real bus, from the worker, addressed to this deck. */
+  const midiNotes = (seq, from, to, notes) => sw.evaluate(([q, a, b, ns]) => chrome.runtime.sendMessage({
+    v: 1, to: 'ui', from: 'off', type: 'MIDI_NOTES',
+    deck: 'A', seq: q, spanFrom: a, spanTo: b, covered: true, notes: ns,
+  }).catch(() => {}), [seq, from, to, notes]);
+  const midiFlushed = (seq) => sw.evaluate((q) => chrome.runtime.sendMessage({
+    v: 1, to: 'ui', from: 'off', type: 'MIDI_FLUSHED', deck: 'A', seq: q,
+  }).catch(() => {}), seq);
+
+  ok(await frame.locator('#midibox').isVisible() === false && await frame.locator('#midi-arm').isVisible(),
+    'with no take, the MIDI row is away and the arm control is the only thing on screen — one control at a time');
+  ok(await frame.locator('#midi-arm').isEnabled(),
+    '...and it is live on an ARMED deck, which is the only state it can do anything in');
+
+  await frame.locator('#midi-arm').click();
+  await page.waitForTimeout(300);
+  const armed = await midiView();
+  ok(armed.phase === 'open' && await frame.locator('#midibox').isVisible()
+    && await frame.locator('#midi-arm').isVisible() === false,
+    `ARMING OPENS A TAKE AND THE ROW REPLACES THE CONTROL  ${JSON.stringify(armed)}`);
+  ok(armed.notes === 0 && armed.coveredSec === 0,
+    `...holding nothing yet, which is a different fact from "no take" and reads differently  notes ${armed.notes}, ${armed.coveredSec}s`);
+
+  // Three hops of a real-looking take: two stems, on the 1 ms grid, spans
+  // contiguous at the shipped 1.95 s hop.
+  const N = (stem, pitch, onSec) => ({ stem, pitch, vel: 96, onSec, offSec: onSec + 0.4 });
+  await midiNotes(1, 0, 1.95, [N('piano', 60, 0.5), N('piano', 64, 1.0), N('drums', 36, 1.5)]);
+  await midiNotes(2, 1.95, 3.9, [N('piano', 67, 2.0), N('bass', 40, 2.5), N('drums', 38, 3.0)]);
+  await midiNotes(3, 3.9, 5.85, [N('piano', 72, 4.0), N('bass', 43, 4.5), N('drums', 42, 5.0)]);
+  await page.waitForTimeout(300);
+  const grown = await midiView();
+  ok(grown.notes === 9 && Math.abs(grown.coveredSec - 5.85) < 1e-6 && grown.bad === false,
+    `THE DECK HOLDS THE TAKE: nine notes over three hops arrive through the real MIDI_NOTES handler and MidiTake.accept`
+    + `  ${JSON.stringify(grown)}`);
+  ok(/5\.8|0:05/.test(await frame.locator('#midi-cov').textContent()),
+    `...and the coverage figure on screen is those seconds and not a spinner  "${(await frame.locator('#midi-cov').textContent()).trim()}"`);
+
+  await midiFlushed(3);
+  await page.waitForTimeout(300);
+  const ready = await midiView();
+  ok(ready.phase === 'done' && ready.show === 'ready' && ready.bad === false,
+    `A COMPLETE SEQ RUN CLOSES THE TAKE AND OFFERS THE PACK  ${JSON.stringify(ready)}`);
+  ok((await frame.locator('#midi-go').textContent()).trim() === 'Save MIDI pack',
+    `...and the one primary button has become the save gesture  "${(await frame.locator('#midi-go').textContent()).trim()}"`);
+
+  /**
+   * THE DELIVERY, CAUGHT AT THE SEAM. `DeckHost.deliver` runs
+   * `assertDeliverable` — the guard the whole feature is gated on — and then
+   * mints a Blob and clicks an anchor. Both halves are intercepted here:
+   * `URL.createObjectURL` hands over the Blob the guard has already passed, and
+   * `HTMLAnchorElement.prototype.click` records the file NAME and stops the
+   * download.
+   *
+   * THE DOWNLOAD IS SUPPRESSED ON PURPOSE and it is the only thing this patch
+   * changes: a gate must not write a file onto the machine that runs it, and the
+   * claim being made is about the bytes `deliver` was handed and the guard it put
+   * them through, not about Chrome's file picker. Everything up to and including
+   * `a.click()` really runs.
+   *
+   * `hasAttribute('download')` narrows it to exactly the one anchor `deliver`
+   * makes; every other click in this document goes through untouched.
+   */
+  await frame.locator('body').evaluate(() => {
+    globalThis.__delivered = [];
+    const realCreate = URL.createObjectURL.bind(URL);
+    URL.createObjectURL = (blob) => { globalThis.__deliveredBlob = blob; return realCreate(blob); };
+    const realClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function patched(...a) {
+      if (this.hasAttribute('download')) {
+        globalThis.__delivered.push({ name: this.getAttribute('download'), rel: this.rel });
+        return undefined;
+      }
+      return realClick.apply(this, a);
+    };
+  });
+  await frame.locator('#midi-go').click();
+  await page.waitForTimeout(400);
+  const handed = await frame.locator('body').evaluate(async () => {
+    const rec = (globalThis.__delivered || [])[0] || null;
+    const blob = globalThis.__deliveredBlob || null;
+    if (!rec || !blob) return { rec, type: null, b64: null };
+    const u8 = new Uint8Array(await blob.arrayBuffer());
+    let bin = '';
+    for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+    return { rec, type: blob.type, b64: btoa(bin) };
+  });
+  /**
+   * THE ZIP IS READ HERE AND NOT WITH `shared/zip.js`, because the writer under
+   * test and the reader are the same file: a packer that wrote the wrong magic
+   * and a reader that looked in the wrong place would agree perfectly. This walks
+   * the local file headers by hand — `PK\x03\x04`, the two length fields, the
+   * name, then the data, which for a STORED entry starts at its first byte.
+   */
+  const zipEntriesRaw = (buf) => {
+    const out = [];
+    for (let i = 0; i + 30 <= buf.length; i++) {
+      if (buf.readUInt32LE(i) !== 0x04034b50) continue;
+      const nLen = buf.readUInt16LE(i + 26), xLen = buf.readUInt16LE(i + 28);
+      const name = buf.toString('utf8', i + 30, i + 30 + nLen);
+      const at = i + 30 + nLen + xLen;
+      out.push({ name, magic: buf.toString('latin1', at, at + 4) });
+    }
+    return out;
+  };
+  const packBytes = handed.b64 ? Buffer.from(handed.b64, 'base64') : Buffer.alloc(0);
+  const entries = zipEntriesRaw(packBytes);
+  /**
+   * `entries.length >= 7 &&` is the "must fail when it cannot look" half:
+   * `every()` on an empty array is TRUE, so a delivery that never happened, or a
+   * zip this reader could not walk, would report every entry well-formed on
+   * precisely the run where it read none. The pack is seven files by
+   * `PACK_ENTRIES` — six stems and one combined.
+   */
+  ok(!!handed.rec && handed.type === 'application/zip' && entries.length >= 7
+    && entries.every((e) => e.magic === 'MThd') && entries.every((e) => /\.mid$/.test(e.name)),
+    'SAVE HANDS host.deliver() A ZIP WHOSE EVERY ENTRY BEGINS MThd — the one file this product gives back, built and delivered in a real browser'
+    + `  ${entries.length} entries, ${packBytes.length} bytes, mime ${JSON.stringify(handed.type)}, `
+    + `names ${JSON.stringify(entries.map((e) => e.name))}, magics ${JSON.stringify([...new Set(entries.map((e) => e.magic))])}`);
+  ok(!!handed.rec && /\.zip$/.test(handed.rec.name) && /MIDI/.test(handed.rec.name),
+    `...under a filename that says what it is, on an anchor deliver() minted itself  ${JSON.stringify(handed.rec && handed.rec.name)}`);
+  const saved = await midiView();
+  ok(saved.saved === true && (await frame.locator('#midi-go').textContent()).trim() === 'Save again',
+    `...and the row says it has been handed over, without claiming it reached the disk — nothing on this page can know that  ${JSON.stringify(saved)}`);
+
+  await frame.locator('#midi-x').click();
+  await page.waitForTimeout(300);
+  ok((await midiView()).phase === 'off' && await frame.locator('#midi-arm').isVisible(),
+    await midiSay('discarding the pack puts the row away and the arm control back'));
+
+  /**
+   * ---- CONVERT NOW, AND THE ROUND TRIP IT MAKES.
+   *
+   * `Convert now` is `flushTake('flush')`: it sends `MIDI_FLUSH` to the offscreen
+   * engine and waits. Nothing on this page can see that message land, so the
+   * proof is the ANSWER — and the answer is legible precisely because this
+   * harness seeded the deck's `seq` stream and the engine's own take starts at 1.
+   * A `MIDI_NOTES` seq 1 arriving where 2 was expected is a real gap and the deck
+   * says so, which is this feature's ONE failable claim firing in a browser.
+   *
+   * THE DISCRIMINATOR IS THE SENTENCE, not the colour. A Convert that reached
+   * nobody ALSO turns the row red — `onFlushDeadline` faults the take after
+   * `latencySec + 2 s` — so "it went red" would pass on the run where the message
+   * never left. The `title` on `#midibox` carries `MidiTake.why`, and the two
+   * reasons are different sentences: a seq gap names the sequence numbers, a
+   * dead engine names the deadline. Only the first one is asserted.
+   */
+  await frame.locator('#midi-arm').click();
+  await page.waitForTimeout(300);
+  // One covered hop with no notes: `Convert now` is disabled on a take with no
+  // coverage at all, and that is `paintMidi`'s own rule rather than a quirk.
+  await midiNotes(1, 0, 1.95, []);
+  await page.waitForTimeout(250);
+  ok(await frame.locator('#midi-go').isEnabled()
+    && (await frame.locator('#midi-go').textContent()).trim() === 'Convert now',
+    await midiSay('a take with coverage offers Convert now'));
+  /**
+   * THE PRESS AND THE READ ARE ONE SYNCHRONOUS TURN, and that is not a shortcut
+   * around a real click — it is the only way this claim can be made at all.
+   * `finishing` is a state the engine ENDS: measured on this box, its answer to
+   * `MIDI_FLUSH` came back across four contexts in 2 ms, so a `.click()` followed
+   * by any read at all — even with no wait between them — is sampling after a
+   * message that may already have landed. Clicking the button from inside the
+   * frame and reading `__embed.midi` in the same turn cannot be beaten by a
+   * message, because a message is a task and this is one task.
+   *
+   * It is a REAL click on the real button and it runs the real handler — the same
+   * technique, and the same reason, as the forced click in the ad-gate block.
+   */
+  const finishing = await frame.locator('body').evaluate(() => {
+    document.getElementById('midi-go').click();
+    return {
+      midi: globalThis.__embed.midi,
+      go: document.getElementById('midi-go').disabled,
+      x: document.getElementById('midi-x').disabled,
+    };
+  });
+  ok(finishing.midi.phase === 'finishing' && finishing.go === true && finishing.x === true,
+    `CONVERT CLOSES THE TAKE AND LOCKS BOTH CONTROLS — the take is not the deck's to throw away until the engine has handed the last of it over`
+    + `  phase ${finishing.midi.phase}, #midi-go disabled ${finishing.go}, #midi-x disabled ${finishing.x}`);
+
+  // Wait for the CONDITION — the engine's answer crossing four contexts — and
+  // not for a clock. A deck that never hears back spins to the cap and then
+  // reports what it did hear, which is the sentence worth reading.
+  const ANSWER_BUDGET_MS = 8000;
+  let answered = null, answerMs = 0;
+  {
+    const t0 = Date.now();
+    for (;;) {
+      answered = await midiView();
+      answerMs = Date.now() - t0;
+      if (answered.phase !== 'finishing' || answered.bad === true || answerMs > ANSWER_BUDGET_MS) break;
+      await page.waitForTimeout(50);
+    }
+  }
+  const whyTitle = ((await frame.locator('#midibox').getAttribute('title')) || '').trim();
+  ok(answered.bad === true && /seq 1 arrived where 2 was expected/.test(whyTitle),
+    'THE CONVERT GESTURE REACHED THE OFFSCREEN ENGINE AND THE ENGINE ANSWERED — proved by the answer\'s own seq, not by a colour: this take\'s stream was seeded here and the engine\'s starts at 1, so its reply is a real gap and the deck SAYS so'
+    + `  ${JSON.stringify(whyTitle)}  (settled in ${answerMs} ms of ${ANSWER_BUDGET_MS})`);
+  ok(await frame.locator('#midi-go').isVisible() === false,
+    '...and a take the deck cannot vouch for is offered no Save at all, which is the whole reason the row is visible on a bad take');
+
+  await frame.locator('#midi-x').click();
+  await page.waitForTimeout(300);
+  ok((await midiView()).phase === 'off',
+    await midiSay('and it is discardable, so the deck is left as the block below expects to find it'));
+
   // ===================================================== the armed-state gate
   /**
    * THE PRODUCT RULING, and the half that is easy to forget: with NO deck armed,

@@ -64,6 +64,24 @@ import { displayKey, INSTRUMENTS, DISPLAY_POLICY } from '../engine/chroma.js';
  * and the window the detector actually fills must not be able to drift apart.
  */
 import { beatPhaseAt, BPM_WINDOW_SEC } from '../engine/bpmtap.js';
+/**
+ * THE MIDI TAKE, and everything about it that can be decided without a DOM.
+ *
+ * `MidiTake` is where the deck's one FAILABLE claim lives — `MIDI_NOTES.seq` is
+ * monotonic and gapless per take, and a gap means notes that can never be asked
+ * for again — so it is pure and gated under `node` by `qa/midi-pack.mjs` rather
+ * than only in a browser. This file holds the DOM half and nothing else: which
+ * of the eight `data-show` values is on screen, which fine line, and the three
+ * gestures. `packEntries` + `zipStore` turn a closed take into the seven files;
+ * `packName` sanitises the video's title into the archive's.
+ *
+ * `PACK_ENTRIES.length` is read rather than the number 7 typed out, so the
+ * sentence under the row cannot drift from the pack it describes.
+ */
+import {
+  MidiTake, packEntries, packName, PACK_ENTRIES, MIDI_TEMPO_FALLBACK_BPM,
+} from '../shared/midi.js';
+import { zipStore } from '../shared/zip.js';
 
 /** This build has one deck and it is A. Never a default — always sent. */
 const DECK = 'A';
@@ -842,7 +860,17 @@ function onVideoState(d) {
   // FRESH video clock — read microseconds ago, in this very event. This is the
   // only tick allowed to compute a correction; see syncVideoLock.
   lastVideoSec = Number(d.currentTime) || 0;
+  lastVideoDur = Number(d.duration);
   syncVideoLock(true);
+  /**
+   * THE VIDEO ENDED, SO THE TAKE IS OVER. This is `finishing`'s second entry
+   * point — the first is the `Convert now` button — and it is here rather than
+   * on a `LIVE_STATE` because `ended` is the page's fact about the page's
+   * player and nothing on the wire carries it back. `flushTake` refuses
+   * anything but an open take, so the flag staying true until the next seek
+   * costs nothing.
+   */
+  if (d.ended === true) flushTake('flush');
   /**
    * THE ELEMENT'S OWN RATE. `ratechange` is in content.js's VIDEO_EVENTS, so
    * YouTube's speed menu moving the rate on a PAUSED video arrives here rather
@@ -861,6 +889,16 @@ function onVideoState(d) {
    * repaint costs nothing when nothing changed.
    */
   paintBpm();
+  /**
+   * ...AND THE MIDI ROW, on the same message and for a third reason: the rail's
+   * HEAD is the video's own position, which only this message carries. At the
+   * page's ~4 Hz `timeupdate` that is the cheapest honest cadence for it, and
+   * `text()` plus the rail's signature mean a tick that changed nothing writes
+   * nothing. The pause line (slot 6) also lives on `videoPlaying`, which is set
+   * below — so this call catches the head and the one after `reconcile()`
+   * catches the state word.
+   */
+  paintMidi();
 
   if (playing === videoPlaying) return;
   videoPlaying = playing;
@@ -899,6 +937,20 @@ function onVideoState(d) {
  */
 /** The video clock, from the last `timeupdate` the page volunteered. */
 let lastVideoSec = 0;
+/**
+ * ...AND ITS DURATION, from the same message. Held because the MIDI row's rail
+ * is drawn on the VIDEO'S OWN TIMELINE and needs its length: `LIVE_STATE`'s
+ * `durationSec` is published by `cacheddeck.js` alone (it is the cached track's
+ * length, not the page's), so on a live deck it is 0 and the page is the only
+ * source. It is the same number that already goes out on `PAGE_VIDEO` one line
+ * below, read here instead of being asked for twice.
+ *
+ * A LIVESTREAM HAS NO USABLE ONE — `duration` is `Infinity` while it runs and 0
+ * before metadata — and `midiFigure`/`paintRail` both discriminate on
+ * `Number.isFinite(dur) && dur > 0`, because a proportion you cannot compute
+ * must not be drawn as one.
+ */
+let lastVideoDur = 0;
 /** Are we currently driving the element? Drives the release on the way out. */
 let videoLocked = false;
 /** The last rate we asked for, so a 14 Hz loop does not re-send the same one. */
@@ -1098,6 +1150,9 @@ function paint() {
   paintStatus();
   paintBanner();
   paintStrips();
+  // The MIDI row and its trigger both read `session.armed` and the deck's live
+  // state, so they repaint with everything else rather than on their own path.
+  paintMidi();
 }
 
 /**
@@ -1920,6 +1975,656 @@ const BPM_STATE_TEXT = {
   bad: 'BPM unavailable',
 };
 
+// --------------------------------------------------------------------- MIDI
+/**
+ * THE MIDI TAKE — the deck's half of ADR 0002 / the owner's ruling R5 and R6.
+ *
+ * The engine transcribes the six stems as the song plays and sends one
+ * `MIDI_NOTES` per published hop; THE DECK HOLDS THE TAKE, builds the pack when
+ * the user asks for it, and hands it over through `host.deliver`. Nothing here
+ * knows what a note is or what a lane is: the notes arrive on the wire in
+ * SOURCE SECONDS on the video's own clock, which is what makes a seek, a pause,
+ * an ad and a non-unity speed fall out of the arithmetic instead of each
+ * needing a special case.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THERE ARE EIGHT STATES AND NOT FOUR. Two of them exist ONLY to prevent a
+ * lie, and they are the reason this row is worth its 63 px:
+ *
+ *   `empty` — the take closed with zero notes, and there is NO SAVE BUTTON. A
+ *     zip of seven empty files is a confident-looking nothing, and the user
+ *     would have no way to tell it from a real transcription of a quiet song.
+ *     `packEntries` refuses the same case one layer down; this state is what
+ *     makes the refusal something the user reads rather than something they
+ *     trip over.
+ *
+ *   `bad` — a gap in `MIDI_NOTES.seq`, a `midi` report that does not parse, a
+ *     `MIDI_ERROR`, or a flush that never came. It is VISIBLE ON PURPOSE. A
+ *     view that guarded with `midi && midi.notes` and otherwise drew nothing
+ *     would look perfectly healthy on precisely the runs where the engine sent
+ *     something wrong — which is AGENTS.md's "an assertion must FAIL when it
+ *     cannot look", applied to a view instead of to a suite.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO VOCABULARIES, AND THEY ARE NOT MAPPED 1:1. `LIVE_STATE.midi.state` is
+ * `off | running | draining | fault` — the ENGINE's answer to "is the
+ * transcriber working". The eight values below are the DECK's answer to "what
+ * can the user do about this take right now", and they are a different question
+ * with a different set of answers. This file renders none of the engine's four.
+ *
+ * ---------------------------------------------------------------------------
+ * NO KEYBOARD SHORTCUT, AND NO `manifest.commands` ENTRY, EVER (ruling R9).
+ * `1`-`6` are stem mutes, `Shift`/`Alt`+digit solo and reset, `0` unmutes all,
+ * `7`-`9` and `Space` stay YouTube's. That leaves letters, and `M` is Mute on
+ * every mixer ever built while any other letter fires only when this iframe
+ * happens to have focus — the "sometimes it works" failure the digit map exists
+ * to avoid. Converting is once per song, not once per bar. The consequence
+ * worth naming: the `?` overlay gains no row, so `embed-state.js`'s check that
+ * the single-digit key caps in `.keytbl` ARE the digits `shortcut()` acts on
+ * stays untouched and keeps meaning what it means.
+ */
+
+/** The take, or `null` when this deck has never been asked for one. */
+let take = null;
+/**
+ * WHERE THE TAKE IS IN ITS LIFE — and it is deliberately NOT the same thing as
+ * what the row shows. This is a four-step machine the gestures drive; the eight
+ * `data-show` values are computed from it plus the deck's live state by
+ * `midiPlan()`. Folding them together is how `waiting` and `writing` would end
+ * up needing their own transitions instead of falling out of the fine line.
+ *
+ *   'off'       no take. The row is hidden and `#midi-arm` is in the footer.
+ *   'open'      collecting. `waiting` or `writing`, depending on the deck.
+ *   'finishing' MIDI_FLUSH sent, waiting for MIDI_FLUSHED or the deadline.
+ *   'done'      closed and complete. `ready`, or `empty` with no notes.
+ *   'saved'     handed to the Host at least once. `Save again` stays live.
+ */
+let takePhase = 'off';
+/** The flush deadline's handle, or 0. Cleared by MIDI_FLUSHED and by a fault. */
+let flushTimer = 0;
+/** Why we asked for the flush: `'flush'` (the button, the video ending) or
+ *  `'disarm'` (⏏, or a SESSION saying the tab is no longer armed). The two land
+ *  differently when the deadline expires — see `onFlushDeadline`. */
+let flushReason = null;
+/**
+ * THE FINISHED ARCHIVE, KEPT UNTIL THE ROW IS DISMISSED. `saved` means "the
+ * pack was handed over", never "the file is on disk" — nothing observable to
+ * this page says whether the browser's save dialog was completed or cancelled —
+ * so the bytes stay here and `Save again` goes on working. `{name, bytes}`.
+ */
+let pack = null;
+/** A standing sentence for the `ready` line — today only the autonav one. */
+let takeNote = null;
+/** The video's title as it was when the take opened. The pack is named after
+ *  the video it came FROM, which is why this is captured rather than read at
+ *  save time: by then ⏏ or an autonav may have replaced `session`. */
+let takeTitle = null;
+/**
+ * THE TEMPO THE PACK WILL BE WRITTEN AT, recorded while the take is open rather
+ * than read at save time — `stopLive()` nulls `bpmMsg`, and ⏏ runs it before
+ * the flush completes, so a tempo read at close would be lost exactly on the
+ * path §8.8 of the contract cares most about. `null` means the 120 fallback.
+ */
+let takeBpm = null;
+/** Why `takeBpm` is null: `'none'` (the box never locked) or `'speed'` (it
+ *  locked, but not at 1.00× — see `noteTempo`). */
+let takeBpmWhy = 'none';
+/** The highest `seq` this deck HOLDS. `MidiTake` owns the gap detection and
+ *  does not expose its counter; this is the deck's copy, for the cross-check. */
+let deckSeq = 0;
+/** The engine's counter as of the last `LIVE_STATE.midi`, and how many hops it
+ *  has completed while this deck stayed two or more messages behind. */
+let lastEngSeq = 0;
+let lostHops = 0;
+/** What the rail is currently drawn from, so it is rebuilt only when it moved. */
+let railSig = null;
+/** The engine's counters as they last arrived, or `null` when it published
+ *  none — see `midiCrossCheck` for why an absent field is not a fault. */
+let midiEng = null;
+
+/** The engine's four words for its own transcriber. The deck renders none of
+ *  them; it reads them to decide whether anything is being written at all. */
+const MIDI_ENGINE_STATES = new Set(['off', 'running', 'draining', 'fault']);
+/**
+ * HOW MUCH COVERAGE COUNTS AS "still filling the window" — a COUNT OF WRITTEN
+ * SECONDS, not a stopwatch since the button was pressed. Basic Pitch decodes a
+ * ~2 s window with a carry across the seam, so the opening of a take is
+ * genuinely rougher than the middle; measuring it in coverage means a pause, a
+ * seek or a starve does not tick it down while nothing is being written.
+ */
+const MIDI_ROUGH_SEC = 8;
+/** How long past the engine's own measured latency a flush may take before the
+ *  deck stops believing one is coming. `latencySec` is off the wire and never a
+ *  guessed constant; this is the slack on top of it. */
+const MIDI_FLUSH_GRACE_SEC = 2;
+/**
+ * HOW MANY COMPLETED HOPS THE DECK MAY BE TWO MESSAGES BEHIND BEFORE THE TAKE
+ * IS UNTRUSTWORTHY. One message in flight is ordinary — the engine's counter
+ * moves when it sends and the deck's when it receives. TWO, with the engine
+ * completing another hop past both of them, is a message that is not coming.
+ */
+const MIDI_LOST_HOPS = 1;
+/** The one MIME this deck ever hands over. The allowlist that enforces it is
+ *  `DELIVERABLE` in `shared/midi.js`; this is the call site's copy of the one
+ *  entry it uses, and `assertDeliverable` refuses anything else. */
+const MIDI_MIME = 'application/zip';
+
+/** The state word beside the dot. Colour is never the sole carrier, so every
+ *  one of the eight has one — and `empty` and `bad` say what happened rather
+ *  than naming a phase, because those two are the ones a user has to act on. */
+const MIDI_STATE_TEXT = {
+  waiting: 'waiting', writing: 'writing', finishing: 'finishing',
+  ready: 'ready', saved: 'saved', empty: 'nothing written', bad: 'unreadable',
+};
+const MIDI_X_TAKE = 'Stop and discard this MIDI take';
+const MIDI_X_PACK = 'Discard this MIDI pack';
+/** `#close`'s two promises. The deck is a guest on somebody else's video page,
+ *  so there is NO `beforeunload` prompt — what it does instead is say so on the
+ *  gesture, which is the only place the warning can still be acted on. */
+const CLOSE_TITLE = 'Hide the deck — the audio keeps playing';
+const CLOSE_LABEL = 'Hide the deck';
+const CLOSE_TITLE_PACK = 'Hide the deck — the unsaved MIDI pack goes with it';
+
+/** `m:ss`, or `h:mm:ss` past an hour. Not `fmtDb`'s job and not a clock read:
+ *  both arguments are seconds off a message. */
+function clock(sec) {
+  const t = Math.max(0, Math.floor(Number(sec) || 0));
+  const h = Math.floor(t / 3600);
+  const m = Math.floor(t / 60) % 60;
+  const s = t % 60;
+  const ss = String(s).padStart(2, '0');
+  return h ? `${h}:${String(m).padStart(2, '0')}:${ss}` : `${m}:${ss}`;
+}
+
+/** `a`, `a and b`, `a, b and c`. Used for the stems that produced no notes. */
+const listOf = (xs) => (xs.length < 2 ? xs.join('')
+  : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`);
+
+/**
+ * ARM. The ONE gesture into a take, and it is the one place on this surface
+ * that deliberately does NOT call `modelInTheWay()`.
+ *
+ * The two existing routes into `startLive()` gate on the weights because their
+ * gesture is "give me audio", which costs 172 MiB. Arming a transcription costs
+ * nothing until stem planes arrive, and a user who arms MIDI before pressing
+ * play is doing something entirely reasonable. If the weights are absent the
+ * row simply says so (fine line, slot 5) — a truthful report instead of a
+ * download prompt the user did not ask for.
+ */
+function armTake() {
+  if (!session.armed || takePhase !== 'off') return;
+  take = new MidiTake();
+  takePhase = 'open';
+  flushReason = null;
+  pack = null;
+  takeNote = null;
+  takeTitle = session.title ?? null;
+  takeBpm = null;
+  takeBpmWhy = 'none';
+  deckSeq = 0;
+  lastEngSeq = 0;
+  lostHops = 0;
+  railSig = null;
+  noteTempo();
+  toOff({ type: 'MIDI_START', deck: DECK });
+  paintMidi();
+}
+
+/**
+ * CLOSE THE TAKE AND DRAIN. `reason` is `'flush'` when the user asked (or the
+ * video ended) and `'disarm'` when the tab is going away — see
+ * `onFlushDeadline` for why the difference matters and is not cosmetic.
+ */
+function flushTake(reason) {
+  if (takePhase !== 'open') return;
+  takePhase = 'finishing';
+  flushReason = reason;
+  clearFlushTimer();
+  /**
+   * THE ONLY TIMER IN THIS COMPONENT, and it is a real deadline rather than a
+   * repaint loop: the engine owes exactly one `MIDI_FLUSHED`, and if it never
+   * arrives the deck must say so instead of sitting on `finishing` for ever.
+   * The budget is the engine's OWN measured latency plus a fixed slack, never a
+   * guessed constant — the same field the header's "behind video" reads.
+   */
+  flushTimer = setTimeout(onFlushDeadline, (live.latencySec + MIDI_FLUSH_GRACE_SEC) * 1000);
+  toOff({ type: 'MIDI_FLUSH', deck: DECK });
+  paintMidi();
+}
+
+function clearFlushTimer() {
+  if (flushTimer) clearTimeout(flushTimer);
+  flushTimer = 0;
+}
+
+/**
+ * THE DEADLINE EXPIRED, AND WHERE IT LANDS DEPENDS ON WHO ASKED.
+ *
+ * After `Convert now` the engine is alive and owes an answer, so silence is a
+ * fault and the row goes `bad` — the loud direction, and the one the contract
+ * fixes. After ⏏ the deck ASKED for the engine to go away, so silence is the
+ * expected outcome and the take lands at `ready` with a truncated figure: every
+ * closed note is already held here, and the only loss is the notes still open
+ * at that instant, which are at most one hop. Reporting that as `bad` would be
+ * a false alarm on the ordinary disarm path, which is the more expensive of the
+ * two mistakes because it teaches the user to ignore the state word.
+ */
+function onFlushDeadline() {
+  flushTimer = 0;
+  if (takePhase !== 'finishing') return;
+  if (flushReason === 'disarm') { closeTake(); return; }
+  take.fault(`the engine did not finish the take within ${(live.latencySec + MIDI_FLUSH_GRACE_SEC).toFixed(1)} s of MIDI_FLUSH`);
+  paintMidi();
+}
+
+/** The take is complete. Nothing more will be accepted into it. */
+function closeTake() {
+  if (takePhase !== 'open' && takePhase !== 'finishing') return;
+  clearFlushTimer();
+  takePhase = 'done';
+  paintMidi();
+}
+
+/**
+ * DISCARD. The engine's take goes too — `MIDI_STOP` drops its DSP state and
+ * terminates the worker, which is 2 threads and an ORT session that nothing is
+ * going to ask for again.
+ */
+function dropTake() {
+  if (takePhase === 'off') return;
+  clearFlushTimer();
+  toOff({ type: 'MIDI_STOP', deck: DECK });
+  take = null;
+  takePhase = 'off';
+  flushReason = null;
+  pack = null;
+  takeNote = null;
+  paintMidi();
+}
+
+/**
+ * BUILD THE PACK ONCE AND HAND IT OVER.
+ *
+ * The bytes are kept: a user who cancels the browser's save dialog has not lost
+ * the take, and `Save again` is the same archive rather than a second
+ * transcription. `zipStore` is deterministic (a fixed 1980 DOS timestamp), so
+ * saving twice really does produce the same file.
+ *
+ * NOTHING IS CAUGHT HERE, AND THAT IS DELIBERATE. `packEntries` throws on a
+ * take with no notes and `assertDeliverable` (inside `host.deliver`) throws on
+ * anything that is not a zip of `.mid` files — both are the call site being
+ * wrong about a file it built itself, which is loud on purpose. The `empty`
+ * state is what makes the first unreachable from this button, and the second is
+ * the guard the whole feature is gated on (`qa/midi-pack.mjs`).
+ */
+function savePack() {
+  if (!pack) {
+    pack = {
+      name: packName(takeTitle),
+      bytes: zipStore(packEntries(take, { bpm: takeBpm })),
+    };
+  }
+  host.deliver(pack.name, pack.bytes, MIDI_MIME);
+  takePhase = 'saved';
+  paintMidi();
+}
+
+/**
+ * WHAT TEMPO THE PACK IS WRITTEN AT, recorded on every `LIVE_STATE` while the
+ * take is open.
+ *
+ * A CONFIDENT-LOOKING WRONG TEMPO IS WORSE THAN A BLANK, and `bpmPlan`'s header
+ * already owns that rule for the box one row up. Here it has a second edge the
+ * box does not: note times are SOURCE seconds on the video's own clock, so the
+ * tempo that matches them is the RECORDING's, not the one the detector heard.
+ * At any speed but 1.00× those differ, and `detected / speed` is exactly the
+ * derivation `BPM_SOURCE_SAFE` refuses to render in this build — the detector
+ * searches [60, 200] and folds silently outside it, so out there the quotient is
+ * wrong by a factor of two with nothing on screen to say so.
+ *
+ * So: a lock at 1.00× is recorded and stands for the rest of the take (the
+ * recording's tempo does not change when the user changes speed); anything else
+ * leaves `takeBpm` null and the pack is written at
+ * `MIDI_TEMPO_FALLBACK_BPM`, WITH THE FINE LINE SAYING SO. The tempo is a LABEL
+ * and not a quantiser — it moves where the barlines fall and never when a note
+ * sounds — so the fallback costs the user a grid, not their transcription.
+ */
+function noteTempo() {
+  const plan = bpmPlan(bpmMsg, pageRate);
+  const home = Math.abs(pageRate - SPEED_HOME) <= RATE_EPS;
+  if (plan.show === 'bpm' && home) { takeBpm = plan.bpm; takeBpmWhy = null; return; }
+  if (takeBpm !== null) return;
+  takeBpmWhy = plan.show === 'bpm' ? 'speed' : 'none';
+}
+
+/**
+ * THE SECOND CARRIER OF `seq`, off the 10 Hz `LIVE_STATE.midi` field.
+ *
+ * The spans and the notes are on `MIDI_NOTES` and nowhere else; this field
+ * carries counters, and its job is to be a second, independent carrier of one
+ * number. That is what makes a lost message detectable when the message that
+ * would have told you is the message that went missing — `MidiTake` catches a
+ * gap between two arrivals and `flushed()` catches a lost LAST message, and
+ * this catches the one in the middle that has no successor yet.
+ *
+ * THE TEST IS A COUNT OF HOPS, NOT A CLOCK. The engine's counter moves when it
+ * SENDS and this deck's when it RECEIVES, so being one behind is the ordinary
+ * state of an in-flight message. Being two or more behind while the engine
+ * completes another hop is a message that is not coming: at the default hop
+ * that is ~2 s of the wire moving on without us. Counting the engine's own hops
+ * means this reads no clock and does not change its verdict on a slow machine.
+ *
+ * AN ABSENT `midi` FIELD IS NOT A FAULT AND NOT AN EXCUSE EITHER. The field is
+ * published by `LivePipeline.pushState()`; a CACHED deck (`cacheddeck.js`) is a
+ * different pipeline and publishes no such field, and neither does an engine
+ * that predates this feature. In both cases nothing is being written — which is
+ * exactly what the row then says, `waiting`, because `midiEng` stays null and
+ * `midiPlan()` refuses to call it `writing` without one. The claim is not
+ * quietly weakened: the row reports the truth, and it is the PRESENT-but-
+ * unreadable case that is a fault, below.
+ */
+function midiCrossCheck(p) {
+  if (takePhase !== 'open' && takePhase !== 'finishing') return;
+  if (p === undefined || p === null) {
+    midiEng = null;
+    lastEngSeq = 0;
+    lostHops = 0;
+    return;
+  }
+  if (typeof p !== 'object' || !MIDI_ENGINE_STATES.has(p.state)
+      || !Number.isInteger(p.seq) || p.seq < 0) {
+    take.fault(`the engine's MIDI report does not parse: ${JSON.stringify(p)}`);
+    clearFlushTimer();
+    midiEng = null;
+    return;
+  }
+  midiEng = p;
+  if (take.bad) return;
+  if (p.state === 'fault') {
+    take.fault(`the engine's transcriber stopped: ${p.fault || 'it did not say why'}`);
+    clearFlushTimer();
+    return;
+  }
+  // A counter that went BACKWARDS is a new take, not a loss.
+  if (p.seq < lastEngSeq) { lastEngSeq = p.seq; lostHops = 0; return; }
+  if (p.seq === lastEngSeq) return;
+  lostHops = (p.seq - deckSeq >= 2) ? lostHops + 1 : 0;
+  lastEngSeq = p.seq;
+  if (lostHops > MIDI_LOST_HOPS) {
+    take.fault(`the engine has sent up to seq ${p.seq} and this deck holds ${deckSeq} `
+      + '— the notes in between are gone and cannot be asked for again');
+    clearFlushTimer();
+  }
+}
+
+/**
+ * WHICH OF THE EIGHT VALUES IS ON SCREEN, AND WHICH FINE LINE — decided
+ * together, in one pass, because they are one decision.
+ *
+ * THE FINE LINE IS ONE SLOT WITH THIRTEEN JOBS AND A STRICT PRIORITY, exactly
+ * as `.sp__fine` is and for `.sp__fine`'s reason: a second slot would be 12 px
+ * of empty row in the common case, and the reason a button is disabled has to
+ * be rendered somewhere `aria-describedby` can point at it. The order below IS
+ * the priority, and the `waiting` / `writing` split falls out of it rather than
+ * being decided twice — slots 5-9 are the reasons nothing is being written and
+ * slots 10-13 are the things worth saying while it is.
+ *
+ * 11 OUTRANKS 12 because transpose is the control that would have moved the
+ * notes if this tap were downstream of it. It is not: the transcriber reads the
+ * stem ring, which is upstream of `pitchbank.js`, so the MIDI is in the
+ * recording's own key at any transpose and at any speed. Both are STANDING
+ * FACTS rather than toasts — they hold for as long as the control is off home,
+ * so neither needs a timer.
+ *
+ * ponytail: THIS FUNCTION IS PURE AND IS GATED BY NOTHING UNDER `node`. It
+ * reads module state and returns a plain object — no DOM, no clock — so it is
+ * the same kind of thing as `bpmPlan()` and `speedGate()`, which live in
+ * `embed-state.js` next to their own assertions. Ceiling: thirteen branches
+ * and a strict priority order whose only check is a person reading the deck in
+ * a browser, so a re-ordering that made `writing` outrank `paused` would look
+ * fine on every run where the video happened to be playing. Upgrade path: move
+ * it and `readyFine()` to `ui/embed-state.js` taking their inputs as one
+ * argument bag — `{takePhase, bad, count, coveredSec, status, videoPlaying,
+ * passthrough, modelStatus, engineState, semitones, rate}` — and add the
+ * thirteen cases to that file's suite, each naming the slot it must beat. It is
+ * held here for now because ADR 0002's frozen interface declares
+ * `embed-state.js` unmodified by this change, and a slice that quietly widened
+ * its own file list is worse than one that names what it did not do.
+ */
+function midiPlan() {
+  if (takePhase === 'off' || !take) return { show: 'off', fine: '', warn: false };
+  const wait = (fine) => ({ show: 'waiting', fine, warn: false });
+  const write = (fine, warn) => ({ show: 'writing', fine, warn });
+
+  //  1  bad
+  if (take.bad) return { show: 'bad', fine: 'the engine sent a take this deck cannot read', warn: false };
+
+  if (takePhase === 'done' || takePhase === 'saved') {
+    //  2  empty
+    if (!take.count) {
+      return {
+        show: 'empty',
+        // The frozen sentence is the zero-coverage one. A take that DID cover
+        // audio and still found nothing is a different fact and must not read
+        // as "you left it off" — same slot, same voice, the truth of each.
+        fine: take.coveredSec > 0
+          ? 'no notes came back from what played'
+          : 'nothing played while this was on',
+        warn: false,
+      };
+    }
+    //  3  ready / saved
+    return { show: takePhase === 'saved' ? 'saved' : 'ready', fine: readyFine(), warn: false };
+  }
+
+  //  4  finishing. The integer is `live.latencySec`, MEASURED and off the wire,
+  //     never a guessed constant — and on a deck that is no longer producing
+  //     there IS no measured latency, so the clause goes rather than printing a
+  //     confident `0 s`.
+  if (takePhase === 'finishing') {
+    return {
+      show: 'finishing',
+      fine: live.latencySec > 0
+        ? `finishing — the last ${Math.ceil(live.latencySec)} s are still in the pipeline`
+        : 'finishing — draining the last of the take',
+      warn: false,
+    };
+  }
+
+  //  5  the weights are not here. Arming did not ask for them; this says so.
+  const ms = modelStatus();
+  if (ms === 'absent' || ms === 'error') return wait('the model isn\'t downloaded yet');
+  //  6  paused. Coverage freezes, the head stays, nothing is discarded.
+  if (videoPlaying === false) return wait('paused — nothing is written while the picture is still');
+  //  7  passthrough. `LiveEmitter.gap()` zeroes the twelve stem planes, so
+  //     there is audible music and no stems to read it from.
+  if (live.passthroughNow) return wait('passthrough — no stems to write from');
+  //  8  re-priming, told apart from a first prime by a COUNT: a take that has
+  //     already covered something is being RE-primed, and that is the seek.
+  if (live.status === 'priming') {
+    return wait(take.coveredSec > 0 ? 're-priming — this part will be missing' : 'waiting for audio');
+  }
+  //  9  everything else that is not producing — including an engine that
+  //     publishes no `midi` field at all, which is a cached deck or an older
+  //     engine. Nothing is being written and this is what that looks like.
+  //     `RUNNING` and not `=== 'running'`: `starving` is a BUFFER condition and
+  //     the separator is still feeding the ring through it, so the take goes on
+  //     being written. Priming is already answered above.
+  if (!RUNNING.has(live.status) || !midiEng || midiEng.state !== 'running') return wait('waiting for audio');
+
+  // 10  the opening of the take is genuinely rougher. A COUNT of coverage.
+  if (take.coveredSec < MIDI_ROUGH_SEC) return write('the model is still filling its window — this part will be rough', false);
+  // 11  the transcription does not follow TRANSPOSE, and says so while it is off home.
+  if (semitones !== 0) {
+    return write(`written in the recording's own key, not at ${semitones > 0 ? '+' : MINUS}${Math.abs(semitones)}`, true);
+  }
+  // 12  ...nor SPEED. Times are on the video's clock, so the file does not move.
+  if (Math.abs(pageRate - SPEED_HOME) > RATE_EPS) {
+    return write(`written at the video's own tempo, not at ${fmtRate(pageRate)}`, true);
+  }
+  // 13  the standing fact: this is a live tap, so the unplayed song is not in it.
+  return write('only what plays is written', false);
+}
+
+/**
+ * SLOT 3 — ` · `-joined parts with the empty ones dropped, `paintStatus()`'s own
+ * idiom. Everything in it is a fact about the pack the button is about to hand
+ * over: how many files, at what tempo, and which stems produced nothing.
+ *
+ * THE AUTONAV SENTENCE IS A PART RATHER THAN A REPLACEMENT, so that the tempo
+ * caveat is not lost on exactly the pack that is easiest to mis-save — the one
+ * belonging to a video that is no longer on screen.
+ */
+function readyFine() {
+  const per = take.perStem();
+  const silent = STEM_ORDER.filter((s) => !per[s]);
+  const tempo = takeBpm !== null ? `${takeBpm} BPM`
+    : takeBpmWhy === 'speed'
+      ? `no tempo at this speed — written at ${MIDI_TEMPO_FALLBACK_BPM}`
+      : `no tempo detected — written at ${MIDI_TEMPO_FALLBACK_BPM}`;
+  return [
+    takeNote,
+    `${PACK_ENTRIES.length - 1} stems + one combined file`,
+    tempo,
+    silent.length ? `${listOf(silent)}: no notes` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+/**
+ * SOURCE SECONDS ACTUALLY WRITTEN, over the video's own duration. NOT wall time
+ * since arming: a seek, an ad, a starve or a dropped hop all show up as this
+ * number failing to keep up with the clock, with no special case anywhere.
+ *
+ * With no usable duration — a livestream — it degrades to `2:41 written` and
+ * the rail is not drawn at all, because a proportion you cannot compute must
+ * not be drawn as one. `empty` takes the same short form deliberately: there is
+ * no Save button beside it, so "of 4:12" would frame a nothing as a near-miss.
+ */
+function midiFigure(show) {
+  if (show === 'bad') return EM_DASH;
+  const cov = clock(take.coveredSec);
+  if (show === 'empty') return `${cov} written`;
+  return railable() ? `${cov} of ${clock(lastVideoDur)}` : `${cov} written`;
+}
+
+const railable = () => Number.isFinite(lastVideoDur) && lastVideoDur > 0;
+
+/**
+ * WHERE THE COVERAGE SITS, on the video's own timeline — one `<i>` per MERGED
+ * covered span plus a 1 px head at the current position. This is the channel
+ * the figure cannot carry: a forward seek past untranscribed audio leaves a
+ * visible hole, and the unwritten head of the song before the user armed is
+ * visible from the first frame. There is no banner and no toast for either —
+ * the gap IS the message.
+ *
+ * A BACKWARD SEEK DOES NOT DOUBLE-COUNT, and nothing here arranges that:
+ * `MidiTake` drops the held notes inside a replayed span and unions the
+ * coverage, so last pass wins and the rail simply redraws the same stretch.
+ *
+ * REBUILT ONLY WHEN IT MOVED. The spans change about once per hop and this runs
+ * at 10 Hz, so the list is keyed by a signature and the DOM is left alone
+ * otherwise — the same discipline `text()` applies to every string on the deck.
+ */
+function paintRail(show) {
+  const rail = $('midi-rail');
+  const drawable = railable() && show !== 'empty' && show !== 'bad';
+  rail.hidden = !drawable;
+  if (!drawable) { railSig = null; return; }
+
+  const dur = lastVideoDur;
+  const spans = take.coveredSpans;
+  const sig = `${dur}|${spans.map(([a, b]) => `${a.toFixed(2)}-${b.toFixed(2)}`).join(',')}`;
+  const head = $('midi-head');
+  if (sig !== railSig) {
+    railSig = sig;
+    for (const el of [...rail.querySelectorAll('i')]) el.remove();
+    for (const [a, b] of spans) {
+      const el = document.createElement('i');
+      el.style.left = `${clamp(a / dur, 0, 1) * 100}%`;
+      el.style.width = `${clamp((b - a) / dur, 0, 1) * 100}%`;
+      rail.insertBefore(el, head);
+    }
+  }
+  // THE HEAD IS REMOVED WHEN THE TAKE IS CLOSED, not parked at the end: a
+  // playhead on a frozen rail would claim the take is still following the video.
+  const frozen = show === 'ready' || show === 'saved';
+  head.hidden = frozen;
+  if (!frozen) head.style.left = `${clamp(lastVideoSec / dur, 0, 1) * 100}%`;
+}
+
+/**
+ * THE WHOLE ROW, AND THE TWO CONTROLS OUTSIDE IT THAT BELONG TO THE SAME FACT.
+ *
+ * `#midi-arm` is hidden EXACTLY while the row is up — one control at a time,
+ * and the row owns stop/discard once it exists — and disabled EXACTLY when the
+ * tab is not armed, which is exactly when `#src-sub` carries the sentence
+ * `aria-describedby` points at. Both invariants are one line each here so
+ * neither can drift from the other.
+ */
+function paintMidi() {
+  const plan = midiPlan();
+  const show = plan.show;
+  const box = $('midibox');
+
+  const arm = $('midi-arm');
+  arm.hidden = show !== 'off';
+  arm.disabled = !session.armed;
+
+  /**
+   * THERE IS NO `beforeunload` PROMPT — this deck is a guest on somebody else's
+   * video page and an unsaved pack goes with the iframe. What it does instead
+   * is say so on the gesture that would do it, which is the only place the
+   * warning is still actionable. `saved` reverts it: the bytes have been handed
+   * over, and repeating the warning would make it noise.
+   */
+  const cl = $('close');
+  const closeSay = show === 'ready' ? CLOSE_TITLE_PACK : CLOSE_TITLE;
+  if (cl.title !== closeSay) {
+    cl.title = closeSay;
+    // The `aria-label` is the SHORT form when nothing is at stake — that is what
+    // this button has always announced — and the WHOLE sentence when something
+    // is, because a warning only in a `title` is a warning a screen-reader user
+    // does not get.
+    cl.setAttribute('aria-label', show === 'ready' ? closeSay : CLOSE_LABEL);
+  }
+
+  box.hidden = show === 'off';
+  box.dataset.show = show;
+  if (plan.warn) box.dataset.warn = 'true'; else box.removeAttribute('data-warn');
+  // The reason goes in the box's `title` so a bug report carries it, exactly as
+  // the key and tempo boxes do with the payload they could not read.
+  if (show === 'bad') box.title = `The engine sent a take this deck could not read: ${take.why}`;
+  else box.removeAttribute('title');
+  if (show === 'off') return;
+
+  text($('midi-state'), MIDI_STATE_TEXT[show] || '');
+  text($('midi-cov'), midiFigure(show));
+  text($('midi-fine'), plan.fine);
+  paintRail(show);
+
+  /**
+   * ONE PRIMARY BUTTON, THREE JOBS, AND NO SAVE BUTTON AT ALL FOR TWO OF THE
+   * EIGHT STATES. `empty` and `bad` are the two the row exists to make visible,
+   * and offering a Save on either would be the product handing over a file it
+   * has just said it cannot vouch for.
+   */
+  const go = $('midi-go');
+  go.hidden = show === 'empty' || show === 'bad';
+  text(go, show === 'saved' ? 'Save again' : show === 'ready' ? 'Save MIDI pack' : 'Convert now');
+  // `Convert now` on a take with no coverage would close a take holding
+  // nothing; the reason is the fine line under it, which is what
+  // `aria-describedby` points at.
+  go.disabled = show === 'finishing' || (show === 'waiting' && take.coveredSec <= 0);
+
+  const x = $('midi-x');
+  const open = show === 'waiting' || show === 'writing' || show === 'finishing';
+  const xs = open ? MIDI_X_TAKE : MIDI_X_PACK;
+  if (x.title !== xs) { x.title = xs; x.setAttribute('aria-label', xs); }
+  // Both disabled while draining: there is nothing to convert and the take is
+  // not the deck's to throw away until the engine has handed the last of it over.
+  x.disabled = show === 'finishing';
+}
+
 // --------------------------------------------------------------- preferences
 /**
  * WHICH LIFETIME EACH READ AND WRITE MEANT. `PREFS_KEY` comes from
@@ -2067,9 +2772,61 @@ host.onMessage((m) => {
       // The countdown under the speed control is driven by THIS arrival and by
       // nothing else — never a timer, never a rAF loop.
       paintSpeed();
+      /**
+       * THE MIDI CROSS-CHECK AND THE TAKE'S TEMPO, in that order and both off
+       * THIS message. `midi` is the engine's counters — the second carrier of
+       * `seq` — and `noteTempo()` records the tempo the pack will be written at
+       * while the box is still locked and the deck is still running, because ⏏
+       * clears `bpmMsg` before the flush it triggers has come back.
+       */
+      midiCrossCheck(m.midi);
+      noteTempo();
       syncVideoLock();
       reconcile();
       paint();
+      break;
+    }
+    /**
+     * THE TAKE'S OWN WIRE. One `MIDI_NOTES` per published hop — 0.51 Hz at the
+     * default, not a clock — and `MidiTake` owns everything a DOM is not needed
+     * for: the seq gap, last-pass-wins over a replayed span, and the coverage
+     * arithmetic. What is left here is which phases may still accept.
+     */
+    case 'MIDI_NOTES': {
+      if (forOther) break;
+      // A take that has CLOSED does not grow. A late hop arriving after the
+      // pack was built would move a figure the user has already read and, at
+      // `saved`, disagree with bytes they already have on disk.
+      if (takePhase !== 'open' && takePhase !== 'finishing') break;
+      if (take.accept(m) === 'ok') deckSeq = m.seq;
+      paintMidi();
+      break;
+    }
+    case 'MIDI_FLUSHED': {
+      if (forOther) break;
+      if (takePhase !== 'open' && takePhase !== 'finishing') break;
+      // `flushed()` is the place a lost LAST message is caught — the one a gap
+      // between two arrivals cannot catch, because there is no later message to
+      // be out of step with it. It latches `bad` itself; `closeTake` just ends
+      // the phase, and `midiPlan()` reads the latch first.
+      take.flushed(m);
+      closeTake();
+      break;
+    }
+    case 'MIDI_ERROR': {
+      if (forOther) break;
+      if (takePhase === 'off') break;
+      /**
+       * LATCHED, AND ACCEPTED EVEN AFTER THE PACK WAS HANDED OVER. The engine
+       * sends this once per fault; if it lands on a take the user has already
+       * saved, the row still turns red, because the engine has just said it
+       * cannot vouch for what it sent and the user is the only one who can act
+       * on that. `MidiTake._latch` keeps the FIRST reason, so a fault already
+       * reported through the `midi` payload is not overwritten by this one.
+       */
+      take.fault(`${m.code || 'MIDI_ERROR'}: ${m.message || 'the engine did not say why'}`);
+      clearFlushTimer();
+      paintMidi();
       break;
     }
     case 'METERS': {
@@ -2146,11 +2903,35 @@ host.onMessage((m) => {
        * would arm it.
        */
       if (m.session) {
-        session = {
+        const next = {
           armed: m.session.armed === true,
           title: m.session.title ?? null,
           url: m.session.url ?? null,
         };
+        /**
+         * AUTONAV TO ANOTHER VIDEO CLOSES THE TAKE AND DOES NOT START A NEW
+         * ONE. The notes already held belong to the video that just left, and
+         * the engine's transcriber is being torn down with its pipeline — so
+         * this holds what it has at `ready` rather than asking for a flush that
+         * may never be answered and would land on the deadline as a false
+         * `bad`. The cost is the notes still open at that instant, at most one
+         * hop, which is the same bound §8.8 accepts for a dead engine on ⏏.
+         *
+         * A NEW TAKE IS NOT STARTED AUTOMATICALLY, and `#midi-arm` stays hidden
+         * until the user saves or discards this one: starting one would put the
+         * previous pack one autonav away from being silently replaced.
+         */
+        if (takePhase === 'open' && session.url != null && next.url != null && next.url !== session.url) {
+          takeNote = 'the video changed — this pack is the previous one';
+          toOff({ type: 'MIDI_STOP', deck: DECK });
+          closeTake();
+        } else if (takePhase === 'open' && session.armed && !next.armed) {
+          // DISARMED FROM SOMEWHERE ELSE — the toolbar, another surface. Flush
+          // THEN let the disarm land, so the take is DELIVERED rather than
+          // dropped; the ⏏ button takes the same route explicitly.
+          flushTake('disarm');
+        }
+        session = next;
       }
       reconcile();
       paint();
@@ -2271,6 +3052,27 @@ $('autonav-cb').addEventListener('change', (e) => {
   writePrefs({ autoplayNext: !e.target.checked });
 });
 
+/**
+ * ---- the MIDI take: three buttons and nothing else ----
+ *
+ * All three are real `<button>`s, so Tab reaches them and Enter/Space activate
+ * them for free, and the global `:focus-visible` ring applies with no new rule.
+ * Tab order is DOM order: … transpose → speed → Read as → the MIDI row
+ * (`Convert now`, `✕`) → the footer (`Transcribe to MIDI`).
+ */
+$('midi-arm').addEventListener('click', armTake);
+/**
+ * ONE PRIMARY BUTTON, TWO GESTURES, AND THE STATE DECIDES WHICH. It reads
+ * `Convert now` while the take is collecting and `Save MIDI pack` / `Save again`
+ * once it is closed — one control at one place on the row, because the second
+ * gesture is only ever available after the first has happened.
+ */
+$('midi-go').addEventListener('click', () => {
+  if (takePhase === 'done' || takePhase === 'saved') savePack();
+  else flushTake('flush');
+});
+$('midi-x').addEventListener('click', dropTake);
+
 $('keys-open').addEventListener('click', openKeys);
 $('keys-x').addEventListener('click', closeKeys);
 // Esc closes a <dialog> natively; this keeps the height report and the host's
@@ -2306,6 +3108,16 @@ $('err-x').addEventListener('click', () => { dismissArmError(); paint(); });
  * worse than none.
  */
 $('eject').addEventListener('click', () => {
+  /**
+   * FLUSH BEFORE EJECT, so an open take is DELIVERED rather than dropped. The
+   * order is the whole point: `stopLive()` below tears the pipeline down and
+   * `SW_DISARM` releases the tab, and a take closed after either of those is a
+   * take whose last hop went nowhere. The row then runs `finishing` → `ready`
+   * on its own; if the engine dies before answering, `onFlushDeadline` lands it
+   * at `ready` with a truncated figure rather than at `bad`, because on this
+   * path silence is the outcome the deck asked for.
+   */
+  flushTake('disarm');
   halted = true;
   if (RUNNING.has(live.status)) stopLive();
   dismissArmError();
@@ -2516,6 +3328,24 @@ globalThis.__embed = {
   get speedGate() { return spGate(); },
   /** What the BPM box is showing, already resolved. See paintBpm(). */
   get bpm() { return bpmView; },
+  /**
+   * The MIDI row, already resolved: which of the eight `data-show` values is
+   * up, the fine line under it, and the two counters a browser assertion would
+   * otherwise have to scrape out of the DOM. `null` for `take` while there is
+   * none, so "no take" and "an empty take" cannot read the same.
+   */
+  get midi() {
+    const plan = midiPlan();
+    return {
+      show: plan.show,
+      fine: plan.fine,
+      phase: takePhase,
+      notes: take ? take.count : null,
+      coveredSec: take ? take.coveredSec : null,
+      bad: take ? take.bad : null,
+      saved: pack !== null && takePhase === 'saved',
+    };
+  },
   /** Did boot decide this is an Apple keyboard — i.e. which lettering is up. */
   get mac() { return MAC; },
   /**

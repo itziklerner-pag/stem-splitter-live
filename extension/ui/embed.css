@@ -607,6 +607,90 @@ body { padding: 10px 12px 12px; }
 .bpm:not([data-show="bpm"]) .bpm__pulse,
 .bpm[data-pulse="off"] .bpm__pulse { animation: none; opacity: .22; }
 
+/* ------------------------------------------------------------------ MIDI ----
+   THE TAKE ROW. `.bpm`'s block one row down, because it is the same component:
+   a label, a state word, a big mono value and a fine line. It sits here in this
+   file — beside the other two readouts and above `.tools__ctl`, which begins
+   the controls — because that is what it is, even though in the MARKUP it is a
+   sibling of `.tools` rather than a child: it spans the full width and it comes
+   and goes, so it takes its own divider rather than living inside a row that
+   wraps.
+
+   ~63 px while a take exists and 0 px otherwise, which is why `[hidden]` at the
+   top of this file matters here: `.midi` sets no `display`, so the UA rule wins
+   on its own — but the deck has been bitten by that exact rule before (see the
+   `.banner` note) and the row is authored to stay clear of it.
+
+   NOTHING HERE INVENTS A COLOUR OR A SIZE. The rail is drawn with the four
+   `--timeline-*` transport tokens `tokens.css` has shipped since before this
+   build existed and which nothing in it had ever used; a coverage rail is what
+   they were shaped for.
+
+   AND NOTHING HERE MOVES EXCEPT THE RAIL AND THE HEAD, both of which are
+   VALUES — a span list and a position, repainted when a message changes them.
+   The dot NEVER blinks: nothing in this row has a beat, so a pulse would be
+   decoration, and DESIGN §14's carve-out only covers motion that IS the
+   information. That is why this component has no `prefers-reduced-motion` rule
+   at all, where `.bpm__pulse` above needs one. */
+.midi { margin-top: 10px; padding-top: 9px; border-top: 1px solid var(--color-divider); }
+.midi__hd    { display: flex; align-items: center; gap: 8px; }
+.midi__gap   { flex: 1; }
+.midi__st    { font-size: 11px; color: var(--color-text-dim); }
+/* `--color-text-faint` is the RESTING dot and it is legal here where it is not
+   legal on text: tokens.css marks faint 4.0:1 NON-TEXT ONLY, and this is an
+   8 px disc whose meaning is carried in words next to it. Colour is never the
+   sole carrier in this row — every state is a WORD beside the dot, the fine
+   line is a sentence, and the rail is backed by the figure. */
+.midi__dot   { width: 8px; height: 8px; border-radius: 50%; flex: none;
+               background: var(--color-text-faint); }
+.midi[data-show="writing"]   .midi__dot { background: var(--color-ok); }
+.midi[data-show="writing"]   .midi__st  { color: var(--color-ok); }
+.midi[data-show="waiting"]   .midi__dot { background: var(--color-info); }
+.midi[data-show="finishing"] .midi__dot { background: var(--color-info); }
+.midi[data-show="ready"]     .midi__dot { background: var(--color-ok); }
+.midi[data-show="saved"]     .midi__dot { background: var(--color-ok); }
+.midi[data-show="bad"]       .midi__dot { background: var(--color-warn); }
+.midi[data-show="bad"]       .midi__st  { color: var(--color-warn); }
+
+/* min-height, for `.bpm__names`' reason: the row must not collapse and
+   re-expand as the figure comes and goes, because this component is the one
+   thing on the deck whose height the host page has to be told about. */
+.midi__names { display: flex; align-items: baseline; gap: 8px;
+               margin-top: 2px; min-height: 18px; }
+.midi__cov   { font-family: var(--split-font-mono);
+               font-variant-numeric: tabular-nums;
+               font-size: 15px; font-weight: 650; color: var(--color-text); }
+
+.midi__rail  { position: relative; height: var(--timeline-h); margin-top: 4px;
+               background: var(--timeline-bg); border-radius: var(--split-radius-1);
+               overflow: hidden; }
+.midi__rail i{ position: absolute; top: 0; bottom: 0;
+               background: var(--timeline-played); }   /* one per covered span */
+.midi__head  { position: absolute; top: 0; bottom: 0; width: 1px;
+               background: var(--timeline-head); }
+.midi__fine  { margin-top: 2px; min-height: 15px; font-size: 10px;
+               color: var(--color-text-dim); }
+/* `data-warn` is the standing-caveat channel — the transpose and speed
+   sentences — and it is a SECOND attribute rather than a ninth `data-show`
+   value, because those two facts are orthogonal to which state the row is in. */
+.midi[data-show="bad"] .midi__fine,
+.midi[data-warn="true"] .midi__fine { color: var(--color-warn); }
+
+/* forced-colors drops the custom properties above outright, and the rail is the
+   one thing in this row with no text behind it — so it gets the system's own
+   two colours rather than disappearing into the background. */
+@media (forced-colors: active) {
+  .midi__rail i { background: Highlight; }
+  .midi__head   { background: CanvasText; }
+}
+
+/* THE TRIGGER, in the footer. `.btn` has no disabled rule of its own — the
+   other one in this build is never disabled — and an unstyled `disabled`
+   button looks exactly like a live one, which is the worst of the three
+   possible appearances. The two tokens are `.tr__b:disabled`'s and
+   `.sp__b:disabled`'s, so the three controls cannot drift under a theme. */
+#midi-arm:disabled { opacity: var(--btn-disabled-opacity); cursor: not-allowed; }
+
 .tools__ctl { display: flex; align-items: flex-start; gap: 14px; flex: none; }
 
 /* ---- transpose ---- */
@@ -771,4 +855,10 @@ body { padding: 10px 12px 12px; }
     --fader-hit-w: 38px; --meter-w: 8px;
   }
   .mstr { padding-left: 8px; --fader-hit-w: 38px; }
+  /* THE MIDI HEADER WRAPS ITS TWO BUTTONS ONTO THEIR OWN LINE, and nothing is
+     hidden: the rail and the figure keep the full width, which is the whole
+     point of them. `.midi__gap` is the flex spacer that pushes the buttons
+     right on one line; at 100 % it becomes the line break. */
+  .midi__hd { flex-wrap: wrap; }
+  .midi__gap { flex-basis: 100%; }
 }

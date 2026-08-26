@@ -545,6 +545,19 @@ export class LivePipeline {
      * than features — see runChunk() and skipOne().
      */
     this.cacheWriter = null;
+    /**
+     * The MIDI take's ring tap, or null. Owned by `offscreen/transcribe.js`;
+     * this class knows exactly two things about it and both are invariants
+     * rather than features — see runChunk() and fill().
+     *
+     * NULL IS THE COMMON CASE and the tap costs one property read per hop when
+     * it is. It is deliberately NOT cleared by start(): a seek re-primes the
+     * pipeline and the take survives that, because the deck holds the take
+     * (ADR 0002 §8.8). `stop()` and `dispose()` DO clear it — the pipeline that
+     * was feeding it is gone — and `offscreen/engine.js` re-attaches on the next
+     * start if the take is still open.
+     */
+    this.transcriber = null;
 
     // scratch, allocated once — the live path must not allocate per chunk.
     // `STEMS.length * 2 channels * SEGMENT frames * 4 bytes per float`: the
@@ -806,6 +819,10 @@ export class LivePipeline {
     if (this.startTimer) { clearTimeout(this.startTimer); this.startTimer = null; }
     if (this.pushTimer) { clearInterval(this.pushTimer); this.pushTimer = null; }
     if (this.out) this.out.play(false);
+    // The pipeline that was feeding the tap is gone, so the tap goes with it.
+    // The TAKE does not: `offscreen/engine.js` still holds it, the deck still
+    // holds every closed note, and a re-prime re-attaches (ADR 0002 §8.8).
+    this.detachTranscriber();
     this.d.log(`live stop · ${this.k} chunks, ${this.drops} drops, ${this.health.underruns} underruns`);
     this.pushState(true);
   }
@@ -826,6 +843,7 @@ export class LivePipeline {
     this.node = this.pre = this.shaper = this.post = this.probe = null;
     this.probeBuf = null;
     this.out = null; this.sab = null; this.emitter = null;
+    this.detachTranscriber();
     this.status = 'idle';
     this.stopped = true;
   }
@@ -1035,6 +1053,27 @@ export class LivePipeline {
     // separated audio is ever cached" is a property of the call graph, and
     // moving this line is the way to break it.
     if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
+    /**
+     * ---- THE MIDI RING TAP, COVERED HALF. Same position and the same reason as
+     * the cache append above: `runChunk` is the ONLY path that publishes MODEL
+     * OUTPUT, so "the transcriber only ever sees separated audio" is a property
+     * of the call graph. Everything unseparated goes through skipOne() -> fill(),
+     * which calls `uncovered()` instead.
+     *
+     * `e.planes` ARE SCRATCH. `LiveEmitter` returns the same fourteen arrays from
+     * every call and rewrites them on the next hop, and `this.outBuf` — which
+     * they are views onto — is DETACHED the instant the next infer() transfers
+     * it. `covered()` therefore copies everything it wants out before it
+     * returns, and holds no reference to `planes` afterwards.
+     *
+     * DO NOT "IMPROVE" THIS BY CONSULTING `passthroughNow()` OR `passSpans`.
+     * Those are the READ-pointer view — "is the audio at the speaker unseparated
+     * right now" — and they are `latencySec()` behind this line, which is the
+     * wrong clock for the question. The EMIT path is the authority: this call
+     * site publishes separated audio, `fill()` publishes unseparated audio, and
+     * that is the whole distinction.
+     */
+    if (this.transcriber) this.transcriber.covered(e.from, e.len, e.planes);
 
     // A4: chunk 0 has landed. If the ladder already armed playback from fill()
     // during priming, it did so with `firstChunkMs` still 0 — i.e. on the
@@ -1144,6 +1183,22 @@ export class LivePipeline {
       if (!this.out.write(e.from, e.planes, e.len)) this.overruns++;
       this.passSpans.push({ from: e.from, to: e.from + e.len });
       if (this.passSpans.length > 64) this.passSpans.shift();
+      /**
+       * ---- THE MIDI RING TAP, UNCOVERED HALF, AND IT TAKES NO PLANES.
+       *
+       * `LiveEmitter.gap()` ZEROES the twelve stem planes. A transcriber that did
+       * not know that would read this span as digital silence and emit a
+       * confident "no notes" over audible music — which is the exact failure
+       * ADR 0002 / the owner's ruling R5 names, and the one it is least able to
+       * notice on its own, because a wrong answer here is indistinguishable from
+       * a quiet passage.
+       *
+       * So the span is recorded as UNCOVERED at the point it is published, and
+       * `uncovered()` is given no planes to be tempted by. `passSpans` above is
+       * the same fact on the READ pointer's clock, for the speaker's question;
+       * the transcriber must not read it and does not get to.
+       */
+      if (this.transcriber) this.transcriber.uncovered(e.from, e.len);
       left -= n;
     }
     if (!this.out.playing() && this.status === 'priming') this.armPlayback();
@@ -1481,6 +1536,27 @@ export class LivePipeline {
       state: 'fault', bpm: null, confidence: 0, beatFrame: null,
       fault: this.bpmFault, faults: this.bpmFaults,
     };
+  }
+
+  /**
+   * THE WIRE VALUE for `LIVE_STATE.midi`, and the only place it is built.
+   *
+   * It cannot throw into the heartbeat, for exactly `bpmPayload()`'s reason:
+   * `pushState()` is the 10 Hz timer AND the thing half a dozen call sites use
+   * to publish state after an error, so an exception escaping here would take
+   * the whole readout down over a feature the deck can survive losing.
+   * `Transcriber.payload()` promises never to throw; this is the belt to that
+   * braces, and it reports the failure rather than swallowing it — a tap that
+   * silently stopped presents as one that is listening and has not decided.
+   */
+  midiPayload() {
+    const off = { state: 'off', seq: 0, notes: 0, coveredSec: 0, uncoveredSec: 0, queued: 0, dropped: 0, fault: null };
+    if (!this.transcriber) return off;
+    try {
+      return this.transcriber.payload();
+    } catch (e) {
+      return { ...off, state: 'fault', fault: `payload: ${String((e && e.message) || e)}` };
+    }
   }
 
   // -------------------------------------------------------------- crossfader
@@ -2055,6 +2131,24 @@ export class LivePipeline {
        */
       bpm: this.bpmPayload(),
       /**
+       * THE MIDI TAKE'S COUNTERS — {state:'off'|'running'|'draining'|'fault',
+       * seq, notes, coveredSec, uncoveredSec, queued, dropped, fault}.
+       *
+       * Built HERE and nowhere else, beside `key` and `bpm`, because it is the
+       * same kind of field for the same reason: a 10 Hz cross-check that costs
+       * no new message on the hot path. The SPANS are on `MIDI_NOTES` and are
+       * deliberately not here — this carries counters, and its real job is to be
+       * a SECOND CARRIER OF `seq`. If the engine's `seq` runs ahead of the
+       * highest the deck holds, the deck has lost a message, and the message
+       * that would have told it so is the one that went missing. Two independent
+       * carriers of one number is what makes that detectable at all.
+       *
+       * The four state words here are the ENGINE's vocabulary. The deck's eight
+       * `data-show` values are a different set answering a different question,
+       * and nothing maps them 1:1 (ADR 0002 §4.3).
+       */
+      midi: this.midiPayload(),
+      /**
        * The interval the ENGINE has, echoed for the same reason `masterDb` is:
        * this value is validated and can be REFUSED here, so a UI that assumed
        * its own last request had landed would compose the key display against a
@@ -2164,6 +2258,37 @@ export class LivePipeline {
    */
   attachCacheWriter(w) { this.cacheWriter = w || null; }
   detachCacheWriter() { const w = this.cacheWriter; this.cacheWriter = null; return w; }
+
+  /**
+   * Hand this deck a MIDI transcriber to tap, or take it back. Deliberately the
+   * same shape as the two lines above, because it is the same relationship: this
+   * class owns NO transcription policy — when a take opens, what a note is, what
+   * second a sample is — only the two tap sites and the invariant that one of
+   * them sees separated audio and the other does not.
+   */
+  attachTranscriber(t) { this.transcriber = t || null; }
+  detachTranscriber() { const t = this.transcriber; this.transcriber = null; return t; }
+
+  /**
+   * The CAPTURE HEAD, on the same absolute axis the emitter's `from` is on.
+   *
+   * It exists for one caller — `offscreen/engine.js`, tying the MIDI take's
+   * frame clock to the page's `currentTime` — and it is a method here rather
+   * than `d.ring().writeFrames() - d.live.baseFrame` written out at that call
+   * site because `baseFrame` is this class's bookkeeping and two copies of that
+   * subtraction is two places to be wrong about which axis a frame is on.
+   *
+   * THE CAPTURE HEAD AND NOT THE PLAYHEAD, and not the emitter's commit: the
+   * audio being captured now is the audio the picture is showing now, while the
+   * emitter is `latencySec()` behind and the speaker further still. Anchoring on
+   * either of those would bake seconds of offset into every note time.
+   *
+   * @returns {number} live-relative output frames, 0 when nothing is running.
+   */
+  frameNow() {
+    const ring = this.d.ring();
+    return ring ? Math.max(0, ring.writeFrames() - this.baseFrame) : 0;
+  }
 
   /** Live stats for the harness — not part of the UI contract. */
   stats() {

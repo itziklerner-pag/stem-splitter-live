@@ -151,6 +151,21 @@
  *     a seam slice (`CONTRIBUTING.md` is rank 1 over everything in this file).
  *     v1 therefore freezes the SHAPE that ships and flags the wording. This is
  *     the one thing in this block that is somebody else's to close.
+ *
+ * ---- ADDED AT v1.1 (S12), a MINOR change --------------------------------
+ *
+ * `DeckHost.deliver(name, bytes, mime)`. The product hands the user exactly one
+ * kind of file — a MIDI pack — and until S12 it handed back nothing at all. It
+ * passes this freeze's own judging question without a wobble: an Electron main
+ * process discharges it with `showSaveDialog` + `fs.writeFile` and invents
+ * nothing. Every existing Host fails `assertHost` at boot until it implements
+ * it, which is the designed cost of a MINOR change and the reason the check is
+ * at boot rather than at the first click.
+ *
+ * NO NEW PERMISSION. This Host discharges it with a Blob and an `<a download>`
+ * inside the deck iframe; `manifest.json` is untouched and
+ * `tools/tree-check.mjs`'s assertion that there is no `downloads` permission
+ * stays green and verbatim. See ADR 0002.
  * ========================================================================= */
 
 /**
@@ -823,10 +838,11 @@ export function serialiseBackend(backend, what = 'Backend') {
 /* ========================================================================= */
 
 /**
- * The deck's Host. EIGHT members: the bus (`send` + `onMessage`), storage
+ * The deck's Host. NINE members: the bus (`send` + `onMessage`), storage
  * (`storageGet`, `storageSet`, `onStorageChanged`) and the arm chord
- * (`armShortcut`) from S4, plus the page the deck is drawn into and the player
- * above it when there is one, from S5.
+ * (`armShortcut`) from S4, the one file this product hands back (`deliver`)
+ * from S12, plus the page the deck is drawn into and the player above it when
+ * there is one, from S5.
  *
  * `page` and `transport` are NAMESPACES rather than callable duties, so they are
  * deliberately not in `DECK_HOST_DUTIES` — `assertHost` requires
@@ -953,6 +969,32 @@ export function serialiseBackend(backend, what = 'Backend') {
  *   silent wrong answer. `docs/VENDORING.md` lists it among the strings a copy
  *   patches.
  *
+ * @property {(name: string, bytes: Uint8Array, mime: string) => void} deliver
+ *   Hand the user ONE finished file. This is the only route by which any bytes
+ *   this product made ever leave it, and it is deliberately one route.
+ *   BYTES, NEVER A URL. A `blob:` URL minted at the extension's origin is
+ *   unresolvable from youtube.com, so a Host that ever routes this through its
+ *   content script must carry the bytes; handing over a URL would work under
+ *   this Host today and fail silently under the fallback it is there for.
+ *   AND THE BUFFER SURVIVES THE CALL. `deliver` MUST NOT neuter `bytes` — no
+ *   transfer list, no detach. The deck keeps the pack so `Save again` works
+ *   after a cancelled save dialog, and a Host that posted the bytes to another
+ *   process with a transfer list would take that away with nothing on screen to
+ *   say so.
+ *   RETURNS UNDEFINED, AND IS NEVER AWAITED, for the reason `send` and
+ *   `storageSet` do: under this Host an anchor click cannot report success —
+ *   Chrome's download UI is not observable from the page — so a Host that
+ *   answered `Promise<boolean>` would be inventing the answer, which is the
+ *   thing this freeze was judged against. `saved` in the deck therefore means
+ *   "the pack was handed over", never "the file is on disk", and the deck says
+ *   so by leaving `Save again` live.
+ *   IT REFUSES SYNCHRONOUSLY. The unit vouches for the bytes first
+ *   (`shared/midi.js::assertDeliverable`, whose allowlist is exactly
+ *   `application/zip` and `audio/midi`) and a Host implements the transport
+ *   over bytes that have already been checked. A refusal is the call site being
+ *   wrong about a file it built itself — the same shape as rule 5's area
+ *   refusal — so it THROWS where the mistake is, and is not swallowed.
+ *
  * @property {DeckPage} page
  *   Where the deck is drawn: its keys, its height, its life on the page, and the
  *   host's autoplay-next report. EVERY DeckHost owes this, including one with no
@@ -1060,6 +1102,7 @@ export const DECK_HOST_DUTIES = Object.freeze({
   storageSet: 'store one value, in the area whose lifetime the deck named',
   onStorageChanged: 'tell the deck when one stored value changes underneath it',
   armShortcut: 'report the key chord this platform has bound to the arm gesture',
+  deliver: 'hand the user the one finished file this product makes, as bytes the unit has already vouched for',
 });
 
 /**

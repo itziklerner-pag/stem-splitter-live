@@ -21,10 +21,13 @@
  *                       swapping it is the Host's one line, not a fork of this.
  *
  * `./host.js` is the ONLY file under `offscreen/` that says `chrome.` at all:
- * `deck.js`, `cacheddeck.js`, `live.js` and `master.js` reach their worklet
- * modules and the ORT runtime through `assetUrl`, handed down from here — on
- * `shared` for the two kinds of deck, and as a constructor argument to
- * `MasterBus`, which is built before there is a context to await on.
+ * `deck.js`, `cacheddeck.js`, `live.js`, `master.js` and `transcribe.js` reach
+ * their worklet modules, the ORT runtime and the Basic Pitch weights through
+ * `assetUrl`, handed down from here — on `shared` for the two kinds of deck, as
+ * a constructor argument to `MasterBus`, which is built before there is a
+ * context to await on, and on the dependency bundle each `Transcriber` is
+ * built with. `assetUrl` is the ONE thing the MIDI take needs from a Host, and
+ * it is an EXISTING duty: the model is a unit-relative asset like any other.
  *
  * Nothing else here is Chrome-specific, and the audit trail is the whole list
  * rather than a sample: Web Audio (`AudioContext`, `AudioWorkletNode`),
@@ -69,6 +72,7 @@ import { masterTrimDb } from '../engine/mixer.js';
 import { MasterBus } from './master.js';
 import { Deck } from './deck.js';
 import { CachedDeck, resumeSeek } from './cacheddeck.js';
+import { Transcriber } from './transcribe.js';
 import { StemCache, CacheWriter, cacheKey, videoIdFromUrl,
   primeRefusal, commitRefusal } from '../shared/stemcache.js';
 // The transpose's accepted range, imported for the REFUSAL MESSAGE and nothing
@@ -656,6 +660,29 @@ function playCachedAtPage(id) {
   cd.play();
 }
 
+/**
+ * The cache has taken this deck over while a take was open. CLOSE THE TAKE AT
+ * WHAT IT HAS, rather than leave it open against a pipeline that will never call
+ * it again.
+ *
+ * A DRAIN AND NOT A FAULT, deliberately. Everything the take holds was read off
+ * the live separator and is good; the only thing that has changed is that no more
+ * is coming. `flush()` is exactly the shape of that — it closes every open note,
+ * sends the last `MIDI_NOTES` and then `MIDI_FLUSHED`, and the deck's own
+ * handler takes `MIDI_FLUSHED` in the `open` phase and lands the row on `ready`
+ * with a truthful coverage figure. `MIDI_ERROR` would land it on `bad`, which
+ * offers no Save at all and would throw away a perfectly good pack over an event
+ * the user did not cause. The refusal at `MIDI_START` is the other case — there
+ * is nothing to save there.
+ */
+function midiCloseForCache(id) {
+  const t = midiTakes[id];
+  if (!t || !t.open) return;
+  log(`[${id}] MIDI take closed at ${t.payload().coveredSec.toFixed(1)}s — the stem cache has taken this deck `
+    + 'over and the live tap will not be called again');
+  t.flush();
+}
+
 /** Tear a cached deck down and forget it. */
 function stopCached(id) {
   const cd = cachedDecks[id];
@@ -856,7 +883,7 @@ async function startLive(d) {
   // Already holding a cached track: this is a RESUME, not a fresh start. The
   // surfaces send LIVE_START for "the video started playing" and do not know
   // which kind of deck they have.
-  if (isCached(d.id)) { playCachedAtPage(d.id); return; }
+  if (isCached(d.id)) { midiCloseForCache(d.id); playCachedAtPage(d.id); return; }
 
   const t = trackKey(d);
   /**
@@ -867,7 +894,12 @@ async function startLive(d) {
    * side-panel build never plays from the cache even when the entry is there,
    * and that is correct rather than a gap: it has no video to line up with.
    */
-  if (t && pageVideo[d.id] && await cache.has(t.key) && await startCached(d, t)) return;
+  if (t && pageVideo[d.id] && await cache.has(t.key) && await startCached(d, t)) {
+    // The cache took the deck over: whatever is left of an open take is all
+    // there is ever going to be. See `midiCloseForCache`.
+    midiCloseForCache(d.id);
+    return;
+  }
 
   d.mode = 'live';
   // Anything already drained belongs to an export that is not going to happen.
@@ -877,7 +909,20 @@ async function startLive(d) {
   d.capturedFrames = 0;
   const why = beginPrime(d, t);
   if (why) log(`[${d.id}] not caching this listen — ${why}`);
+  /**
+   * RE-ATTACH THE MIDI TAP, if a take is still open. `LivePipeline.stop()`
+   * detaches — the pipeline that was feeding the tap is gone — but the TAKE
+   * survives, because the deck holds it and every closed note in it. A seek
+   * therefore re-primes into the same take and the replayed span overwrites
+   * what was there, which is last-pass-wins and is what the deck already
+   * promises (ADR 0002 §8.8).
+   *
+   * BEFORE `start()`, so the first hop of the new session is tapped. Attaching
+   * afterwards would lose whatever landed in between.
+   */
+  if (midiTakes[d.id] && midiTakes[d.id].open) d.live.attachTranscriber(midiTakes[d.id]);
   await d.live.start();
+  midiAnchor(d.id);
   // The set of loaded decks just changed, so the EFFECTIVE crossfader position
   // may have: one deck parks hard on itself, two decks honour the control.
   pushXfader(true);
@@ -1130,6 +1175,67 @@ async function readOpfsRoot(name) {
  */
 const pageRate = { A: 1, B: 1 };
 
+// ------------------------------------------------------------ the MIDI take
+/**
+ * ONE OPEN TAKE PER DECK, or null. The engine owns the object's LIFETIME and
+ * nothing else about it: what a note is, what second a sample is and what is
+ * covered all live in `offscreen/transcribe.js`, which is the only thing holding
+ * the anchor and the span list (ADR 0002 §8.9).
+ *
+ * It is here rather than on `Deck` for the same reason `pageVideo` and
+ * `pageRate` are: a take outlives the live pipeline that feeds it. `LIVE_STOP`
+ * detaches the tap and the deck still holds every closed note; the next
+ * `LIVE_START` re-attaches into the SAME take, so a seek re-primes without
+ * throwing the transcription away (ADR 0002 §8.8).
+ *
+ * @type {Record<'A'|'B', import('./transcribe.js').Transcriber|null>}
+ */
+const midiTakes = { A: null, B: null };
+
+/**
+ * The take for `id`, built on first use.
+ *
+ * It costs NOTHING until audio arrives — no worker, no wasm instance, no model
+ * read — which is what lets `MIDI_START` be accepted whether or not live is
+ * running and whether or not the 109 MB weights are present. Arming a
+ * transcription is not asking for audio, so it must not become a download
+ * prompt the user did not ask for (ADR 0002 §8.1).
+ */
+function midiTake(id) {
+  if (!midiTakes[id]) {
+    midiTakes[id] = new Transcriber({
+      deck: id,
+      assetUrl: host.assetUrl,
+      // Deck-tagged, exactly the way `Deck` tags its `LivePipeline`'s sends. The
+      // ENVELOPE's `to`/`from` are the Host's and no MIDI payload may use either
+      // name — the span fields are `spanFrom`/`spanTo` for that reason.
+      send: (msg) => send({ deck: id, ...msg }),
+      log: (line) => log(`[${id}] ${line}`),
+      videoNow: () => pageVideo[id],
+      rateNow: () => pageRate[id],
+    });
+  }
+  return midiTakes[id];
+}
+
+/**
+ * Tie an open take's frame clock to the page's clock.
+ *
+ * THE CAPTURE HEAD IS THE FRAME, not the playhead and not the emitter's commit:
+ * the audio being captured now is the audio the picture is showing now, while
+ * the emitter is `latencySec()` behind. `Transcriber.anchor()` decides whether
+ * a given reading is a JUMP or is jitter — that decision needs the take's own
+ * prediction and belongs where the clock lives, not here, and this is called at
+ * `PAGE_VIDEO`'s ~4 Hz where a caller-side re-anchor would break every lane four
+ * times a second.
+ */
+function midiAnchor(id) {
+  const t = midiTakes[id];
+  const v = pageVideo[id];
+  if (!t || !t.open || !v || !decks[id]) return;
+  t.anchor(decks[id].live.frameNow(), v.currentTime, pageRate[id]);
+}
+
 // The Host owns the routing guard and the listener's return value; `handle` is
 // handed the raw envelope and its promise is deliberately not awaited — every
 // case reports through `send`/`push`, and `handle`'s own catch is the only
@@ -1207,6 +1313,126 @@ async function handle(m) {
         // for, which is the whole difference from a live deck (cacheddeck.js
         // seek()). The live path handles its own jump elsewhere.
         if (m.seeking === true && isCached(id)) cachedDecks[id].seek(t);
+        // THE MIDI TAKE'S CLOCK, and this is the only place it can be read: this
+        // message is the only thing in the build that knows where the video is.
+        // Every reading is offered; the take decides which ones are jumps.
+        midiAnchor(id);
+        return;
+      }
+
+      /**
+       * ---------------------------------------------------- the MIDI take (S12)
+       *
+       * Three gestures, all USER-DRIVEN and never on a timer. ADR 0002 / the
+       * owner's ruling R5: the transcription is live, from the stem ring, as the
+       * song plays, and nothing waits on it.
+       *
+       * `MIDI_START` COSTS NO BYTES and must not trigger the htdemucs fetch. It
+       * is accepted whether or not live is running and whether or not the
+       * weights are present, because arming a transcription is not the same
+       * gesture as asking for audio: the take opens, the tap attaches, and if no
+       * stem planes ever arrive the deck says so instead of being handed a
+       * download prompt nobody asked for (ADR 0002 §8.1).
+       */
+      case 'MIDI_START': {
+        const id = normalizeDeckId(m.deck);
+        /**
+         * A CACHED DECK CANNOT FEED A TAKE, AND SAYS SO BEFORE IT COSTS A WORKER.
+         *
+         * `CachedDeck` drives the same fourteen-plane ring, but it does it from
+         * its own `fill()` and there is no tap site in it: `startLive()` returns
+         * on both cached branches BEFORE `attachTranscriber`, and
+         * `CachedDeck.pushState` publishes no `midi` field at all. Armed on a
+         * cache hit, `midiTake(id).start()` spawned the second ORT wasm instance,
+         * attached the take to a `LivePipeline` that never runs, and the row sat
+         * in `waiting` for ever — because the deck reads an ABSENT `midi` field as
+         * `waiting`, which is the right default and the wrong resting state.
+         *
+         * REFUSED RATHER THAN FED, and that is a scope decision rather than the
+         * better product answer. ADR 0002 / the owner's ruling R5 wants the tap
+         * to ride a cache hit ("on a cache hit the deck still feeds the ring in
+         * real time"), and the ring tap would reach it: `CachedDeck.fill()`
+         * already writes `RING_PLANES` planes of `n` frames at
+         * `this.out.writeFrames()`, which is `covered()`'s signature exactly.
+         * What it needs and does not have is a tap site inside that loop, an
+         * `attachTranscriber` pair beside the one on `LivePipeline`, and a clock
+         * tie — a cached deck's source second is `(readBase + F) / SR` off its own
+         * counters, not `frameNow()` — and `offscreen/cacheddeck.js` was not this
+         * slice's to change. Until it is, the honest answer is a refusal the user
+         * can act on: play the track without the cache and the live tap gets it.
+         *
+         * `NOT_RUNNING` from the frozen four, because that is precisely what is
+         * true — the pipeline a take reads from is not running on this deck and
+         * cannot be made to.
+         *
+         * ponytail: a refusal, not the feature. Ceiling: on a track already in
+         * the stem cache — which is exactly the track a user replays in order to
+         * transcribe it — this build cannot transcribe at all, and the only way
+         * round it is to evict the entry and listen live once more. Upgrade path:
+         * one tap site in `CachedDeck.fill()` after its `out.write()` (the same
+         * two lines `LivePipeline.runChunk` carries), an `attachTranscriber` pair
+         * beside this deck's, and an anchor from `(readBase + F) / SR` instead of
+         * `frameNow()`. Three small edits in one file, all of them in
+         * `offscreen/cacheddeck.js`.
+         */
+        if (isCached(id)) {
+          log(`[${id}] MIDI take refused — this deck is playing from the stem cache`);
+          return void send({
+            type: 'MIDI_ERROR', deck: id, code: 'NOT_RUNNING',
+            message: 'This deck is playing separated stems from the cache, and the MIDI tap reads the live '
+              + 'separator. Clear this track from the stem cache and play it again to transcribe it.',
+          });
+        }
+        const t = midiTake(id);
+        t.start();
+        // `decks[id]`, not `deck(id)`: opening a take must not CREATE deck B.
+        // A deck that does not exist yet has no pipeline to tap and will be
+        // attached to by `startLive` when it does.
+        if (decks[id]) decks[id].live.attachTranscriber(t);
+        midiAnchor(id);
+        log(`[${id}] MIDI take armed`);
+        return;
+      }
+
+      /**
+       * Close every open note at the current lane head, drain the worker queue,
+       * send the last `MIDI_NOTES` and then `MIDI_FLUSHED`. The deck holds a
+       * complete take iff it holds every seq `1..MIDI_FLUSHED.seq`.
+       */
+      case 'MIDI_FLUSH': {
+        const id = normalizeDeckId(m.deck);
+        const t = midiTakes[id];
+        if (!t || !t.open) return void send({ type: 'MIDI_ERROR', deck: id, code: 'NOT_RUNNING',
+          message: 'There is no MIDI take open on this deck to finish.' });
+        return void t.flush();
+      }
+
+      /**
+       * The take is over — the row was discarded, or saved and dismissed. Drop
+       * the DSP state and TERMINATE the second worker: the graceful `DISPOSE`
+       * hands ORT's wasm heap back, but terminating is what actually frees the
+       * instance, and a take that ended must not leave one resident until the
+       * offscreen document is reaped.
+       */
+      case 'MIDI_STOP': {
+        const id = normalizeDeckId(m.deck);
+        const t = midiTakes[id];
+        /**
+         * SILENT WHEN THERE IS NOTHING TO STOP, and the asymmetry with
+         * `MIDI_FLUSH` above is deliberate. A flush is a REQUEST THE DECK IS
+         * WAITING ON — it has started its own `latencySec + 2 s` deadline and
+         * will call the take `bad` when that expires — so a flush this engine
+         * cannot serve has to be answered. A stop is a request to be rid of
+         * something, and "it is already gone" is that request granted. Answering
+         * `NOT_RUNNING` to a second stop would put a `MIDI_ERROR` on the wire
+         * for a take that had already been handed over intact, and the deck's
+         * own rule is that a `MIDI_ERROR` turns the row red even after a save.
+         */
+        if (!t) return;
+        if (decks[id] && decks[id].live.transcriber === t) decks[id].live.detachTranscriber();
+        t.stop();
+        midiTakes[id] = null;
+        log(`[${id}] MIDI take closed`);
         return;
       }
 
@@ -1347,6 +1573,13 @@ async function handle(m) {
         // for a refused request would tell the probe something changed at a
         // frame where nothing did.
         if (decks[id]) markTap(decks[id], 'speed', { rate: r, accepted: true });
+        // A SPEED THIS DECK ACCEPTED IS A CHANGE OF THE SOURCE CLOCK'S SLOPE:
+        // from here on, one second of captured audio is `r` seconds of the
+        // video's own timeline. Re-anchoring is not optional — the take would
+        // otherwise keep converting frames at the old rate and every note after
+        // this line would be placed further and further wrong. Only an ACCEPTED
+        // rate re-anchors, which is why this is after the two refusals above.
+        midiAnchor(id);
         return void send({ type: 'SPEED_STATE', deck: id, rate: r, accepted: true, why: null });
       }
 
@@ -1665,6 +1898,11 @@ async function handle(m) {
  * the pieces it would call are already here.
  */
 async function teardown() {
+  // The MIDI takes FIRST: each open one holds a second wasm instance, and
+  // `Transcriber.stop()` terminates the worker synchronously. Nothing below
+  // reaches them — a take is not a deck — so a teardown that skipped this line
+  // would leave the transcription worker running for the life of the document.
+  for (const id of DECKS) { if (midiTakes[id]) { midiTakes[id].stop(); midiTakes[id] = null; } }
   for (const d of liveDecks()) { detachTap(d); await d.dispose().catch(() => {}); }
   gpu.drain();
   master.dispose();
@@ -1699,6 +1937,10 @@ host.onTeardown(() => {
      */
     if (d.backend) Promise.resolve(d.backend.dispose()).catch(() => {});
   }
+  // The second wasm instance goes the same way, and it can: `Transcriber.stop()`
+  // does its irreversible work — `terminate()` — synchronously, which is the
+  // same interface rule `Backend.dispose()` is held to one line up.
+  for (const id of DECKS) { if (midiTakes[id]) midiTakes[id].stop(); }
 });
 
 // ponytail: this boot line names the Chrome offscreen document, in a file whose

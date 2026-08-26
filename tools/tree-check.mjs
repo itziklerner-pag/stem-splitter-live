@@ -51,12 +51,94 @@ ok(cmds.length === 1 && cmds[0] === 'arm-tab',
   `exactly one arm chord is declared (got [${cmds.join(', ')}]) — a second chord is a second deck`);
 
 /**
- * NO EXPORT. `downloads` is the permission the offline-export build needed, and
- * this build has no code that could use it. A permission a build cannot exercise
- * is a review question at submission time and a lie in the install prompt.
+ * NO `chrome.downloads`, WHICH IS NOT THE SAME CLAIM AS "NO EXPORT" — and the
+ * message under this assertion made the wider one until ADR 0002.
+ *
+ * What is checked has not moved: `downloads` is the permission the offline-export
+ * build needed, this build still does not request it, and a permission a build
+ * cannot exercise is a review question at submission time and a lie in the
+ * install prompt. ADR 0002 decision 1 keeps this assertion byte for byte and
+ * narrows only the message, because the assertion was always the sound half.
+ *
+ * WHAT IT NEVER CHECKED. An extension-origin page can mint a `Blob` and click an
+ * `<a download>` with no permission at all, and could have on the day this line
+ * was written. Since ADR 0002 the deck does exactly that, once, for one kind of
+ * file: `DeckHost.deliver(name, bytes, mime)` hands over a MIDI pack. So the
+ * property that actually holds is narrower than the old message claimed —
+ * *the extension cannot produce a user-accessible file that reproduces the
+ * captured audio* — and a `.mid` carries no samples, no timbre and no
+ * performance.
+ *
+ * WHERE THAT PROPERTY IS ENFORCED, since it is not enforced here:
+ * `assertDeliverable` in `extension/shared/midi.js` allows exactly
+ * `{application/zip, audio/midi}` and looks INSIDE the zip for `MThd` on every
+ * entry, and `qa/midi-pack.mjs` is the gate that can fail — it builds a real
+ * pack, and it builds a pack with a WAV in it and asserts the guard refuses it.
+ * A grep is defeated by a reference assembled at run time; a capability the
+ * browser never granted is not, which is the whole reason the permission stays
+ * absent and this assertion stays.
  */
 ok(!(mf.permissions || []).includes('downloads'),
-  'no downloads permission — nothing in this build writes a file');
+  'no downloads permission — this build cannot use chrome.downloads');
+
+/**
+ * ...AND THE DECK'S IFRAME IS NOT SANDBOXED, which is the load-bearing fact a
+ * hardening pass would break in good faith and in silence.
+ *
+ * `sandbox` on an iframe is an ALLOWLIST: the attribute drops every capability
+ * and hands back only what it names. `allow-downloads` is one of the ones it
+ * drops, so `sandbox="allow-scripts allow-same-origin"` on the deck frame — the
+ * spelling a hardening pass reaches for, and the one that turns this red — takes
+ * the anchor click with it and the pack never leaves. Nothing throws: Chrome
+ * logs a line in the frame's own console, which nobody is watching, and the
+ * button looks like it did nothing.
+ *
+ * TWO ASSERTIONS, BECAUSE ONE OF THEM CANNOT LOOK ON ITS OWN. A grep that finds
+ * no `sandbox` in a file it failed to find, or in a file that stopped mounting
+ * the deck, is a green that means nothing. So the first names the mounter — the
+ * declared content script whose source names the deck page — and goes red if
+ * there is not exactly one, and the second is the property, over the file the
+ * first one found.
+ *
+ * The needle is deliberately the whole file rather than the `mount()` body: it
+ * creates exactly one iframe, so a `sandbox` anywhere in it is about the deck.
+ * A mention of the word in prose is not matched (all three spellings are
+ * assignments or `setAttribute`), and a false red here is the safe direction —
+ * it is a line somebody reads.
+ *
+ * WHAT IT CANNOT SEE, stated rather than left as an absence: an attribute name
+ * assembled from a variable — `el[k] = v`, `setAttribute(k, v)` — is invisible
+ * to this, the same blind spot the import crawl below has about a computed
+ * specifier. Closing it needs a parser, not a wider regex.
+ *
+ * WATCHED GOING RED before it was gated, each edit applied alone to
+ * `extension/content.js` and reverted:
+ *
+ *   - `frame.sandbox = 'allow-scripts allow-same-origin'` beside `frame.allow`
+ *     — 21 of 22, and the red names the file.
+ *   - `frame.setAttribute('sandbox', 'allow-scripts')` — 21 of 22, same red;
+ *     the property and the attribute are two spellings of one mistake.
+ *   - the mounter no longer naming the deck page (`ui/embed.html` ->
+ *     `ui/embed2.html`) — 20 of 22: the control fires first, and the property
+ *     below it says NO MOUNTER FOUND rather than reporting a clean scan of
+ *     nothing.
+ */
+const deckPage = (mf.web_accessible_resources || []).flatMap((w) => w.resources || [])
+  .find((r) => r.endsWith('.html'));
+const mounters = (mf.content_scripts || []).flatMap((c) => c.js || [])
+  .filter((rel) => fs.existsSync(path.join(EXT, rel))
+    && deckPage && fs.readFileSync(path.join(EXT, rel), 'utf8').includes(deckPage));
+ok(mounters.length === 1,
+  `exactly one declared content script mounts ${deckPage || 'the deck'} (got [${mounters.join(', ')}])`
+  + ' — the file the next assertion is about');
+
+const SANDBOX = /\.sandbox\s*=|setAttribute\(\s*['"`]sandbox['"`]|\bsandbox\s*=\s*['"]/;
+const sandboxed = mounters.filter((rel) => SANDBOX.test(fs.readFileSync(path.join(EXT, rel), 'utf8')));
+ok(mounters.length > 0 && sandboxed.length === 0,
+  `...and it puts no sandbox attribute on the deck iframe${sandboxed.length
+    ? ` — SANDBOXED: ${sandboxed.join(', ')}; a sandbox without allow-downloads kills the MIDI handoff (ADR 0002)`
+    : mounters.length === 0 ? ' — NO MOUNTER FOUND, so this searched nothing'
+      : `  ${mounters.join(', ')} scanned`}`);
 
 // -------------------------------------------------- every named path exists
 const named = [

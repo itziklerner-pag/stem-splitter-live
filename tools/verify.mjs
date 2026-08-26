@@ -782,6 +782,41 @@ function selfCheck(steps) {
   check('...and its un-counted note lines are not mistaken for assertions',
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
+  // ---- the four MIDI steps added on 2026-08-26 (ADR 0002) ------------------
+  // Same standing rule as every block above, and it is not a formality here: the
+  // last three suites added to `steps` all needed parser work and it was only
+  // found by RUNNING them. Every string below is the ACTUAL line the named file
+  // printed when it was run from here — one real assertion line and the real
+  // summary line, untruncated.
+  //
+  // All four put up the two-space `PASS` shape and the `N passed, M failed`
+  // summary, so all four were recognised on the first run and none of them
+  // needed a change to `ASSERTED` or `summarise()`. THE VARIANT WORTH PINNING is
+  // that three of them print the summary with NO colour at all, where every
+  // other suite in this list wraps it in an escape — `strip()` is what makes
+  // that a non-event, and a regex that started depending on the escape would
+  // take these three VOID while leaving the rest green.
+  shape('resample2.js "26 passed, 0 failed", summary UNCOLOURED', 'resample2',
+    '  \x1b[32mPASS\x1b[0m taps-odd-length-and-linear-phase  31 taps, worst |h[n] - h[N-1-n]| = 0\n'
+    + '\n26 passed, 0 failed\n', 'PASS', '26 passed, 0 failed');
+  shape('notes.js "51 passed, 0 failed", uncoloured too', 'notes',
+    '  \x1b[32mPASS\x1b[0m one-note-onset-sample-is-frame-20  5120, wanted 5120 (= 0.2322 s)\n'
+    + '\n51 passed, 0 failed\n', 'PASS', '51 passed, 0 failed');
+  shape('drumtap.js "54 passed, 0 failed"', 'drumtap',
+    '  \x1b[32mPASS\x1b[0m a-2-s-decay-air-band-burst-is-a-crash-49  1 onset(s) [49]\n'
+    + '\n54 passed, 0 failed\n', 'PASS', '54 passed, 0 failed');
+  // midi-pack colours its summary and puts some details on a CONTINUATION line
+  // rather than after two spaces, which is `estimator-ground`'s shape — pinned
+  // here as well because a detail bleeding into the name makes every run report
+  // coverage drift, and this file has 88 assertions to report it over.
+  shape('qa/midi-pack.mjs "88 passed, 0 failed", coloured, with continuation-line details', 'midi-pack',
+    '  \x1b[32mPASS\x1b[0m crc32 of one zero byte === 0xD202EF8D\n'
+    + '         got 0xD202EF8D — a second published vector, so the answer above is not one lucky string\n'
+    + '\n\x1b[32m88 passed, 0 failed\x1b[0m\n', 'PASS', '88 passed, 0 failed');
+  check('...and midi-pack\'s assertion name stops at the newline, not at its continuation detail',
+    JSON.stringify(assertionNames('  \x1b[32mPASS\x1b[0m crc32 of nothing is 0\n         got 0x0\n'))
+      === JSON.stringify(['crc32 of nothing is 0']),
+    JSON.stringify(assertionNames('  \x1b[32mPASS\x1b[0m crc32 of nothing is 0\n         got 0x0\n')));
 
   // The half of the VOID rule the old `\d+` could not see. Both of these are
   // exit-0 runs that assert nothing while printing a summary that LOOKS like a
@@ -1099,6 +1134,81 @@ const steps = [
   // refusal contract and the same wire-payload shape one plane over, so a red in
   // one is read next to the other.
   { id: 'bpmtap', title: 'node extension/engine/bpmtap.js — the tempo tap: the onset envelope, the octave tie-break, beat phase', args: ['extension/engine/bpmtap.js'] },
+  /**
+   * Beside `bpmtap` because the two are the same crossover read two different
+   * ways, and a red in one is nearly always read next to the other: both split
+   * the drums stem at 150 Hz and 3000 Hz on a 441-frame hop, and this one KEEPS
+   * the three pre-normalisation band envelopes that `bpmtap.js` sums away. That
+   * file's header says the per-band normalisation is the octave fix; it is also
+   * exactly the cue a classifier needs, which is why this is a second module and
+   * not a second caller of the first.
+   *
+   * ITS CONTROL CAN LOSE, which is the assertion worth knowing about: a stub
+   * detector that answers 36 for every onset is written into the suite, run over
+   * the kick/snare backbeat fixture, and asserted to FAIL the sequence the real
+   * classifier passes. Without it the classification claim is a second copy of
+   * the measurement wearing the word "control" (the owner's ruling R4).
+   */
+  { id: 'drumtap', title: 'node extension/engine/drumtap.js — the drum tap: three pre-normalisation bands, an adaptive median, and a GM classification a one-class detector is asserted to fail', args: ['extension/engine/drumtap.js'] },
+  /**
+   * The pitched half of the same take, in the order the audio moves: 44 100 Hz
+   * stem planes -> `resample2` -> 22 050 Hz lane samples -> `notes` -> closed
+   * notes. They sit together because neither red means anything without the
+   * other — a decimator that drops a sample and a decoder whose frame grid
+   * drifts produce the same symptom, a MIDI file that slides against the song.
+   *
+   * Both carry a control that can lose, and both are counts rather than clocks:
+   * `resample2` writes the NAIVE decimator into its own suite and asserts it
+   * fails the same 18 kHz stopband threshold the FIR path passes, and `notes`
+   * writes the naive `(w*142 + k)*256` frame map in as a negative control and
+   * asserts it disagrees with the real one by exactly 188 samples per window —
+   * 0.52 %, about 1.25 s over a four-minute song.
+   */
+  { id: 'resample2', title: 'node extension/engine/resample2.js — the 2:1 decimator: passband, a stopband whose naive control loses, and phase continuity across a split block', args: ['extension/engine/resample2.js'] },
+  { id: 'notes', title: 'node extension/engine/notes.js — Basic Pitch\'s three heads into closed notes, and the frame grid that does not gain 188 samples a window', args: ['extension/engine/notes.js'] },
+  /**
+   * The ORCHESTRATION the three above are parts of, and the step this block went
+   * without for a batch: `offscreen/transcribe.js` self-checks 122 assertions
+   * over the ring cut, the two backpressure limits, the lane clock and its
+   * restart, seq numbering, the passthrough discard, the coverage accounting and
+   * the latched fault, exits non-zero on failure, and was run by nothing — the §3
+   * rule at the top of this file, on the newest code in the tree. It was RED when
+   * it was admitted (86 passed, 1 failed), which is the whole argument for
+   * admitting it: `npm test` was green over a broken invariant at that moment.
+   *
+   * ~0.2 s, no browser, no weights, no clock: every number it prints is a count.
+   * Its summary is `N passed, M failed`, the shape `unit` already pins, so neither
+   * ASSERTED nor summarise() needed a line — verified by running it, not by
+   * reading the regex.
+   *
+   * FIVE OF ITS SECTIONS HAVE BEEN WATCHED GOING RED, one mutation at a time and
+   * each reverted before the next, and each section's own comment carries the
+   * verbatim output it printed: the hop-derived queue cap and lane ring, the
+   * refused window's span, the tail cut at the flush, the re-derived `_f0` across
+   * a pipeline restart, and the engine's half of last-pass-wins.
+   */
+  { id: 'transcribe', title: 'node extension/offscreen/transcribe.js — the take: the ring cut, the two backpressure limits at every hop, the lane clock across a restart, seq numbering, the passthrough discard, coverage accounting and the latched fault', args: ['extension/offscreen/transcribe.js'] },
+  /**
+   * Last of the transcription block because it is what the other four feed: the
+   * SMF writer, the pack layout, the deck's take and the delivery guard, all in
+   * `extension/shared/midi.js` and `extension/shared/zip.js`.
+   *
+   * IT IS THE ACCEPTANCE GATE FOR ADR 0002 / the owner's ruling R2, and R2 asks
+   * for three things by name: one declared delivery module whose allowlist is
+   * exactly `{application/zip, audio/midi}`, a suite that builds a REAL pack and
+   * asserts every zip entry begins `MThd`, and a control that can lose. The
+   * control is the third section: the same builder assembles a pack containing a
+   * WAV — a real one, from this repo's own `encodeWav` — and the suite asserts
+   * `assertDeliverable` REFUSES it. An allowlist nothing has been seen to bounce
+   * is a comment.
+   *
+   * WHAT IT CANNOT SEE, so the green is not read as more than it is: it checks
+   * bytes at one call site. A reference assembled at run time defeats a static
+   * scan, which is why the `downloads` permission stays absent and why `tree`
+   * above still asserts that absence — the platform withholds what the grep
+   * cannot. This is the second line, not the first.
+   */
+  { id: 'midi-pack', title: 'node qa/midi-pack.mjs — ADR 0002 / R2: a real pack whose every entry begins MThd, and a WAV the delivery guard is asserted to refuse', args: ['qa/midi-pack.mjs'] },
   { id: 'autonav', title: 'node extension/autonav.js — autoplay-next suppression decisions', args: ['extension/autonav.js'] },
   /**
    * Beside `autonav` because it is the same file's neighbour and prints a
