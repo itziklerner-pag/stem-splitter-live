@@ -4894,6 +4894,43 @@ if (group('host')) {
             + 'audioWorklet.addModule() would be handed it verbatim'
           : url);
 
+    /**
+     * A DIRECTORY PATH COMES BACK AS A DIRECTORY URL — S2's obligation, held
+     * against the SHIPPED Host rather than through the graph.
+     *
+     * `offscreen/deck.js` hands `assetUrl('vendor/ort/')` to the inference
+     * worker's `INIT` and ONNX Runtime appends its own file names to it, so a
+     * resolver that tidies the trailing slash away produces a wasm path with no
+     * separator in it and ORT throws "w is not a function" several layers down
+     * (R0 measured that one). Every other claim about this rule in the tree
+     * drives a `stub://unit/` resolver written here, so all of them hold
+     * `deck.js` and none of them holds a HOST: review changed this file's
+     * `assetUrl` to `chrome.runtime.getURL(relPath.replace(/\/+$/, ''))` —
+     * exactly what `path.join()` or `url.pathToFileURL()` does in a Node or
+     * Electron Host — and the whole green tree accepted it, `node test.js`
+     * 508/0 and embed-smoke 122/122.
+     *
+     * Called UNBOUND through `probe`, like every duty in this block, which is
+     * the second half of the contract: `engine.js` hands `host.assetUrl` itself
+     * to `MasterBus` and to the decks rather than calling it through the
+     * namespace.
+     */
+    const dirCall = probe(engineHost.assetUrl, 'vendor/ort/');
+    const dirUrl = dirCall.v;
+    ok('...AND A PATH ENDING IN `/` COMES BACK AS A DIRECTORY URL, trailing slash intact  '
+      + '[entry point: extension/offscreen/host.js assetUrl(), reached from deck.js ensureWorker() as the '
+      + "worker's INIT wasmDirUrl]",
+      dirCall.ok && typeof dirUrl === 'string' && dirUrl.endsWith('/vendor/ort/'),
+      !dirCall.ok
+        ? `assetUrl('vendor/ort/') could not be called at all: ${dirCall.e}`
+        : typeof dirUrl !== 'string'
+          ? `assetUrl returned ${typeof dirUrl}`
+          : dirUrl.endsWith('/vendor/ort/')
+            ? dirUrl
+            : `assetUrl('vendor/ort/') returned ${JSON.stringify(dirUrl)} — ORT appends its own file names to this, `
+              + 'so without the separator the wasm path is nonsense and the runtime throws "w is not a function"',
+    );
+
     const tdFn = () => {};
     const tdCall = probe(engineHost.onTeardown, tdFn);
     ok("onTeardown() REGISTERS THE ENGINE'S OWN CALLBACK, unwrapped, so nothing can defer or await the last-gasp stop  "

@@ -90,6 +90,36 @@
  *   `audioWorklet.addModule()` and the inference worker's `INIT` can load. MUST
  *   be synchronous: it is called from constructors that run before there is an
  *   AudioContext to await on.
+ *   THREE OBLIGATIONS THAT THE TYPE DOES NOT SHOW, each broken by accident by a
+ *   plausible second Host, and none of them inferable from `=> string`:
+ *   1. A PATH ENDING IN `/` RESOLVES TO A DIRECTORY URL AND KEEPS THE TRAILING
+ *      SLASH. `offscreen/deck.js` hands `assetUrl('vendor/ort/')` to the
+ *      inference worker's `INIT` and ONNX Runtime appends its own file names to
+ *      it. `path.join()` and `url.pathToFileURL()` — the first two things a
+ *      Node or Electron Host reaches for — both drop a trailing slash, and R0
+ *      measured what that costs: ORT throws "w is not a function" several
+ *      layers from the mistake. Review measured the gate's blind spot as well:
+ *      strip the slash inside THIS Host and every unit-side assertion stays
+ *      green, because each one resolves through a stub of its own. `test.js`'s
+ *      `host` group therefore holds the shipped implementation to this rule
+ *      directly, not only through the graph.
+ *   2. THE RESULT MUST BE FETCHABLE, with a readable `.ok`. `deck.js` probes the
+ *      ORT bundle with `fetch(url, { method: 'HEAD' })` before it spawns a
+ *      worker, because a module worker that cannot resolve its static import
+ *      fires `onerror` with an EMPTY message. A scheme `fetch` refuses turns
+ *      that probe into a false report about a file that is present: `file://`
+ *      is refused outright in Chromium, and an Electron custom scheme needs
+ *      `registerSchemesAsPrivileged({ privileges: { supportFetchAPI: true } })`.
+ *   3. THE URL MUST BE LOCAL TO THE UNIT'S OWN BUNDLE. M1 — no remote code — is
+ *      a rule about what executes, and everything this duty resolves executes:
+ *      three worklet modules and the ORT wasm runtime. A Host answering with a
+ *      remote origin would put remote code on the audio thread through a duty
+ *      whose name says nothing about it, and `SECURITY.md` promotes M1 to a
+ *      security property. This is the one duty on this interface that can break
+ *      it.
+ *   AND IT IS THE ONE DUTY THAT TRAVELS DETACHED: `offscreen/engine.js` copies
+ *   it onto the `shared` bundle the decks take and passes it to `MasterBus` as
+ *   a constructor argument, so it is called unbound. See `assertHost` below.
  *
  * @property {(fn: () => void) => void} onTeardown
  *   Register the engine's last-gasp teardown, run when the context the engine
@@ -135,6 +165,16 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
  * `onChanged`) is therefore declared as its own callable duties, or this check
  * is widened deliberately and the widening is asserted. It is not widened by
  * accident.
+ *
+ * A DUTY MAY BE CALLED UNBOUND, and one already is. A Host is a module
+ * namespace and the unit treats its duties as plain functions: rather than
+ * calling `host.assetUrl(...)` at each site, `offscreen/engine.js` hands
+ * `host.assetUrl` ITSELF to `MasterBus` and to every deck. A duty implemented
+ * as a method that needs its `this` — an object literal with shorthand methods
+ * closing over a root path, an Electron preload bridge — passes this check,
+ * works for the four duties the engine calls through the namespace, and fails
+ * only at the first worklet load, which is the late half-wired failure the seam
+ * exists to move earlier. Bind it, or close over what it needs.
  *
  * IT HAS TWO CALLERS — `offscreen/engine.js` for `ENGINE_HOST_DUTIES` and
  * `ui/embed.js` for `DECK_HOST_DUTIES`. AGENTS.md counts five defects here that

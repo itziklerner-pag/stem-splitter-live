@@ -47,7 +47,10 @@ export class Deck {
    * @param {(line:string) => void} shared.log
    * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
    *        resolver (../shared/host.js). Synchronous, unit-relative, no leading
-   *        slash — the ONE way anything under offscreen/ names a file on disk.
+   *        slash — the way the unit names an asset the HOST serves. Not every
+   *        file the unit loads is one of those: `ensureWorker()` reaches the
+   *        inference worker by import, and the note there is why that one must
+   *        NOT go through here.
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
