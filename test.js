@@ -5196,11 +5196,14 @@ if (group('host')) {
     let noResolver = null;
     try { new MasterBus(null); } catch (e) { noResolver = String((e && e.message) || e); }
     ok("THE MASTER BUS REFUSES TO BE CONSTRUCTED WITHOUT THE HOST'S RESOLVER  "
-      + '[entry point: extension/offscreen/master.js constructor, called at engine.js module scope]',
+      + '[entry point: extension/offscreen/master.js constructor — its one construction is '
+      + '`new MasterBus(null, host.assetUrl)` at engine.js module scope]',
       noResolver != null && noResolver.includes('assetUrl'),
       noResolver == null
-        ? 'new MasterBus(null) was ACCEPTED — the bus is built at module scope with a null ctx, so a resolver '
-          + 'that never arrived would not be noticed until addModule() inside _build(), at the first arm'
+        ? 'new MasterBus(null) was ACCEPTED. A short HOST is not what this catches — assertHost() already refuses '
+          + 'one, a few lines earlier in engine.js. What is left is the WIRING: an engine.js that reverts to a late '
+          + 'setter or drops the argument, after which a bus with no resolver says nothing at boot and throws inside '
+          + '_build(), at the first arm, with a deck already half-wired'
         : noResolver);
 
     const busCtx = fakeCtx();
@@ -5380,7 +5383,117 @@ if (group('host')) {
         ? `missing from the directory: ${GRAPH.filter((f) => !offFiles.includes(f)).join(', ')}`
         : importers.length
           ? `${importers.join(', ')} import ./host.js directly`
-          : `${GRAPH.length} files, resolver passed in from engine.js`);
+          : `${GRAPH.length} files scanned, resolver passed in from engine.js`);
+
+    // ------------------------------------------ and where the thread STARTS
+    /**
+     * THE ORIGIN OF THE THREAD — the one claim the ten above cannot make, and
+     * the one the slice is actually named after.
+     *
+     * Each of those ten hands the builder a `stub://unit/` resolver written in
+     * this file. Together they prove the four files USE a resolver; not one of
+     * them proves that `offscreen/engine.js` SUPPLIES one. Review measured the
+     * hole exactly: delete the single line `assetUrl: host.assetUrl` from the
+     * `shared` bundle and `--quick` stays GREEN at 18 of 20 steps and
+     * `embed-smoke` stays at 122/122, while the shipped extension dies at
+     * module evaluation — `engine.js` calls `decks.A.ensureWorker()` at module
+     * scope and it throws `this.s.assetUrl is not a function`. No INIT, no
+     * HELLO, no engine, and nothing red anywhere. That is the exact shape
+     * AGENTS.md names as the source of five defects here: a value right at four
+     * call sites and absent at the one that feeds them.
+     *
+     * TWO GATES NOW, BECAUSE CI IS ONLY ONE OF THEM. `Deck` and `CachedDeck`
+     * refuse a bundle short the resolver (below), which turns that mutation
+     * into a module-scope throw — and a module-scope throw takes `embed-smoke`
+     * to `5/37 FAILED`. This pair is what makes `--quick`, the only gate
+     * GitHub Actions runs, see it too.
+     *
+     * READ AS TEXT for the reason the block at the top of this group gives:
+     * `engine.js` cannot be imported from Node at all. Comments are stripped —
+     * which matters here more than usual, because the doc comment sitting
+     * directly above the line quotes the seam in prose. The `strip` control a
+     * few assertions above is what keeps that stripping honest.
+     */
+    const sharedAt = engineSrc.indexOf('const shared = {');
+    const sharedLit = sharedAt < 0 ? null : engineSrc.slice(sharedAt).split(/\n\};/)[0];
+    /**
+     * EVERY construction is parsed, and the parsed count is compared with the
+     * raw one, so a `new Deck(` this pattern cannot read is a red rather than a
+     * silent pass — there are three today (deck A at module scope, deck B in
+     * `deck()`, and the cached deck in `cachedDeck()`) and a fourth must not
+     * arrive unnoticed.
+     */
+    const constructions = (engineSrc.match(/new (?:Deck|CachedDeck)\(/g) || []).length;
+    const takers = [...engineSrc.matchAll(/new (?:Deck|CachedDeck)\(\s*[^,()]+,\s*([A-Za-z_$][\w$]*)\s*\)/g)];
+    const notShared = takers.filter((m) => m[1] !== 'shared').map((m) => m[0]);
+    const onBundle = sharedLit != null && /(^|\n)\s*assetUrl:\s*host\.assetUrl\s*,/.test(sharedLit);
+    ok("THE ENGINE PUTS THE HOST'S RESOLVER ON THE BUNDLE, and the bundle is what every deck is built from  "
+      + '[entry point: extension/offscreen/engine.js `const shared = {`, comments stripped]',
+      sharedLit != null && onBundle
+      && constructions >= 2 && takers.length === constructions && notShared.length === 0,
+      sharedLit == null
+        ? 'cannot look: no `const shared = {` in extension/offscreen/engine.js, so there is no bundle to inspect'
+        : !onBundle
+          ? 'the `shared` bundle does NOT carry `assetUrl: host.assetUrl`. Every deck then reads undefined: '
+            + 'engine.js calls decks.A.ensureWorker() at module scope, so the engine does not boot at all — no INIT '
+            + 'to the inference worker and no HELLO to the deck'
+          : takers.length !== constructions
+            ? `cannot look: ${constructions} deck constructions in engine.js but only ${takers.length} could be read, `
+              + 'so one of them is built from something this claim never inspected'
+            : notShared.length
+              ? `built from something other than the bundle: ${notShared.join(', ')}`
+              : `assetUrl: host.assetUrl on the bundle, and all ${constructions} deck constructions take it`);
+
+    /**
+     * The whole argument list is read to the statement's own `);` and the LAST
+     * argument taken from it, rather than a shape-matched pair: a resolver
+     * wrapped, replaced by a literal or dropped entirely all have to name the
+     * defect, and a pattern that only matches two bare identifiers reports
+     * "cannot look" for the two most likely of the three.
+     */
+    const busCall = engineSrc.match(/new MasterBus\(([\s\S]*?)\);/);
+    const busSecond = busCall == null ? null : busCall[1].slice(busCall[1].indexOf(',') + 1).trim();
+    ok('...AND HANDS IT TO THE MASTER BUS TOO, which is constructed before there is a context to await on  '
+      + '[entry point: extension/offscreen/engine.js module scope, comments stripped]',
+      busCall != null && busSecond === 'host.assetUrl',
+      busCall == null
+        ? 'cannot look: no `new MasterBus(…);` statement in extension/offscreen/engine.js'
+        : busSecond === 'host.assetUrl'
+          ? busCall[0]
+          : `the bus is handed ${JSON.stringify(busSecond)} rather than host.assetUrl — the Host is no longer what `
+            + 'decides where offscreen/master-meter-processor.js lives');
+
+    /**
+     * AND THE DECKS REFUSE A BUNDLE THAT LOST IT, which is what makes the two
+     * source reads above a belt rather than the only strap.
+     *
+     * `assertHost()` cannot cover this: it checks the HOST — that
+     * `host.assetUrl` is a function — and it runs before any of this. The
+     * hand-off from the Host onto `shared` is a separate step with a separate
+     * way to go wrong, and it had no alarm at all. `MasterBus` refuses the same
+     * way and has since this slice's first commit; the asymmetry review found
+     * was that the DECK side did not, so the mutation stayed silent in the
+     * browser while `new MasterBus(null)` would have aborted engine.js on the
+     * spot.
+     */
+    const shortLive = threw(() => new Deck('A', { ctx: () => null, master: () => null, send: () => {}, log: () => {} }));
+    ok("THE LIVE DECK REFUSES A SHARED BUNDLE THAT IS SHORT THE HOST'S RESOLVER  "
+      + "[entry point: extension/offscreen/deck.js constructor — `new Deck('A', shared)` runs at engine.js module scope]",
+      shortLive != null && shortLive.includes('assetUrl'),
+      shortLive == null
+        ? 'new Deck(id, {…no assetUrl}) was ACCEPTED. The deck then reads undefined and throws `this.s.assetUrl is not '
+          + 'a function` inside ensureWorker(), three layers from the mistake — and because that construction is at '
+          + 'engine.js module scope, the browser gate is the only thing that could have seen it'
+        : shortLive);
+
+    const shortCached = threw(() => new CachedDeck('A', { ctx: () => null, master: () => null, send: () => {}, log: () => {} }));
+    ok('...AND SO DOES THE CACHED DECK, which is built lazily and would otherwise find out at the first cache hit  '
+      + '[entry point: extension/offscreen/cacheddeck.js constructor — `new CachedDeck(k, shared)` in engine.js cachedDeck()]',
+      shortCached != null && shortCached.includes('assetUrl'),
+      shortCached == null
+        ? 'new CachedDeck(id, {…no assetUrl}) was ACCEPTED — ensureGraph() would then hand undefined() to addModule at '
+          + 'the first cached play'
+        : shortCached);
   }
 
   head('host — one playback worklet per AudioContext, whichever deck gets there first');

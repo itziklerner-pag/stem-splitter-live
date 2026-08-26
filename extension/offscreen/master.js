@@ -43,10 +43,18 @@ export class MasterBus {
    *
    * So it is required here rather than assigned beside `master.ctx = c`. A late
    * setter would put the two on the same footing and make them look like the
-   * same kind of dependency, and the failure it buys is the one this seam exists
-   * to move: a Host whose asset resolution is missing or wrong reports nothing
-   * at boot and then throws inside `_build()`, at the first arm, with a deck
-   * already half-wired.
+   * same kind of dependency.
+   *
+   * WHAT THE REFUSAL ACTUALLY CATCHES, since it is not a short Host: a Host
+   * whose `assetUrl` is missing or not callable is already refused by
+   * `assertHost(host, ENGINE_HOST_DUTIES)`, which `engine.js` runs before it
+   * builds anything. What is left — and what this throw is for — is the WIRING:
+   * a future edit to `engine.js` that reverts to a late setter, or that
+   * constructs the bus without threading the resolver through. That failure has
+   * no other alarm, because a bus built without one reports nothing at boot and
+   * then throws inside `_build()`, at the first arm, with a deck already
+   * half-wired. It is the same hand-off gap the two decks now refuse in their
+   * own constructors.
    */
   constructor(ctx, assetUrl) {
     if (typeof assetUrl !== 'function') {

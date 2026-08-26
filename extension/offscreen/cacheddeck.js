@@ -144,6 +144,16 @@ export class CachedDeck {
    *        resolver (../shared/host.js) — the same one the live deck is handed
    */
   constructor(id, shared) {
+    // The same refusal, for the same reason, as `offscreen/deck.js`'s — see the
+    // note there. This deck is built lazily rather than at engine module scope,
+    // so on its own it would report a bundle short the resolver at the first
+    // cache hit and not at boot; both refusals exist because `assertHost()`
+    // checks the Host and cannot see the hand-off onto `shared`.
+    if (!shared || typeof shared.assetUrl !== 'function') {
+      throw new TypeError(`CachedDeck ${id}: the shared bundle from offscreen/engine.js is missing `
+        + "the Host's assetUrl — ensureGraph() resolves offscreen/playback-processor.js with it "
+        + `(got ${shared == null ? String(shared) : typeof shared.assetUrl}).`);
+    }
     this.id = id;
     this.s = shared;
 

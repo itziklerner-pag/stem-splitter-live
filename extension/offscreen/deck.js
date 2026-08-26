@@ -51,6 +51,29 @@ export class Deck {
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
+    /**
+     * THE BUNDLE HAS TO CARRY THE RESOLVER, and `assertHost()` cannot say so.
+     *
+     * `assertHost` checks the HOST — that `host.assetUrl` is a function — and it
+     * runs at `engine.js` module scope before this constructor. What it cannot
+     * see is the hand-off: `engine.js` copies the duty onto the `shared` bundle
+     * (`assetUrl: host.assetUrl`), and a bundle that lost that one key leaves a
+     * Host that passes every check. Review measured what happens then, by
+     * deleting exactly that line: `--quick` GREEN and `embed-smoke` 122/122,
+     * while the shipped extension dies at `decks.A.ensureWorker()` — which
+     * `engine.js` calls at module scope — with `this.s.assetUrl is not a
+     * function`. No INIT, no HELLO, no engine, and nothing red anywhere.
+     *
+     * So the deck refuses the bundle instead, in the same breath and for the
+     * same reason `MasterBus` refuses a missing resolver: the alternative is a
+     * TypeError from inside `ensureWorker()`, three layers from the mistake.
+     */
+    if (!shared || typeof shared.assetUrl !== 'function') {
+      throw new TypeError(`Deck ${id}: the shared bundle from offscreen/engine.js is missing the Host's `
+        + 'assetUrl — the deck resolves the ORT runtime directory for the inference worker\'s INIT '
+        + 'and hands the same resolver to LivePipeline for the playback worklet '
+        + `(got ${shared == null ? String(shared) : typeof shared.assetUrl}).`);
+    }
     this.id = id;
     this.s = shared;
 
