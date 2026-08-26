@@ -354,6 +354,25 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
  *   is not done before this returns is not done at all. `WorkerBackend`
  *   terminates the worker on the spot, which is what releases the ~1.7 GB wasm
  *   heap.
+ *   AND IT MUST SETTLE WHAT IT TAKES AWAY. Every `load()` and `separate()` this
+ *   backend has not answered yet MUST BE SETTLED — rejected — before this
+ *   returns, and every call that arrives after it MUST REJECT RATHER THAN HANG.
+ *   Killing the machine is not the whole duty: nothing in the unit times an
+ *   inference out and there is no cancel path, so a promise left open at
+ *   teardown is `LivePipeline.runChunk` awaiting an answer that can never come —
+ *   `inFlight` never clears, `pump()` returns early for ever, and the deck goes
+ *   silent with nothing reported. A backend that kills its process synchronously
+ *   and leaves the call unsettled has done the visible half of this duty and not
+ *   the load-bearing one.
+ *   NAME THIS BACKEND IN BOTH. Two decks own one each and they fail
+ *   independently; "the inference worker is gone" names neither.
+ *   THE UNIT ENFORCES BOTH OF THOSE AT THE SEAM, AND THE DUTY STAYS HERE
+ *   ANYWAY. `serialiseBackend` holds the promise every caller is waiting on, so
+ *   it settles them itself at `dispose()` and refuses what arrives afterwards —
+ *   see there. What no wrapper can do is make a backend STOP: it does not own
+ *   the process, the session or the buffers, so a backend that keeps grinding
+ *   after `dispose()` has merely been told that nobody is listening. Settling
+ *   the callers is the unit's; giving the machine back is still yours.
  */
 
 /**
@@ -366,7 +385,7 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
 export const BACKEND_DUTIES = Object.freeze({
   load: 'take the model weights and become able to separate',
   separate: 'separate one segment of mix into six stereo stems',
-  dispose: 'give the machine back',
+  dispose: 'give the machine back — and settle every call still outstanding, by name, before returning',
 });
 
 /**
@@ -489,6 +508,25 @@ export function assertHost(host, duties, what = 'Host') {
  * tab audio with it (R5). It is also unconditional — `WorkerBackend.dispose()`
  * terminates the worker outright — so there is no ordering for a queue to
  * protect.
+ *
+ * ...WHICH IS EXACTLY WHY THE QUEUE HAS TO SETTLE WHAT IT IS HOLDING (S8, #9).
+ * Not being queued means `dispose()` lands with one call inside the backend and
+ * a line of them still waiting in here, and every one of those promises is one
+ * THIS FUNCTION handed out. The `Backend` typedef asks a backend to settle them;
+ * asking is what a seam does when it has no alternative, and here there is one.
+ * A guarantee the unit makes is one a Host cannot forget to make — that sentence
+ * is the reason this queue is in the unit at all, and `dispose()` was the one
+ * place it was still delegated back to whatever the Host wrote.
+ *
+ * The Host it is written for makes that concrete: an Electron backend hands the
+ * call to a child process over IPC. It can implement `load`/`separate`/`dispose`,
+ * satisfy `assertHost(backend, BACKEND_DUTIES)`, kill the child synchronously at
+ * `dispose()` exactly as the typedef demands — and still leave the in-flight
+ * `separate()` promise open, because killing a process settles nothing on this
+ * side of the pipe. `LivePipeline.runChunk` awaits it with no timeout and no
+ * cancel path, `inFlight` never clears, `pump()` returns early for ever, and the
+ * deck goes silent with nothing reported. That is Review finding M1, one Host
+ * over, reintroduced by a backend that lied about nothing.
  * -------------------------------------------------------------------------- */
 
 /**
@@ -504,6 +542,20 @@ export function assertHost(host, duties, what = 'Host') {
  * uses — because one failed inference must not stop the next: the live path's
  * `CHUNK_FAILED` ladder is what decides when to stop, after three, and a queue
  * that latched would take that decision away from it.
+ *
+ * AND `dispose()` SETTLES EVERY CALL THIS WRAPPER STILL OWES AN ANSWER FOR — the
+ * one inside the backend and the ones still waiting behind it — rather than
+ * trusting the backend to. See the paragraph above the function for why that is
+ * structural rather than prose. Two consequences worth stating outright:
+ *   - THE BUFFERS MAY STILL BE INSIDE THE BACKEND when its caller is told no.
+ *     That is already the documented failure case on `separate` — "AND IF IT
+ *     THROWS, IT MAY KEEP THEM: the caller reallocates on the failure path
+ *     rather than assuming" — and at teardown there is no next segment to lend
+ *     them to anyway.
+ *   - A BACKEND THAT DOES SETTLE ITS OWN CALLS IS NOT LET OFF, it is merely no
+ *     longer load-bearing for this. `WorkerBackend.dispose()` rejects its own
+ *     pending map by name, and `tools/seam-check.mjs` gates that at the
+ *     UNWRAPPED backend precisely so this wrapper cannot pass for it.
  *
  * @param {Backend} backend  what the Host handed over
  * @param {string} what  the name to use in the refusal if it is short a duty
@@ -545,16 +597,63 @@ export function serialiseBackend(backend, what = 'Backend') {
   }
 
   let chain = Promise.resolve();
+  /**
+   * Set by `dispose()`. Also the refusal every call that arrives AFTERWARDS is
+   * given, so a late `separate()` never reaches a backend that was given back —
+   * which is what turns "a backend must refuse calls after dispose()" from a
+   * duty a Host can forget into one it cannot be asked for.
+   */
+  let disposed = null;
+  /**
+   * Every call this wrapper still owes an answer for, started or not: each entry
+   * carries the `reject` of the promise ITS OWN caller is holding. That is the
+   * whole mechanism — settling them needs nothing from the backend, so it works
+   * on a backend that has stopped answering, which is the only kind teardown has
+   * to worry about.
+   */
+  const owed = new Set();
+
   const queued = (fn) => {
-    const p = chain.then(fn);
+    if (disposed) return Promise.reject(disposed);
+    /**
+     * `p` AND `chain` ARE UNCHANGED, deliberately: `chain = p.then(noop, noop)`
+     * is the line that stops a rejected call taking the queue with it, and it
+     * stays the thing a mutation can remove. What is new is `owed`, which is
+     * beside the chain rather than in it — a call refused by `dispose()` must
+     * not have to wait for its turn behind an inference that will never land.
+     */
+    const p = chain.then(() => {
+      if (disposed) throw disposed;
+      return fn();
+    });
     chain = p.then(() => {}, () => {});
-    return p;
+    const entry = {};
+    owed.add(entry);
+    return new Promise((res, rej) => {
+      entry.rej = rej;
+      p.then(
+        (v) => { owed.delete(entry); res(v); },
+        (e) => { owed.delete(entry); rej(e); },
+      );
+    });
   };
 
   return {
     load: (bytes, onProgress) => queued(() => backend.load(bytes, onProgress)),
     separate: (mix, out) => queued(() => backend.separate(mix, out)),
-    dispose: () => backend.dispose(),
+    dispose: () => {
+      if (!disposed) {
+        disposed = new Error(`${what} was disposed — a backend given back does not come back`);
+      }
+      const gone = new Error(`${what} was disposed with a call still outstanding — the seam settles it here `
+        + 'rather than leave the caller waiting on a backend that is being given back');
+      const holding = [...owed];
+      owed.clear();
+      for (const e of holding) e.rej(gone);
+      // STILL NOT QUEUED, and still after the settling: a backend that never
+      // returns from here must not be what decides when its callers find out.
+      return backend.dispose();
+    },
   };
 }
 
