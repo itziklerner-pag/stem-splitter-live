@@ -12,7 +12,10 @@
     "Every path here is relative to extension/, the directory Chrome loads. The",
     "layout is part of the contract: deck.js reaches its worker with",
     "new URL('../workers/inference.worker.js', import.meta.url), so a vendoring",
-    "copy that flattens or renames directories does not run.",
+    "copy that flattens or renames directories does not run. The gate follows",
+    "that form as a reference, which is why the worker is not listed as a root:",
+    "it is reachable, and a rename of it is an unresolved reference rather than",
+    "a hand-written path that quietly stopped matching.",
     "",
     "JSON has no comments, so every entry carries its own `why`. Read them: they",
     "are the argument for the classification, and the classification is what the",
@@ -31,10 +34,6 @@
   ],
 
   "roots": [
-    {
-      "path": "workers/inference.worker.js",
-      "why": "Reached by new Worker(new URL('../workers/inference.worker.js', import.meta.url)) in offscreen/deck.js. No static import names it, so no crawl finds it — and ADR 0001 decision 3 names it explicitly."
-    },
     {
       "path": "offscreen/capture-processor.js",
       "why": "An AudioWorklet module, reached by addModule(host.assetUrl(...)). Worklets have no import statements and nothing imports them."
@@ -74,6 +73,14 @@
       "entry": "vendor/ort/ort.all.bundle.min.mjs",
       "fetch": "tools/fetch-vendor.sh",
       "why": "ONNX Runtime Web. Not in git, not in the unit, and not this project's code: fetched at a pinned version and verified against a recorded SHA-256 by tools/fetch-vendor.sh. A vendoring product runs that script rather than copying the drop. The crawl stops at this prefix — walking 27 MB of minified runtime looking for `chrome.` would only ever produce a false red."
+    }
+  ],
+
+  "hostReads": [
+    {
+      "from": "ui/embed-state.js",
+      "path": "speed.js",
+      "why": "The ONE place a unit file reaches a Host file, declared because it is real rather than because it is fine. ui/embed-state.js:2086-2099 reads speed.js AS TEXT — the read is at :2089 — new URL('../speed.js', import.meta.url) — to pin the deck's speed ladder against the content script's clamp: the ladder decides what the user can ASK for, speed.js's clamp decides what the element can BE GIVEN, and a disagreement is a button that visibly moves the readout to a rate the page refuses. It is not an import and nothing in a browser runs it: the read is inside demo(), which runs only under `node extension/ui/embed-state.js`. What it costs a vendoring product is a self-check that cannot run — ENOENT, naming a file that was never supposed to travel — so S10 (#11), which declares the suites that verify the unit, is where this is either moved into the unit or accepted as a check that stays behind."
     }
   ],
 
@@ -128,7 +135,7 @@
   "outside": [
     {
       "path": "unit.json",
-      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names."
+      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names. A TRAP FOR WHOEVER MOVES IT: the `why` strings in this file discuss chrome.* in prose, JSON has no comments to hide them in, and tools/unit-check.mjs classifies a .json file as js, where a string is executable by design. The moment this path leaves `outside`, the gate goes red on the declaration itself — a false red in the safe direction, but the first one to read looks like a real seam breach."
     },
     {
       "path": "ui/dev/selftest.mjs",
