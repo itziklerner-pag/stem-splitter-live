@@ -348,6 +348,8 @@ export class LivePipeline {
    * @param {(msg:object) => void} deps.send     to the UI (injects `deck`)
    * @param {(line:string) => void} deps.log
    * @param {() => import('./master.js').MasterBus} deps.master  the ONE master bus
+   * @param {(relPath:string) => string} deps.assetUrl  the Host's asset resolver
+   *        (../shared/host.js), handed down by offscreen/deck.js
    * @param {'A'|'B'} [deps.deck]
    */
   constructor(deps) {
@@ -590,7 +592,7 @@ export class LivePipeline {
     // with "A processor named 'stem-playback' is already registered". Register
     // once per context, and never swallow a genuine load failure.
     if (!MODULE_LOADED.has(ctx)) {
-      await ctx.audioWorklet.addModule(chrome.runtime.getURL('offscreen/playback-processor.js'));
+      await ctx.audioWorklet.addModule(this.d.assetUrl('offscreen/playback-processor.js'));
       MODULE_LOADED.add(ctx);
     }
 

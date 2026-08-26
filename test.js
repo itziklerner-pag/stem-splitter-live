@@ -676,6 +676,9 @@ if (group('live')) {
           return { mix, stems, prepMs: 0, inferMs: 0, postMs: 0 };
         },
         ensureModel: async () => {}, send: (m) => sent.push(m), log: () => {},
+        // See the CachedDeck stub above: the deps bundle `offscreen/deck.js`
+        // hands a LivePipeline now carries the Host's asset resolver.
+        assetUrl: (relPath) => `stub://unit/${relPath}`,
         // Mode 3: the master bus is SHARED, so the deck borrows it. The stub
         // returns whatever `lp.probeBuf`/`lp.probe` were mocked with, which is
         // what the watchdog tests drive.
@@ -2473,6 +2476,13 @@ if (group('cache')) {
         ctx: () => ({ outputLatency: 0.048 }),
         master: () => ({ build: async () => ({ input: () => ({}) }) }),
         send: (m) => sent.push(m), log: () => {},
+        // The Host's asset resolver, which `ensureGraph()` uses to find the
+        // playback worklet. Stubbed rather than omitted: `ensureGraph` is
+        // replaced below, so leaving it out would let this stub drift out of
+        // step with the bundle `offscreen/engine.js` really hands over and
+        // nothing here would notice. The graph builder's real use of it is
+        // driven in the `host` group.
+        assetUrl: (relPath) => `stub://unit/${relPath}`,
       });
       d.ensureGraph = async () => {
         d.out = new StemRingWriter(new SharedArrayBuffer(stemRingByteLength(STEM_RING_FRAMES)), STEM_RING_FRAMES);
@@ -5137,6 +5147,241 @@ if (group('host')) {
   }
 
   delete globalThis.chrome;
+
+  head('host — S2: the audio graph asks the Host for every asset URL it needs');
+  /**
+   * WHAT THIS COVERS, AND WHY IT IS NOT ALREADY COVERED BY THE BLOCK ABOVE.
+   *
+   * `assetUrl` was a declared duty before this slice and `offscreen/engine.js`
+   * called it — once, for the capture worklet. The unit's other five asset URLs
+   * did not go through the seam at all: the master meter worklet (`master.js`),
+   * the playback worklet twice over (`live.js` and `cacheddeck.js`, once per
+   * kind of deck), and the ORT runtime directory plus its presence probe
+   * (`deck.js`) each called `chrome.runtime.getURL` themselves. A second Host
+   * could therefore implement all five duties perfectly and still not load a
+   * single worklet — and neither `assertHost` nor the interface-drift pair above
+   * can see that, because both only ever look at `engine.js`.
+   *
+   * REACHABLE, NOT CONSTRUCTED — and the fact that it CAN be reachable is itself
+   * the result this slice is after. All four files now import and run under Node
+   * with no `chrome` global in existence, so every claim below drives the
+   * shipped graph builder and reads back what it asked the Host for. The same
+   * code before this slice threw `chrome is not defined` on the first line of
+   * each of the five sites.
+   *
+   * WHAT IS STUBBED IS THE PLATFORM, NEVER THE GRAPH. `addModule` records the
+   * URL it is handed and resolves; construction then dies at the first real Web
+   * Audio node, which Node does not have. That is deliberate rather than
+   * tolerated: the claim is about what the builder asked the Host for, and
+   * everything after `addModule` is the browser gate's job
+   * (`tools/embed-smoke.mjs`).
+   *
+   * THE RESOLVER IS A STUB WITH A SCHEME NOTHING ELSE USES (`stub://unit/`), so
+   * a URL that reached `addModule` by any other route — a surviving literal, a
+   * second copy of the path — cannot be mistaken for one that came from the Host.
+   */
+  {
+    const asked = [];
+    const assetUrl = (relPath) => { asked.push(relPath); return `stub://unit/${relPath}`; };
+    /** a fake AudioContext that can do exactly one thing: record an addModule */
+    const fakeCtx = () => {
+      const added = [];
+      return { added, sampleRate: SR, audioWorklet: { addModule: async (url) => { added.push(url); } } };
+    };
+    /** run a builder to the point where Node runs out of Web Audio, and keep the reason */
+    const drive = (p) => p.then(() => null, (e) => String((e && e.message) || e));
+
+    // ------------------------------------------------------------ master bus
+    const { MasterBus } = await import('./extension/offscreen/master.js');
+    let noResolver = null;
+    try { new MasterBus(null); } catch (e) { noResolver = String((e && e.message) || e); }
+    ok("THE MASTER BUS REFUSES TO BE CONSTRUCTED WITHOUT THE HOST'S RESOLVER  "
+      + '[entry point: extension/offscreen/master.js constructor, called at engine.js module scope]',
+      noResolver != null && noResolver.includes('assetUrl'),
+      noResolver == null
+        ? 'new MasterBus(null) was ACCEPTED — the bus is built at module scope with a null ctx, so a resolver '
+          + 'that never arrived would not be noticed until addModule() inside _build(), at the first arm'
+        : noResolver);
+
+    const busCtx = fakeCtx();
+    const bus = new MasterBus(null, assetUrl);
+    // exactly what engine.js does at ensureContext(): the context arrives late,
+    // the resolver did not.
+    bus.ctx = busCtx;
+    const busWhy = await drive(bus.build());
+    ok('THE MASTER METER WORKLET IS RESOLVED THROUGH THE HOST  '
+      + '[entry point: extension/offscreen/master.js _build(), the only addModule in the file]',
+      busCtx.added.length === 1 && busCtx.added[0] === 'stub://unit/offscreen/master-meter-processor.js',
+      busCtx.added.length === 0
+        ? `_build() never reached addModule, so this inspected nothing: ${busWhy}`
+        : busCtx.added.join(', '));
+
+    // ---------------------------------------------------------- the live deck
+    const { LivePipeline } = await import('./extension/offscreen/live.js');
+    const liveCtx = fakeCtx();
+    const lp = new LivePipeline({
+      deck: 'A', ctx: () => liveCtx, master: () => null, ring: () => null,
+      infer: async () => ({}), ensureModel: async () => {}, send: () => {}, log: () => {},
+      assetUrl,
+    });
+    const liveWhy = await drive(lp.build());
+    ok('THE LIVE DECK RESOLVES ITS PLAYBACK WORKLET THROUGH THE HOST  '
+      + '[entry point: extension/offscreen/live.js LivePipeline.build(), reached from start()]',
+      liveCtx.added.length === 1 && liveCtx.added[0] === 'stub://unit/offscreen/playback-processor.js',
+      liveCtx.added.length === 0
+        ? `build() never reached addModule, so this inspected nothing: ${liveWhy}`
+        : liveCtx.added.join(', '));
+
+    // -------------------------------------------------------- the cached deck
+    // A CONTEXT OF ITS OWN. The two kinds of deck register the same processor
+    // name, and whether one registration is allowed to stand in for the other is
+    // a separate claim with its own block below; here they must not share, or
+    // this assertion would pass on the live deck's work.
+    const cachedCtx = fakeCtx();
+    const cd = new CachedDeck('A', {
+      ctx: () => cachedCtx, master: () => null, send: () => {}, log: () => {}, assetUrl,
+    });
+    const cachedWhy = await drive(cd.ensureGraph());
+    ok('...AND SO DOES THE CACHED DECK, which registers the same worklet by a different path  '
+      + '[entry point: extension/offscreen/cacheddeck.js CachedDeck.ensureGraph(), reached from load()]',
+      cachedCtx.added.length === 1 && cachedCtx.added[0] === 'stub://unit/offscreen/playback-processor.js',
+      cachedCtx.added.length === 0
+        ? `ensureGraph() never reached addModule, so this inspected nothing: ${cachedWhy}`
+        : cachedCtx.added.join(', '));
+
+    // ------------------------------------------------------- the ORT runtime
+    /**
+     * THE INFERENCE WORKER'S TWO URLS, WHICH ARE NOT THE SAME KIND OF THING.
+     *
+     * `vendor/ort/` and the probe that names it are FILES ON DISK, so they go
+     * through the Host. The worker module itself is reached by
+     * `new URL(..., import.meta.url)` and must not — see the note in
+     * `ensureWorker()`. Both halves are asserted, because "thread everything
+     * through the Host" and "thread the RIGHT things through the Host" fail
+     * differently: the second is a Host handed authority over the unit's own
+     * directory layout, and it would go unnoticed under this Host, where the two
+     * answers happen to agree.
+     */
+    const { Deck } = await import('./extension/offscreen/deck.js');
+    const posts = [];
+    const spawned = [];
+    const fetched = [];
+    const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    let deckWhy = null;
+    try {
+      globalThis.Worker = class {
+        constructor(url, opts) { this.url = String(url); this.opts = opts; spawned.push(this); }
+        postMessage(m) { posts.push(m); }
+        terminate() {}
+      };
+      globalThis.fetch = (url, init) => {
+        fetched.push({ url: String(url), method: init && init.method });
+        return Promise.resolve({ ok: true });
+      };
+      const d = new Deck('A', {
+        ctx: () => null, master: () => null, gpu: null,
+        modelBytes: async () => new ArrayBuffer(8),
+        send: () => {}, log: () => {}, armRefMs: () => 0, assetUrl,
+      });
+      const session = d.ensureSession();
+      // LOAD_MODEL is posted after two awaits; nothing here may assume how many.
+      for (let i = 0; i < 200 && !d.sessionReady; i++) await new Promise((r) => setTimeout(r, 0));
+      if (d.sessionReady) d.onWorker({ type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 });
+      deckWhy = await drive(session);
+    } finally {
+      delete globalThis.Worker;
+      if (realFetch) Object.defineProperty(globalThis, 'fetch', realFetch);
+      else delete globalThis.fetch;
+    }
+
+    ok('THE ORT PRESENCE PROBE IS RESOLVED THROUGH THE HOST, and it is still a HEAD  '
+      + '[entry point: extension/offscreen/deck.js Deck.ensureSession(), reached from LIVE_START and DECK_PREPARE]',
+      fetched.length === 1 && fetched[0].url === 'stub://unit/vendor/ort/ort.all.bundle.min.mjs'
+      && fetched[0].method === 'HEAD',
+      fetched.length === 0
+        ? `ensureSession() never reached the probe, so this inspected nothing: ${deckWhy}`
+        : JSON.stringify(fetched));
+
+    const init = posts.find((m) => m && m.type === 'INIT');
+    ok('...and the worker is told where the ORT runtime lives as a DIRECTORY url from the Host  '
+      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker(), reached from ensureSession()]',
+      init != null && init.wasmDirUrl === 'stub://unit/vendor/ort/' && init.wasmDirUrl.endsWith('/'),
+      init == null
+        ? `no INIT was posted, so this inspected nothing: ${deckWhy}. Posted: ${posts.map((m) => m && m.type).join(', ')}`
+        : String(init.wasmDirUrl));
+
+    /**
+     * THE ONE URL THE HOST DOES NOT GET TO RESOLVE, asserted from both sides: the
+     * worker was spawned from a path ending in the unit's own layout, and the
+     * Host was never asked about it. Asking only the first would be satisfied by
+     * a build that resolved it through the Host to the same place, which is
+     * exactly what this Host would do.
+     */
+    const workerUrl = spawned.length === 1 ? spawned[0].url : null;
+    ok("THE INFERENCE WORKER'S OWN URL STAYS RELATIVE — the unit's directory layout is the unit's contract, not the Host's  "
+      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker()]',
+      workerUrl != null && workerUrl.endsWith('/extension/workers/inference.worker.js')
+      && !asked.some((p) => /worker/i.test(p)),
+      spawned.length !== 1
+        ? `expected exactly one Worker to be spawned, got ${spawned.length}: ${deckWhy}`
+        : asked.some((p) => /worker/i.test(p))
+          ? `the Host was asked to resolve ${JSON.stringify(asked.filter((p) => /worker/i.test(p)))} — `
+            + 'a Host that answers that owns where the unit keeps its own files'
+          : workerUrl);
+
+    // ------------------------------------------- and nothing reaches past it
+    /**
+     * THE NEGATIVE HALF OF THE SLICE, read out of the tree rather than from a
+     * grep in a PR body: after this slice `offscreen/host.js` is the only file
+     * in the directory that says `chrome.` at all. Comments are stripped first —
+     * three prose mentions survive on purpose (`live.js` twice, `cacheddeck.js`
+     * once) and a claim a comment can satisfy is not a claim.
+     *
+     * FAILS IF IT CANNOT LOOK, in both directions: an empty or unrecognisable
+     * file list is a red, and so is a strip that has eaten the calls it is
+     * supposed to find — which the control below is the only thing that could
+     * notice.
+     */
+    const { readdirSync } = await import('node:fs');
+    const offDir = new URL('./extension/offscreen/', import.meta.url);
+    const offFiles = readdirSync(offDir).filter((f) => f.endsWith('.js')).sort();
+    const readOff = (f) => strip(readFileSync(new URL(f, offDir), 'utf8'));
+    const offenders = offFiles.filter((f) => f !== 'host.js' && /\bchrome\./.test(readOff(f)));
+    ok('THE HOST IS THE ONLY FILE UNDER offscreen/ THAT SAYS chrome.  '
+      + '[entry point: the shipped tree, comments stripped]',
+      offFiles.length >= 8 && offFiles.includes('host.js') && offenders.length === 0,
+      offFiles.length < 8 || !offFiles.includes('host.js')
+        ? `the scan found ${offFiles.length} .js files under offscreen/ and ${offFiles.includes('host.js') ? 'did' : 'did NOT'} `
+          + 'find host.js — it is not looking at the directory it thinks it is'
+        : offenders.length
+          ? `${offenders.join(', ')} still reach Chrome directly, so a second Host cannot load what they load`
+          : `${offFiles.length - 1} files clean, host.js excepted`);
+
+    ok('INSTRUMENT CHECK: the scan can still SEE a chrome. call — offscreen/host.js, the one file that must have them  '
+      + '[control: it has to be able to lose]',
+      offFiles.includes('host.js') && /\bchrome\./.test(readOff('host.js')),
+      offFiles.includes('host.js')
+        ? `host.js: ${(readOff('host.js').match(/\bchrome\.\w+/g) || []).join(', ') || 'NOTHING — the strip ate them, and the claim above is vacuous'}`
+        : 'offscreen/host.js was not found at all');
+
+    /**
+     * AND THEY TAKE THE RESOLVER RATHER THAN IMPORTING THE HOST. Four files that
+     * each did `import { assetUrl } from './host.js'` would pass the scan above
+     * and would work perfectly under this Host — while putting four more imports
+     * of the platform into the half of the unit that is meant to be
+     * host-agnostic, which is the property ADR 0001 decision 5 is buying.
+     */
+    const GRAPH = ['deck.js', 'live.js', 'cacheddeck.js', 'master.js'];
+    const importers = GRAPH.filter((f) => /from\s+'\.\/host\.js'/.test(readOff(f)));
+    ok('...and the audio graph TAKES the resolver rather than importing the Host: the platform enters at one door  '
+      + '[entry point: extension/offscreen/{deck,live,cacheddeck,master}.js]',
+      GRAPH.every((f) => offFiles.includes(f)) && importers.length === 0,
+      !GRAPH.every((f) => offFiles.includes(f))
+        ? `missing from the directory: ${GRAPH.filter((f) => !offFiles.includes(f)).join(', ')}`
+        : importers.length
+          ? `${importers.join(', ')} import ./host.js directly`
+          : `${GRAPH.length} files, resolver passed in from engine.js`);
+  }
 }
 
 // ===========================================================================

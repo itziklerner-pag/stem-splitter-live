@@ -26,9 +26,37 @@ import { softClipCurve } from '../engine/mixer.js';
 import { METER_HZ } from '../shared/config.js';
 
 export class MasterBus {
-  /** @param {AudioContext} ctx */
-  constructor(ctx) {
+  /**
+   * @param {AudioContext} ctx  null at construction; see below
+   * @param {(relPath: string) => string} assetUrl  the Host's asset resolver
+   *
+   * TWO DEPENDENCIES, ARRIVING AT TWO DIFFERENT TIMES, AND THAT IS THE WHOLE
+   * REASON `assetUrl` IS A CONSTRUCTOR ARGUMENT.
+   *
+   * The bus is built at `offscreen/engine.js` module scope, where there is no
+   * AudioContext yet — creating one at import would start hardware nobody has
+   * asked for — so `ctx` is handed over later, at `ensureContext()`. `assetUrl`
+   * is NOT in that position: the Host is imported before anything in this file
+   * runs, and the resolver is synchronous by contract (`shared/host.js`)
+   * precisely so that a constructor which runs before there is a context to
+   * await on can still take it.
+   *
+   * So it is required here rather than assigned beside `master.ctx = c`. A late
+   * setter would put the two on the same footing and make them look like the
+   * same kind of dependency, and the failure it buys is the one this seam exists
+   * to move: a Host whose asset resolution is missing or wrong reports nothing
+   * at boot and then throws inside `_build()`, at the first arm, with a deck
+   * already half-wired.
+   */
+  constructor(ctx, assetUrl) {
+    if (typeof assetUrl !== 'function') {
+      throw new TypeError('MasterBus needs the Host\'s assetUrl at construction — it resolves '
+        + '`offscreen/master-meter-processor.js` in _build(), which is far too late to find out '
+        + `it is missing (got ${assetUrl === null ? 'null' : typeof assetUrl}).`);
+    }
     this.ctx = ctx;
+    /** the Host's resolver. See the constructor's note on why it is not a setter. */
+    this.assetUrl = assetUrl;
     this.headroom = 2;
     this.meterNode = null;
     this.pre = null;
@@ -61,7 +89,7 @@ export class MasterBus {
   async _build() {
     if (this.pre) return this;
     const ctx = this.ctx;
-    await ctx.audioWorklet.addModule(chrome.runtime.getURL('offscreen/master-meter-processor.js'));
+    await ctx.audioWorklet.addModule(this.assetUrl('offscreen/master-meter-processor.js'));
 
     this.meterNode = new AudioWorkletNode(ctx, 'master-meter', {
       numberOfInputs: 1, numberOfOutputs: 1, outputChannelCount: [2],

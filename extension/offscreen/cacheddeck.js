@@ -142,6 +142,8 @@ export class CachedDeck {
    * @param {() => {build:Function, input:Function}} shared.master  BORROWED
    * @param {(msg:object) => void} shared.send
    * @param {(line:string) => void} shared.log
+   * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
+   *        resolver (../shared/host.js) — the same one the live deck is handed
    */
   constructor(id, shared) {
     this.id = id;
@@ -219,7 +221,7 @@ export class CachedDeck {
       // the processor is nonetheless available. Only that rejection is safe to
       // swallow, and the node construction below is what proves it.
       try {
-        await ctx.audioWorklet.addModule(chrome.runtime.getURL('offscreen/playback-processor.js'));
+        await ctx.audioWorklet.addModule(this.s.assetUrl('offscreen/playback-processor.js'));
       } catch (e) {
         if (!/already registered/i.test(String(e && e.message))) throw e;
       }

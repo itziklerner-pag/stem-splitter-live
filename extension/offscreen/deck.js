@@ -45,6 +45,9 @@ export class Deck {
    * @param {import('../engine/scheduler.js').GpuScheduler} shared.gpu
    * @param {(msg:object) => void} shared.send    already deck-tagged by the caller
    * @param {(line:string) => void} shared.log
+   * @param {(relPath:string) => string} shared.assetUrl  the Host's asset
+   *        resolver (../shared/host.js). Synchronous, unit-relative, no leading
+   *        slash — the ONE way anything under offscreen/ names a file on disk.
    * @param {(deck:Deck) => void} shared.onCaptureTick
    */
   constructor(id, shared) {
@@ -104,6 +107,7 @@ export class Deck {
       ensureModel: () => this.ensureSession(),
       send: (msg) => shared.send({ deck: id, ...msg }),
       log: (line) => shared.log(`[${id}] ${line}`),
+      assetUrl: shared.assetUrl,
       // What one chunk will cost THIS deck once the GPU is shared N ways. See
       // LivePipeline.armPlayback(): arming on chunk 0's luck leaves the second
       // deck permanently starved and 100 % unseparated.
@@ -114,6 +118,20 @@ export class Deck {
   // ------------------------------------------------------------------ worker
   ensureWorker() {
     if (this.worker) return this.worker;
+    /**
+     * THE WORKER URL IS RELATIVE ON PURPOSE, and it does not go through
+     * `assetUrl`. `import.meta.url` resolves against THIS module's own location,
+     * so the expression says "the sibling directory `workers/`" and nothing
+     * about where the unit is mounted — which is what makes it correct under a
+     * `chrome-extension://` origin and under a desktop Host alike.
+     *
+     * `assetUrl` exists for the files the unit does NOT reach by import: worklet
+     * modules, which `addModule()` fetches by URL, and the ORT runtime, which
+     * the worker resolves against its own directory. Routing this one through
+     * the Host as well would hand the Host authority over the unit's internal
+     * directory layout, and that layout is part of the unit's contract
+     * (ADR 0001 decision 3). Do not "fix" it to `assetUrl`.
+     */
     const w = new Worker(new URL('../workers/inference.worker.js', import.meta.url), { type: 'module' });
     // Review finding M1: any failure that does not arrive as {type:'ERROR'} — a
     // module load failure, an uncaught rejection, an OOM that kills the worker —
@@ -136,7 +154,10 @@ export class Deck {
       this.s.onWorkerState && this.s.onWorkerState(this);
     };
     w.onmessage = (e) => this.onWorker(e.data);
-    w.postMessage({ type: 'INIT', wasmDirUrl: chrome.runtime.getURL('vendor/ort/') });
+    // A DIRECTORY URL, trailing slash and all: ORT appends its own file names to
+    // it. R0 measured the file-URL form failing inside the runtime with
+    // "w is not a function", several layers from the mistake.
+    w.postMessage({ type: 'INIT', wasmDirUrl: this.s.assetUrl('vendor/ort/') });
     this.worker = w;
     return w;
   }
@@ -222,7 +243,7 @@ export class Deck {
        * Nothing in that chain ever names the missing file. So check the one file
        * that is not in git, before spawning anything, and say what to run.
        */
-      const ortUrl = chrome.runtime.getURL('vendor/ort/ort.all.bundle.min.mjs');
+      const ortUrl = this.s.assetUrl('vendor/ort/ort.all.bundle.min.mjs');
       const head = await fetch(ortUrl, { method: 'HEAD' }).catch(() => null);
       if (!head || !head.ok) {
         throw new Error(

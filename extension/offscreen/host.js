@@ -1,13 +1,15 @@
 /**
  * THE EXTENSION'S EngineHost — the Chrome half of the engine, and the only file
- * under `offscreen/` that `engine.js` allows to say `chrome.`.
+ * under `offscreen/` that says `chrome.` at all.
  *
- * NOT YET the only one in the directory: `deck.js:139`, `deck.js:225`,
- * `cacheddeck.js:222`, `live.js:593` and `master.js:64` still call
- * `chrome.runtime.getURL` directly, bypassing the seam. S2 (#4) threads
- * `assetUrl` through those five; until it lands, a second Host that implements
- * these five duties and stops there is blindsided by four sibling files
- * reaching for Chrome on their own.
+ * That is now true of the whole directory and not just of `engine.js`. The five
+ * `chrome.runtime.getURL` calls that used to sit in `deck.js`, `cacheddeck.js`,
+ * `live.js` and `master.js` — bypassing the seam entirely, so a second Host
+ * could implement all five duties and still be blindsided by four sibling files
+ * reaching for Chrome on their own — all resolve through `assetUrl` below
+ * (S2, #4). The one URL that deliberately does NOT is `deck.js`'s inference
+ * worker, built with `new URL(..., import.meta.url)`: that one is about the
+ * unit's own directory layout, which is the unit's contract and not the Host's.
  *
  * `engine.js` is the orchestration and knows nothing about the browser it is
  * in; this module is what makes it run inside a Chrome extension's offscreen
@@ -80,6 +82,9 @@ export const captureStream = (sourceToken) => navigator.mediaDevices.getUserMedi
  * @type {import('../shared/host.js').EngineHost['assetUrl']}
  *
  * Extension-root-relative, no leading slash: `assetUrl('offscreen/capture-processor.js')`.
+ * A path that ends in `/` resolves to a directory URL and keeps its trailing
+ * slash — `deck.js` hands `assetUrl('vendor/ort/')` to the inference worker's
+ * `INIT`, and ORT appends its own file names to it.
  */
 export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
 
