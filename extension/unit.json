@@ -25,6 +25,20 @@
     "time; its own header says a computed closure must seed it explicitly, and",
     "this is where that is done.",
     "",
+    "THE LAST THREE SECTIONS ARE ABOUT RUNNING THE UNIT RATHER THAN COPYING IT.",
+    "`suites` names the plain-Node suites whose subject is the unit and gives each",
+    "one the tools/verify.mjs step id that runs it; `node tools/verify.mjs --unit`",
+    "builds its plan from that list, so a suite is gated by being declared here",
+    "and by nothing else. `runners` names the files that plan needs to run at all.",
+    "`otherSteps` names every remaining step in the runner with the one line that",
+    "says why it is not the unit's — present so the classification is TOTAL: a new",
+    "suite lands on one side or the gate asks which, the same discipline the",
+    "partition at the end of tools/unit-check.mjs applies to files under",
+    "extension/. THEIR `path`s ARE REPO-RELATIVE, not extension-relative, because",
+    "seven of the thirteen live outside extension/ and a suite is not a thing",
+    "Chrome loads. `reads` inside them is spelt extension-relative like every",
+    "other path in this file, because everything it can name is declared above.",
+    "",
     "JSON has no comments, so every entry carries its own `why`. Read them: they",
     "are the argument for the classification, and the classification is what the",
     "gate enforces."
@@ -92,7 +106,7 @@
     {
       "from": "ui/embed-state.js",
       "path": "speed.js",
-      "why": "The ONE place a unit file reaches a Host file, declared because it is real rather than because it is fine. ui/embed-state.js:2086-2099 reads speed.js AS TEXT — the read is at :2089 — new URL('../speed.js', import.meta.url) — to pin the deck's speed ladder against the content script's clamp: the ladder decides what the user can ASK for, speed.js's clamp decides what the element can BE GIVEN, and a disagreement is a button that visibly moves the readout to a rate the page refuses. It is not an import and nothing in a browser runs it: the read is inside demo(), which runs only under `node extension/ui/embed-state.js`. What it costs a vendoring product is a self-check that cannot run — ENOENT, naming a file that was never supposed to travel — so S10 (#11), which declares the suites that verify the unit, is where this is either moved into the unit or accepted as a check that stays behind."
+      "why": "The ONE place a unit file reaches a Host file, declared because it is real rather than because it is fine. ui/embed-state.js:2086-2099 reads speed.js AS TEXT — the read is at :2089 — new URL('../speed.js', import.meta.url) — to pin the deck's speed ladder against the content script's clamp: the ladder decides what the user can ASK for, speed.js's clamp decides what the element can BE GIVEN, and a disagreement is a button that visibly moves the readout to a rate the page refuses. It is not an import and nothing in a browser runs it: the read is inside demo(), which runs only under `node extension/ui/embed-state.js`. S10 (#11) DECIDED IT: the check stays behind, and speed.js does not move. Moving it would put a content script that drives the page's <video> inside a unit forbidden to know its Host — decision 4 in the other direction. What that costs a copy is bounded and loud rather than silent: :2093's catch turns an unreadable speed.js into `unreadable: ENOENT …` and FEEDS IT TO THE COMPARISON, so the ladder assertion goes red naming the file, and it never excuses itself on the file being absent. S11 (#12) decides in docs/VENDORING.md whether a copy carries speed.js for this one pin or takes the red; either way nothing here reports coverage it does not have. It is not the only such read — see `suites` below, where the two larger ones are declared."
     }
   ],
 
@@ -147,11 +161,11 @@
   "outside": [
     {
       "path": "unit.json",
-      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names. A TRAP FOR WHOEVER MOVES IT: the `why` strings in this file discuss chrome.* in prose, JSON has no comments to hide them in, and tools/unit-check.mjs classifies a .json file as js, where a string is executable by design. The moment this path leaves `outside`, the gate goes red on the declaration itself — a false red in the safe direction, but the first one to read looks like a real seam breach."
+      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names. SINCE S10 (#11) IT IS ALSO READ AT RUN TIME — tools/verify.mjs opens it at module scope to build the `--unit` plan — so it travels whether or not it is hashed, and a copy without it has no `--unit`. A TRAP FOR WHOEVER MOVES IT: the `why` strings in this file discuss chrome.* in prose, JSON has no comments to hide them in, and tools/unit-check.mjs classifies a .json file as js, where a string is executable by design. The moment this path leaves `outside`, the gate goes red on the declaration itself — a false red in the safe direction, but the first one to read looks like a real seam breach."
     },
     {
       "path": "ui/dev/selftest.mjs",
-      "why": "A suite, not shipped code: it runs the deck's display laws under plain node. It exercises the unit but is not part of it. S10 (#11) declares the suites that verify the unit; until then it is neither unit nor Host, and saying so here is what keeps the classification total."
+      "why": "A suite, not shipped code: it runs the deck's display laws under plain node. It exercises the unit but is not part of it, which is why it is BOTH here and in `suites` below — the two lists answer different questions, and this is the only file under extension/ that needs both answers. `outside` says it does not travel as unit; `suites` says `node tools/verify.mjs --unit` runs it. S10 (#11) added the second half."
     }
   ],
 
@@ -198,5 +212,91 @@
       ],
       "why": "ADR 0001 decision 3 says embed*.js; the deck as it actually ships is that plus the markup it cannot be booted without, its two stylesheets, and ui/audio-math.js, which is the deck's display maths under a name the glob misses."
     }
+  ],
+
+  "suites": [
+    {
+      "step": "unit",
+      "path": "test.js",
+      "reads": ["ui/host.js", "offscreen/host.js", "offscreen/host-pin.js"],
+      "why": "The DSP body of evidence — WAV, the rings, the mixer, the OLA planes, cacheddeck, the scheduler — and, since S1 to S6, the scans that say the engine and the deck reach for nothing but their Host. It is the largest single suite over the unit in this repository. THE THREE READS ARE THE SEAM CHECKED FROM BOTH SIDES: it reads the extension's own ui/host.js and offscreen/host.js to assert that every duty the deck and the engine reach for is a declared one, and offscreen/host-pin.js to read the model's upstream origin out of the pin. It also walks extension/ wholesale for that last grep, host files included. A copy that brings the unit and not this Host does not get a smaller run out of it; it gets a red naming the file it could not open, which is the honest outcome and is why none of those reads is guarded."
+    },
+    {
+      "step": "ui",
+      "path": "extension/ui/dev/selftest.mjs",
+      "why": "The deck's display laws under plain node. Declared in `outside` above for the same reason it is listed here: it exercises the unit and is not part of it, and S9 (#10) left the sentence saying so pointing at this list."
+    },
+    {
+      "step": "qa-edge",
+      "path": "qa/test-edge.mjs",
+      "why": "The segment grid at its edges and the constants that define it. Its whole subject is shared/config.js, shared/ring.js and shared/wav.js."
+    },
+    {
+      "step": "passthrough",
+      "path": "qa/passthrough-gain.mjs",
+      "why": "QA-15 — G_PASS = min(resolved stem gains) — on the real emitter and the real mixer, engine/live.js and engine/mixer.js, no browser."
+    },
+    {
+      "step": "pitch",
+      "path": "extension/engine/pitch.js",
+      "why": "A unit file that is its own suite: `node extension/engine/pitch.js` runs the phase vocoder against itself. The file travels because it is unit; the step is here because running it is how the copy is checked."
+    },
+    {
+      "step": "pitchbank",
+      "path": "extension/engine/pitchbank.js",
+      "why": "The other half of the same file's claim, and the one that matters most to a copy: pitchbank.js is verbatim-copied into offscreen/playback-processor.js, and this suite asserts the copy still matches the source. It is a `roots` entry above for exactly that reason."
+    },
+    {
+      "step": "chroma",
+      "path": "extension/engine/chroma.js",
+      "why": "A unit file that is its own suite: chroma folding and key correlation."
+    },
+    {
+      "step": "keytap",
+      "path": "extension/engine/keytap.js",
+      "why": "A unit file that is its own suite, and chroma's only caller: the windowing, the wire payload, the reset hook."
+    },
+    {
+      "step": "bpmtap",
+      "path": "extension/engine/bpmtap.js",
+      "why": "A unit file that is its own suite: the onset envelope, the octave tie-break, beat phase."
+    },
+    {
+      "step": "speed-pitch",
+      "path": "qa/speed-pitch.mjs",
+      "reads": ["content.js", "speed.js"],
+      "why": "SPEED must not move the KEY, measured through the real shifter at plus or minus 2 cents. THE TWO READS ARE THE POLICY'S OTHER END: the key-lock ruling spans the deck's ladder and the page's transport, so the suite reads the two content scripts as text to assert that no path in the extension leaves the element key-unlocked. That half of the claim is about this Host, and it does not travel."
+    },
+    {
+      "step": "embed-state",
+      "path": "extension/ui/embed-state.js",
+      "why": "The deck's pure state, and the largest suite the deck has. A unit file that is its own suite. Its one read of a Host file is the declared one in `hostReads` above, and S10's answer to the question that entry left open is written there."
+    }
+  ],
+
+  "runners": [
+    {
+      "path": "tools/verify.mjs",
+      "why": "The runner. `node tools/verify.mjs --unit` builds its plan by reading the `suites` list ABOVE, out of this file, so the list IS the plan rather than a description of one — the rule tools/host.mjs and tools/fetch-model.sh already follow about the model pin. The VOID rule applies unchanged: a listed suite that exits 0 while asserting nothing is red, not green."
+    },
+    {
+      "path": "tools/host.mjs",
+      "reads": ["offscreen/host-pin.js"],
+      "why": "tools/verify.mjs imports MODEL_URL, MODEL_BYTES, MODEL_SEED_REL and modelSeed from it at module scope, so the runner does not load without it. Named here because a copy that omits it cannot run `--unit` at all — not because it is unit. Its own reach for offscreen/host-pin.js is an import rather than a text read, which is the harder kind: a copy needs this Host's pin, or its own file at that path."
+    }
+  ],
+
+  "otherSteps": [
+    { "step": "snippets", "why": "node docs/snippets/selftest.js. Its subject is docs/snippets/*, the AUDIO.md reference implementations — a second, independent copy of the DSP written to be compared AGAINST the shipped code rather than to be it. Its one touch of the unit is `import { STEMS as CONFIG_STEMS } from '../../extension/shared/config.js'`, a cross-check that the document still agrees with the pin. The document does not travel." },
+    { "step": "ground-truth", "why": "node qa/compare.mjs smoke. Its subject is the QA testbed — the synthetic sources a separation is measured against — re-derived from WAVs on disk. It imports shared/wav.js and shared/config.js to read them, which makes the unit its tool rather than its subject." },
+    { "step": "autonav", "why": "node extension/autonav.js. autonav.js is host: a classic content script that suppresses YouTube's autoplay-next. Its suite is host-side with it." },
+    { "step": "speed", "why": "node extension/speed.js. speed.js is host for the same reason, and its suite with it. The unit's half of the key-lock claim is `speed-pitch`, which is in the list above." },
+    { "step": "tree", "why": "node tools/tree-check.mjs. Asks whether extension/ loads as an extension — manifest paths, one deck, no downloads permission. A question about this Host's declaration of itself, which is the one thing a second product supplies entirely." },
+    { "step": "unit-check", "why": "node tools/unit-check.mjs. The gate on THIS FILE, and it cannot run in a copy: it reads the extension host's sw/service-worker.js, content.js, ui/welcome* and manifest.json by name, and none of them travels. The declaration is verified here, once, and ships verified." },
+    { "step": "name", "why": "node tools/name-check.mjs. Asserts the product rename finished across the tracked tree. A property of this repository's published surface." },
+    { "step": "svg", "why": "node tools/svg-check.mjs. Asserts every tracked SVG is XML, so the mark renders through <img src>. brand/ is not unit." },
+    { "step": "model-parity", "why": "node tools/model-parity.mjs. Reads the 114 MB pinned weights, which are not in git and are not copied — `heavy`, so `--quick` drops it and so does this list. Its claim about the unit (six sources in STEMS order) is real; a copy that wants it fetches the weights and runs the step by name." },
+    { "step": "backend-audio", "why": "node tools/backend-audio.mjs. The strongest claim about the unit anywhere in this tree — the real weights through the Host seam, six stems in STEMS order that add back up to the mix — and it is out of this list only because it is `slow` AND `heavy`: it needs a browser and the weights, and `--unit` is the plain-node plan. Run it by name after a copy, with the weights seeded." },
+    { "step": "embed-smoke", "why": "node tools/embed-smoke.mjs. Loads the real unpacked extension into a real Chromium. There is no unpacked extension in a copy." }
   ]
 }

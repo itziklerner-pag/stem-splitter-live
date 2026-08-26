@@ -48,6 +48,15 @@
  *      that name at boot. `unit.json` is the first thing a second Host reads;
  *      a rename on either side must not leave it naming an interface that is
  *      gone.
+ *   9. The suites that verify the unit are declared, on disk, on the right side
+ *      of the seam, and honest about what they read across it. `--unit` (#11)
+ *      is the plan `extension/unit.json` declares, so a suite is gated by being
+ *      in that list and by nothing else.
+ *  10. ...and the list and `tools/verify.mjs` name the same steps, BOTH WAYS: no
+ *      declared id that is not a step (it would silently drop out of `--unit`),
+ *      and no step that the declaration never classified (it would silently
+ *      never join it). `--self-check` asserts the stronger form of the same
+ *      property against the real array; this is the copy that runs in CI.
  *
  * AND THE TWO CONTROLS, WHICH ARE THE POINT. Assertion 5 is a search that finds
  * nothing, and a search that finds nothing is indistinguishable from a search
@@ -662,6 +671,176 @@ const both = [...closure].filter((p) => hostPaths.includes(p) || outsidePaths.in
 ok(both.length === 0,
   `nothing in the unit is also declared Host or declared outside it${both.length
     ? ` — BOTH: ${both.map((p) => `${cameFrom.get(p) || '?'} -> ${p}`).join(', ')}` : ''}`);
+
+// -------------------------------------- the suites that verify it, and the runner
+/**
+ * A COPY THAT NOBODY CAN RUN A SUITE OVER IS NOT A VENDORED UNIT, IT IS A ZIP.
+ *
+ * Everything above asks whether the unit still comes OUT of this repository.
+ * This asks the question `unit.json` gained a `suites` list to answer (#11):
+ * once it is out, what says it works? `node tools/verify.mjs --unit` builds its
+ * plan by reading that list, so a suite is part of the unit's gate by being
+ * declared here and by nothing else — which is exactly why the declaration and
+ * the runner have to be held together.
+ *
+ * THE DIVISION OF LABOUR WITH `--self-check`, because both places assert about
+ * this list and they are not the same claim. `--self-check` has the real `steps`
+ * array in memory and asserts that the plan `unitPlan()` BUILDS is the manifest's
+ * list — the strongest form, and unfoolable. It is also run by nothing
+ * automatic: `.github/workflows/verify.yml` runs `--quick`, and `--quick` does
+ * not run `--self-check`. So the same agreement is asserted HERE, from the
+ * manifest's side, by reading the runner as text — weaker, and gated. Two
+ * instruments, one property, and the gated one is the one that survives.
+ *
+ * Reading `tools/verify.mjs` as TEXT rather than importing it: importing it runs
+ * it. It reaps browsers and spawns a plan at module scope. `test.js` reads
+ * `ui/embed.js` the same way and for the same kind of reason.
+ */
+const SUITES = decl.suites || [];
+const RUNNERS = decl.runners || [];
+const runnable = [...SUITES, ...RUNNERS];
+
+ok(SUITES.length > 0 && RUNNERS.length > 0,
+  `the declaration names the suites that verify the unit, and the files that run them  `
+  + `${plural(SUITES.length, 'suite')}, ${plural(RUNNERS.length, 'runner')}`);
+
+/**
+ * REPO-RELATIVE, not `extension/`-relative like every other path in this file,
+ * and the `doc` block says so: seven of these thirteen live outside
+ * `extension/` — a suite is not a thing Chrome loads. Resolved from ROOT for
+ * that reason.
+ */
+const missingRun = runnable.map((s) => s.path).filter((p) => !fs.existsSync(path.join(ROOT, p)));
+ok(missingRun.length === 0,
+  `every suite and runner the declaration names is on disk${missingRun.length
+    ? ` — MISSING: ${missingRun.join(', ')}` : `  ${plural(runnable.length, 'path')}, repo-relative`}`);
+
+/**
+ * WHICH SIDE OF THE SEAM A SUITE MAY SIT ON. Six of the eleven are unit files
+ * that self-check under plain node, so they are in the closure; one
+ * (`ui/dev/selftest.mjs`) is declared `outside`. What no suite in this list may
+ * be is a Host file: `extension/autonav.js` and `extension/speed.js` are also
+ * green plain-node suites, and putting either in the unit's plan would have
+ * `--unit` reporting on the extension's content scripts. That is the mistake
+ * this catches, and it is an easy one to make — they are fast and they pass.
+ */
+const wrongSide = SUITES
+  .filter((s) => s.path.startsWith('extension/'))
+  .map((s) => ({ s, rel: s.path.slice('extension/'.length) }))
+  .filter(({ rel }) => !closure.has(rel) && !outsidePaths.includes(rel));
+ok(wrongSide.length === 0,
+  `every suite under extension/ is a unit file or declared outside the unit — never a Host file${wrongSide.length
+    ? ` — WRONG SIDE: ${wrongSide.map(({ s }) => s.path).join(', ')}`
+    : `  ${SUITES.filter((s) => s.path.startsWith('extension/')).length} of ${SUITES.length}`}`);
+
+/**
+ * WHAT A SUITE REACHES FOR ACROSS THE SEAM, declared per suite because it is
+ * real rather than because it is fine — the same rule `hostReads` above states
+ * for the one unit file that does it. Three suites verify the seam from BOTH
+ * sides: `test.js` reads this Host's `ui/host.js` and `offscreen/host.js` to
+ * check that every duty the unit reaches for is declared, and `host-pin.js` for
+ * the model origin; `qa/speed-pitch.mjs` reads the two content scripts because
+ * the key-lock ruling spans the deck and the page. Those halves are about THIS
+ * Host and do not travel, and a copy that runs `--unit` without them gets a red
+ * naming the file — which is what S11's vendoring instructions have to reckon
+ * with, and why the list is here in machine-readable form rather than in prose.
+ *
+ * `reads` is spelt `extension/`-relative like every other path in this file,
+ * which is also what makes the first assertion possible: everything it can name
+ * is already declared above as a hole or as Host.
+ */
+const declaredReads = runnable.flatMap((s) => (s.reads || []).map((p) => ({ from: s.path, path: p })));
+const notHost = declaredReads.filter((r) => !hostPaths.includes(r.path) && !holePaths.includes(r.path));
+ok(notHost.length === 0,
+  `every file a suite declares it reads across the seam is a declared Host file or a declared hole${notHost.length
+    ? ` — NOT DECLARED HOST: ${notHost.map((r) => `${r.from} -> ${r.path}`).join(', ')}`
+    : `  ${plural(declaredReads.length, 'read')} from ${new Set(declaredReads.map((r) => r.from)).size} suites`}`);
+
+/**
+ * ...AND THE SUITE STILL NAMES THE FILE. Without this the list is a comment: a
+ * `reads` entry outlives the code that earned it, and the next reader treats a
+ * file as load-bearing for a suite that stopped opening it years ago. It is the
+ * same claim the `hostReads` loop above makes with the crawl — but the crawl
+ * cannot make it here, because these reads are ASSEMBLED
+ * (`readFileSync(join(EXT, 'speed.js'))`), and a crawl that matches a string
+ * literal is blind to a path built from parts. This file's own header says so.
+ *
+ * The needle is the `extension/`-relative spelling, which is how all six are
+ * written at their call sites — `'./extension/ui/host.js'`,
+ * `'extension/offscreen/host-pin.js'`, `join(EXT, 'content.js')`. The basename
+ * alone would not do: `ui/host.js` and `offscreen/host.js` share one, and a
+ * suite that read only the first would vouch for both.
+ *
+ * COMMENTS STRIPPED, with this file's own scanner — the one `demo()` pins at
+ * the top. A claim a doc comment can satisfy is not a claim, and every one of
+ * these files discusses the seam in prose at length.
+ *
+ * WHAT IT DOES NOT CARRY, MEASURED RATHER THAN REASONED ABOUT: it says the file
+ * is NAMED in code, not that it is READ. `qa/speed-pitch.mjs` names
+ * `extension/speed.js` twice — once in the `readFileSync` at :130, once inside
+ * the failure message at :156 — and splitting the read's literal alone leaves
+ * this green (checked: 75 of 75). Splitting both takes it red (74 of 75). So it
+ * catches a suite that has finished with a Host file, and it does not catch a
+ * suite that stopped reading one it still talks about. A stricter needle would
+ * have to recognise a read, which is a parser; the honest fix if that ever
+ * matters is to declare the call site, not to tighten the regex.
+ */
+const codeOnly = (src, kind) => {
+  const m = commentMask(src, kind);
+  const out = [];
+  for (let i = 0; i < src.length; i++) if (!m[i]) out.push(src[i]);
+  return out.join('');
+};
+const suiteCode = new Map();
+for (const s of runnable) {
+  const abs = path.join(ROOT, s.path);
+  if ((s.reads || []).length && fs.existsSync(abs)) {
+    suiteCode.set(s.path, codeOnly(fs.readFileSync(abs, 'utf8'), KIND(s.path)));
+  }
+}
+const stale = declaredReads.filter((r) => !(suiteCode.get(r.from) || '').includes(r.path));
+ok(declaredReads.length > 0 && stale.length === 0,
+  `...and every one of them is really named in the suite that declares it${stale.length
+    ? ` — NOT FOUND, the declaration outlived the code: ${stale.map((r) => `${r.from} -> ${r.path}`).join(', ')}`
+    : `  ${declaredReads.map((r) => `${r.from} -> ${r.path}`).join(', ')}`}`);
+
+/**
+ * THE MANIFEST AND THE RUNNER NAME THE SAME STEPS. A `suites` entry whose step
+ * id no step has is not an error anywhere: `--unit` filters, a filter cannot
+ * report a miss, and the run prints the same green over a smaller plan. The
+ * other direction is the one that rots — a new plain-node suite added to
+ * `steps` by someone with no reason to think about vendoring, which `--unit`
+ * then never runs.
+ *
+ * The `steps` literal is sliced out of the runner's source by its opening line
+ * and its closing `\n];`, comments stripped first so a step id quoted in prose
+ * cannot join the list. Over-collecting is caught by the second assertion (the
+ * ids in `--self-check`'s own fixtures — 'e2e', 'audible', 'wire-abort' — are
+ * classified by nothing) and under-collecting by the first. The control is that
+ * the slice contains THIS step: unit-check is in the runner's plan, and a scan
+ * that came back with an empty or wrong region loses it.
+ */
+const runnerSrc = codeOnly(fs.readFileSync(path.join(ROOT, 'tools/verify.mjs'), 'utf8'), 'js');
+const stepsAt = runnerSrc.indexOf('\nconst steps = [');
+const stepsEnd = stepsAt < 0 ? -1 : runnerSrc.indexOf('\n];', stepsAt);
+const stepIds = stepsAt < 0 || stepsEnd < 0 ? []
+  : [...runnerSrc.slice(stepsAt, stepsEnd).matchAll(/\bid:\s*'([\w-]+)'/g)].map((m) => m[1]);
+ok(stepIds.includes('unit-check'),
+  `control: the runner's step list was really found and read  ${stepIds.length
+    ? `${plural(stepIds.length, 'step')} in tools/verify.mjs, this one among them`
+    : 'NOTHING EXTRACTED — the `const steps = [` slice missed, so the two assertions below prove nothing'}`);
+
+const declaredSteps = [...SUITES.map((s) => s.step), ...(decl.otherSteps || []).map((s) => s.step)];
+const noSuchStep = declaredSteps.filter((id) => !stepIds.includes(id));
+ok(noSuchStep.length === 0,
+  `every step id the declaration names is a step tools/verify.mjs has${noSuchStep.length
+    ? ` — NO SUCH STEP: ${noSuchStep.join(', ')}` : `  ${declaredSteps.length} ids`}`);
+
+const unclassifiedSteps = stepIds.filter((id) => !declaredSteps.includes(id));
+ok(unclassifiedSteps.length === 0,
+  `...and every step tools/verify.mjs runs is classified — the unit's, or named in otherSteps${unclassifiedSteps.length
+    ? ` — UNCLASSIFIED: ${unclassifiedSteps.join(', ')}; add each to "suites" or to "otherSteps" in extension/unit.json`
+    : `  ${stepIds.length} steps, ${SUITES.length} of them the unit's`}`);
 
 console.log(`\nunit-check: ${checks - fails} passed, ${fails} failed`);
 process.exit(fails ? 1 : 0);
