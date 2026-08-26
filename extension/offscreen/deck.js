@@ -269,10 +269,19 @@ export class Deck {
       const ortUrl = this.s.assetUrl('vendor/ort/ort.all.bundle.min.mjs');
       const head = await fetch(ortUrl, { method: 'HEAD' }).catch(() => null);
       if (!head || !head.ok) {
+        /**
+         * NAME THE URL THAT FAILED, not just the file that is usually missing.
+         * Under this Host the two are the same sentence. Under a second Host
+         * they are not: a resolver that answers with something `fetch` refuses
+         * — `file://` is refused outright in Chromium, and a custom scheme
+         * needs `supportFetchAPI` — lands here for a file that is present, and
+         * "run fetch-vendor.sh" is then advice for the wrong problem. The URL
+         * is what tells the two apart, so it goes in the message.
+         */
         throw new Error(
-          'ONNX Runtime is missing from this build: extension/vendor/ort/ is not '
-          + 'in git. Run `bash tools/fetch-vendor.sh`, then reload the extension '
-          + 'at chrome://extensions.',
+          `ONNX Runtime is missing from this build: ${ortUrl} could not be read. `
+          + 'extension/vendor/ort/ is not in git — run `bash tools/fetch-vendor.sh` '
+          + 'and reload.',
         );
       }
       this.ensureWorker();

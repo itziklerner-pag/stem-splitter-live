@@ -5350,22 +5350,32 @@ if (group('host')) {
     const offDir = new URL('./extension/offscreen/', import.meta.url);
     const offFiles = readdirSync(offDir).filter((f) => f.endsWith('.js')).sort();
     const readOff = (f) => strip(readFileSync(new URL(f, offDir), 'utf8'));
-    const offenders = offFiles.filter((f) => f !== 'host.js' && /\bchrome\./.test(readOff(f)));
-    ok('THE HOST IS THE ONLY FILE UNDER offscreen/ THAT SAYS chrome.  '
+    /**
+     * `chrome[.:]` AND NOT `chrome\.`, because a URL is a coupling too. Review
+     * found the last host-coupled string in the four files this checkbox covers
+     * sitting just outside a `chrome\.`-shaped grep: `deck.js`'s ORT-missing
+     * message told the user to "reload the extension at chrome://extensions",
+     * which is wrong under every Host but this one — and the scan called the
+     * file clean. The message now names the URL that failed instead, and the
+     * scan can see the difference.
+     */
+    const offenders = offFiles.filter((f) => f !== 'host.js' && /\bchrome[.:]/.test(readOff(f)));
+    ok('THE HOST IS THE ONLY FILE UNDER offscreen/ THAT NAMES chrome AT ALL — neither `chrome.` nor `chrome:`  '
       + '[entry point: the shipped tree, comments stripped]',
       offFiles.length >= 8 && offFiles.includes('host.js') && offenders.length === 0,
       offFiles.length < 8 || !offFiles.includes('host.js')
         ? `the scan found ${offFiles.length} .js files under offscreen/ and ${offFiles.includes('host.js') ? 'did' : 'did NOT'} `
           + 'find host.js — it is not looking at the directory it thinks it is'
         : offenders.length
-          ? `${offenders.join(', ')} still reach Chrome directly, so a second Host cannot load what they load`
+          ? `Chrome is still named in ${offenders.join(', ')} — as a call, a second Host cannot load what that file `
+            + 'loads; as a `chrome:` URL, it is advice that is wrong under every Host but this one'
           : `${offFiles.length - 1} files clean, host.js excepted`);
 
     ok('INSTRUMENT CHECK: the scan can still SEE a chrome. call — offscreen/host.js, the one file that must have them  '
       + '[control: it has to be able to lose]',
-      offFiles.includes('host.js') && /\bchrome\./.test(readOff('host.js')),
+      offFiles.includes('host.js') && /\bchrome[.:]/.test(readOff('host.js')),
       offFiles.includes('host.js')
-        ? `host.js: ${(readOff('host.js').match(/\bchrome\.\w+/g) || []).join(', ') || 'NOTHING — the strip ate them, and the claim above is vacuous'}`
+        ? `host.js: ${(readOff('host.js').match(/\bchrome[.:]\w*/g) || []).join(', ') || 'NOTHING — the strip ate them, and the claim above is vacuous'}`
         : 'offscreen/host.js was not found at all');
 
     /**
@@ -5375,13 +5385,34 @@ if (group('host')) {
      * of the platform into the half of the unit that is meant to be
      * host-agnostic, which is the property ADR 0001 decision 5 is buying.
      */
-    const GRAPH = ['deck.js', 'live.js', 'cacheddeck.js', 'master.js'];
-    const importers = GRAPH.filter((f) => /from\s+'\.\/host\.js'/.test(readOff(f)));
+    /**
+     * THE SCANNED SET IS THE DIRECTORY, not a list of four names, and both are
+     * review findings rather than taste. A four-name list called itself "the
+     * platform enters at one door" while `worklets.js` — the file this very
+     * slice introduced — sat outside it: review put
+     * `import { assetUrl } from './host.js'` into it and this assertion stayed
+     * green. Reading the directory means the next file added under `offscreen/`
+     * is held to the rule on the day it is added. `engine.js` is excepted
+     * because it IS the door, and `host.js` because it is the platform.
+     *
+     * AND BOTH QUOTE STYLES, PLUS THE DYNAMIC FORM. The old pattern was
+     * `from 'host.js'` with single quotes; there is no linter in this repo to
+     * pin that style, and review walked past it twice — once with double quotes,
+     * once with `await import('./host.js')`, both green. Matching the quoted
+     * SPECIFIER covers every spelling of both.
+     *
+     * FAILS IF IT CANNOT LOOK: the five files the slice actually threads must
+     * all be inside the scanned set, or the scan is not looking at the tree it
+     * names.
+     */
+    const GRAPH = offFiles.filter((f) => f !== 'host.js' && f !== 'engine.js');
+    const THREADED = ['deck.js', 'live.js', 'cacheddeck.js', 'master.js', 'worklets.js'];
+    const importers = GRAPH.filter((f) => /['"]\.\/host\.js['"]/.test(readOff(f)));
     ok('...and the audio graph TAKES the resolver rather than importing the Host: the platform enters at one door  '
-      + '[entry point: extension/offscreen/{deck,live,cacheddeck,master}.js]',
-      GRAPH.every((f) => offFiles.includes(f)) && importers.length === 0,
-      !GRAPH.every((f) => offFiles.includes(f))
-        ? `missing from the directory: ${GRAPH.filter((f) => !offFiles.includes(f)).join(', ')}`
+      + '[entry point: every .js under extension/offscreen/ except engine.js, the door, and host.js, the platform]',
+      THREADED.every((f) => GRAPH.includes(f)) && importers.length === 0,
+      !THREADED.every((f) => GRAPH.includes(f))
+        ? `cannot look: ${THREADED.filter((f) => !GRAPH.includes(f)).join(', ')} is not in the scanned set`
         : importers.length
           ? `${importers.join(', ')} import ./host.js directly`
           : `${GRAPH.length} files scanned, resolver passed in from engine.js`);
