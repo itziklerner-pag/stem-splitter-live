@@ -512,3 +512,195 @@ export const DECK_HOST_DUTIES = Object.freeze({
  * now a sentence in the file that gets frozen, rather than a difference a
  * second-host author discovers by reading both implementations.
  */
+
+/* ========================================================================= */
+/* DeckHost.page and DeckHost.transport (S5, issue #7). APPEND BELOW.        */
+/* ========================================================================= */
+
+/**
+ * WHY THE DECK'S HOST HAS TWO MORE NAMESPACES, AND WHY THEY ARE TWO AND NOT ONE.
+ *
+ * The deck is drawn INTO something, and in this build that something also owns
+ * a player the deck follows. Those are two different facts about a Host, and a
+ * second Host can have the first without the second: a deck opened on its own,
+ * a harness, or a window with no video in it is still drawn into a page.
+ *
+ * So `page` is a duty every DeckHost owes and `transport` is one it may
+ * legitimately not have — and the deck asks the difference exactly once, as
+ * `host.transport != null`. That question used to be `window.parent !== window`,
+ * which is a fact about FRAMES rather than about hosting: under a desktop Host
+ * the deck is the top-level document and yet it IS hosted, so the old test said
+ * "nobody will ever tell me whether the video is playing", and `follow()` reads
+ * that as licence to START THE PIPELINE ON BOOT — a capture, and behind it a
+ * 109 MB model download, on a page nobody had pressed play on.
+ *
+ * They are NOT one namespace because the postMessage boundary carries more than
+ * transport. `KEY`, `AUTONAV`, `HEIGHT`, `READY`, `CLOSE` and `DECK` are all
+ * about the deck's life on somebody's page and none of them are about a player;
+ * folding them into `transport` would leave a Host with no video unable to size
+ * its own frame.
+ */
+
+/**
+ * @typedef {object} DeckPage
+ *   Where the deck is drawn. Every DeckHost owes this.
+ *
+ * @property {(fn: (d: {code: string, key: string, shift: boolean, alt: boolean,
+ *   repeat: boolean}) => void) => void} onKey
+ *   A key the HOST took out of its own page's hands and gave to the deck.
+ *   `typing` is deliberately not carried: the host checked its own document,
+ *   which is the only one that had a focus target, so the deck must not
+ *   re-derive it against a document that never had one.
+ *
+ * @property {(fn: (d: {state: string}) => void) => void} onAutonav
+ *   The host's report on suppressing its page's autoplay-next. Advisory: three
+ *   of the states mean the feature is not working, and none of them may stop
+ *   the deck.
+ *
+ * @property {(claim: {armed: boolean, keys: string[]}) => void} claimKeys
+ *   Which key codes are the deck's right now, and whether a deck is armed at
+ *   all. THE HOST MUST ACT ON IT: with no deck armed those keys belong to the
+ *   page and must reach it untouched — we are a guest there. The list is sent
+ *   rather than duplicated host-side, because it is the unit that knows which
+ *   keys this build has.
+ *
+ * @property {(px: number) => void} setHeight
+ *   How tall the deck has measured itself to be. Advice, not a command: this
+ *   Host clamps it, and a Host that cannot resize may ignore it.
+ *
+ * @property {() => void} ready
+ *   The deck has its handlers up. THE HOST OWES A RE-SEND of everything it
+ *   reports on change — player state, speed, autoplay — because a deck mounted
+ *   onto an already-playing video is the common case and "on change" would
+ *   leave it blank until something moved.
+ *
+ * @property {() => void} close
+ *   Take the deck off the page. THE AUDIO DOES NOT STOP: capture and separation
+ *   live in the engine and never depended on this surface existing.
+ */
+
+/**
+ * @typedef {object} DeckTransport
+ *   The player the host's page is showing, if it has one. A DeckHost that has
+ *   none declares `transport: null`.
+ *
+ * @property {(fn: (d: object) => void) => void} onState
+ *   The player moved. PUSH, NEVER POLL — a contract, not a taste: the deck
+ *   follows these transitions, and a poll misses every one that opens and
+ *   closes between two samples.
+ *   The payload this Host sends is `{playing, currentTime, duration, ended,
+ *   playbackRate, hasMedia, adShowing, seeking}`, on every media event that can
+ *   move any of them plus a ~4 Hz tick.
+ *   FLAGGED, NOT RECONCILED: ADR 0001 decision 4 words the READ side as three
+ *   values — `paused`, `currentTime`, `duration` — and the shipped payload is
+ *   wider than that wording. Nothing here widens it; `ended`, `playbackRate`,
+ *   `hasMedia` and `adShowing` are all reported today and the speed control and
+ *   the cache commit both read them. S11 freezes Host interface v1 and owns the
+ *   reconciliation; narrowing the payload is an L1 decision and belongs to the
+ *   owner, not to a seam slice.
+ *
+ * @property {(fn: () => void) => void} onJump
+ *   The content moved under the deck — a seek, or the page swapping in another
+ *   video. What is already in the ring is now audio from somewhere else.
+ *
+ * @property {(fn: (d: {state: string, why: string|null,
+ *   applied: number}) => void) => void} onSpeedReport
+ *   The host's verdict on the player's rate: whether one can be set at all
+ *   right now, what it applied, and why not. It is the ONLY thing that greys
+ *   the deck's speed control, and `why: 'yield'` is the only signal that can
+ *   tell the page's own speed menu from the deck's write still in flight.
+ *
+ * @property {(patch: {muted?: boolean, playbackRate?: number,
+ *   currentTime?: number}) => void} drive
+ *   Write the player, for the cached deck's clock lock. THE WRITE SET IS CLOSED
+ *   AND IT IS ADR 0001 decision 4's: `muted`, `playbackRate`, `currentTime`,
+ *   and nothing else, ever. A Host implements the closure — it writes the three
+ *   it was given and ignores anything else in the patch — so that widening it
+ *   is an edit to a Host and to this list, and never a field a caller smuggles
+ *   through.
+ *
+ * @property {() => void} release
+ *   Hand the player back the way it was found: unmuted, rate 1, key lock on.
+ *   A muted 1.02x video left behind is a bug the user cannot explain and cannot
+ *   undo, so a Host that drives MUST be able to undo it.
+ *
+ * @property {(rate: number) => void} requestSpeed
+ *   The USER's speed, which is not the same thing as `drive({playbackRate})`
+ *   and must not be folded into it. It is a CLAIM with its own lifetime: this
+ *   Host re-asserts it across an ad and drops it on a source swap, while a
+ *   drive correction is a single value with its own dedupe against a 4 Hz loop.
+ *   One duty behind both would be one dedupe behind two lifetimes.
+ *   The VALUE is not filtered here: a rate the host cannot apply is refused and
+ *   REPORTED back through `onSpeedReport`, which is strictly better than a
+ *   silent drop.
+ */
+
+export const DECK_PAGE_DUTIES = Object.freeze({
+  onKey: "hand the deck the keys the host took out of its own page's hands",
+  onAutonav: "report what happened to the page's autoplay-next",
+  claimKeys: 'take the key codes the deck names, and leave the rest to the page',
+  setHeight: 'size the deck to the height it measured',
+  ready: 'the deck is listening — re-send everything reported on change',
+  close: 'take the deck off the page, without stopping the audio',
+});
+
+/**
+ * `drive`'s sentence says "mute, rate and position" and NOT the three property
+ * names, which are spelled in the typedef above instead. `qa/speed-pitch.mjs`
+ * asserts that nothing under `extension/{engine,offscreen,workers,shared}/`
+ * references the page rate IN CODE — comments stripped, so the typedef is
+ * invisible to it and a duty string is not. That gate is how this project knows
+ * the engine never shifts on the page's rate, and a seam declaration is not a
+ * reason to carve a second file out of it. The error message loses nothing: it
+ * still names the closed write set, in words.
+ */
+export const DECK_TRANSPORT_DUTIES = Object.freeze({
+  onState: "push the player's state to the deck, on every event that moves it",
+  onJump: 'tell the deck the content moved under it',
+  onSpeedReport: "give the deck the host's verdict on the player's rate",
+  drive: "write the player's mute, its rate and its position — those three and nothing else",
+  release: 'hand the player back the way it was found',
+  requestSpeed: "carry the user's speed claim, and re-assert it as the page needs",
+});
+
+/**
+ * A duty NAMESPACE a Host may legitimately not have — AND MUST SAY IT DOES NOT.
+ *
+ * `assertHost` answers "did this Host supply everything". This answers the
+ * different question an optional namespace raises: "did this Host DECIDE, or
+ * did it just not mention it?" An absent property and a deliberate absence look
+ * identical from the inside, and here they must not, because the deck reads
+ * `host.transport != null` as a fact about the world — is there a player above
+ * me — and acts on it at boot. A Host that meant to supply a transport and
+ * misspelled the key would be read as a Host with no player at all, which is
+ * the state `follow()` treats as "nobody is ever going to tell me, so run": a
+ * capture and a model download nobody asked for. This repo has already paid for
+ * that exact outcome once, by a different route.
+ *
+ * So the KEY is required and the VALUE may be null. `transport: null` is a
+ * sentence a second-host author has to write, and writing it is the point.
+ *
+ * FAILS WHEN IT CANNOT LOOK, the same two ways `assertHost` does: no host at
+ * all is the loudest error rather than the quietest, and a namespace that IS
+ * present goes straight to `assertHost`, so an empty duty list still throws.
+ *
+ * @param {object} host   the module namespace the context imported
+ * @param {string} key    the optional namespace's name on it
+ * @param {Record<string, string>} duties  duty name -> what it is for
+ * @param {string} what   the interface's name, for the message
+ * @returns {object|null} the namespace, or null if the Host declared it absent
+ */
+export function assertHostOption(host, key, duties, what = 'Host') {
+  if (!host || (typeof host !== 'object' && typeof host !== 'function')) {
+    throw new Error(`${what}: no host module was supplied (got ${host === null ? 'null' : typeof host}), `
+      + `so whether it has a ${key} cannot even be asked.`);
+  }
+  if (!(key in host)) {
+    throw new Error(`${what}: nothing was said about ${key}. A Host that has none must declare `
+      + `\`${key}: null\` — an absent property and a deliberate absence read the same, and this seam `
+      + 'reads that silence as a decision about how the deck boots.');
+  }
+  const got = host[key];
+  if (got == null) return null;
+  return assertHost(got, duties, `${what}.${key}`);
+}
