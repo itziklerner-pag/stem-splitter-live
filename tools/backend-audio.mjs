@@ -155,29 +155,48 @@ const say = (line) => { log.push(line); console.log('[backend-audio] ' + line); 
  * two channels are not identical. It is synthetic and no one would call it
  * music; what it is is broadband, harmonic, transient and stereo, which are the
  * four things the model's branches respond to.
+ *
+ * AND SEGMENT 1 IS NOT SEGMENT 0 AGAIN. Both segments used to be handed the
+ * identical mix, so the five per-segment assertions produced byte-identical
+ * numbers twice and the repeat carried no claim beyond the one the "ALL N
+ * SEGMENT(S) SEPARATED ON ONE SESSION" line already makes. The variant index
+ * changes the tempo, transposes the pitched parts up a fourth, swaps the
+ * panning and drops the level — a different input to the same graph, in the same four instrument
+ * classes, so the loud/quiet split the label assertion rests on is unchanged
+ * while every number the segment reports is its own.
  */
-function makeMix() {
+function makeMix(v = 0) {
   const n = SEGMENT;
   const L = new Float32Array(n);
   const R = new Float32Array(n);
-  const bpm = 120;
+  const bpm = v ? 90 : 120;
+  // A perfect fourth up, and a quieter take: the same music played differently,
+  // not different music. Anything that changed the INSTRUMENTS would be moving
+  // the labels assertion's ground rather than giving it a second reading.
+  const f = v ? 4 / 3 : 1;
+  const g = v ? 0.75 : 1;
   const beat = (60 / bpm) * SR;
-  let seed = 12345;
+  let seed = v ? 987654321 : 12345;
   const rnd = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return (seed / 0x3fffffff) - 1; };
   for (let i = 0; i < n; i++) {
     const t = i / SR;
-    const bass = 0.35 * Math.sin(2 * Math.PI * 65.41 * t) * (0.6 + 0.4 * Math.sin(2 * Math.PI * t / 2));
-    const chord = 0.12 * (Math.sin(2 * Math.PI * 261.63 * t)
-      + Math.sin(2 * Math.PI * 329.63 * t) + Math.sin(2 * Math.PI * 392.0 * t));
-    const lead = 0.15 * Math.sin(2 * Math.PI * 523.25 * t + 3 * Math.sin(2 * Math.PI * 5 * t));
+    const bass = 0.35 * Math.sin(2 * Math.PI * 65.41 * f * t) * (0.6 + 0.4 * Math.sin(2 * Math.PI * t / 2));
+    const chord = 0.12 * (Math.sin(2 * Math.PI * 261.63 * f * t)
+      + Math.sin(2 * Math.PI * 329.63 * f * t) + Math.sin(2 * Math.PI * 392.0 * f * t));
+    const lead = 0.15 * Math.sin(2 * Math.PI * 523.25 * f * t + 3 * Math.sin(2 * Math.PI * 5 * t));
     const phase = (i % beat) / beat;
     const kick = phase < 0.08 ? 0.5 * Math.sin(2 * Math.PI * 55 * t) * (1 - phase / 0.08) : 0;
     const eighth = (i % (beat / 2)) / (beat / 2);
     const hat = eighth < 0.02 ? 0.25 * rnd() * (1 - eighth / 0.02) : 0;
-    L[i] = bass + chord + 0.7 * lead + kick + hat;
-    R[i] = bass + 0.7 * chord + lead + kick + 0.6 * hat;
+    const a = bass + chord + 0.7 * lead + kick + hat;
+    const b = bass + 0.7 * chord + lead + kick + 0.6 * hat;
+    L[i] = g * (v ? b : a);
+    R[i] = g * (v ? a : b);
   }
-  return { L, R };
+  // Plain concatenation, and no backticks anywhere below: this whole page is
+  // itself one template literal, so a backtick or a dollar-brace here would be
+  // read by Node rather than by the browser.
+  return { L, R, label: v ? (bpm + ' BPM, +4th, panning swapped, ' + g + 'x') : (bpm + ' BPM') };
 }
 
 const rms = (a) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / a.length); };
@@ -215,10 +234,16 @@ window.run = async (segments) => {
   const loadMs = performance.now() - t0;
   say('session ' + deck.ep + ' ready in ' + (loadMs / 1000).toFixed(1) + ' s — separating ' + segments + ' segment(s)');
 
-  const { L, R } = makeMix();
-  const mixRms = [rms(L), rms(R)];
+  // Two inputs, alternating: segment k gets variant k % 2, built once each.
+  const mixes = new Map();
+  const mixFor = (k) => {
+    const v = k % 2;
+    if (!mixes.has(v)) mixes.set(v, makeMix(v));
+    return mixes.get(v);
+  };
   const runs = [];
   for (let s = 0; s < segments; s++) {
+    const { L, R, label } = mixFor(s);
     const mixBuf = new ArrayBuffer(2 * SEGMENT * 4);
     const outBuf = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
     const mix = new Float32Array(mixBuf);
@@ -249,6 +274,9 @@ window.run = async (segments) => {
       }
     }
     runs.push({
+      variant: label,
+      mixRms: [rms(L), rms(R)],
+      mixPeak: Math.max(peak(L), peak(R)),
       wallMs, prepMs: r.prepMs, inferMs: r.inferMs, postMs: r.postMs,
       mixBytes: r.mix.byteLength, stemBytes: r.stems.byteLength,
       // The originals are DETACHED if they were really transferred rather than
@@ -263,7 +291,7 @@ window.run = async (segments) => {
   }
   return {
     ep: deck.ep, session: deck.session, threads: deck.threads, adapter: deck.adapter,
-    loadMs, mixRms, runs, log, asked, spawned: spawned.length,
+    loadMs, runs, log, asked, spawned: spawned.length,
     stemOrder: STEMS, segment: SEGMENT, sr: SR,
   };
 };
@@ -400,19 +428,35 @@ for (const [i, r] of good.entries()) {
           + `(${STEMS.length} stems x 2 ch x ${SEGMENT} floats)`);
 
   const table = r.stems.map((s) => `${s.name} ${s.rmsL.toFixed(4)}/${s.rmsR.toFixed(4)}`).join('  ');
+  /**
+   * THE PEAK CEILING IS ARGUED FROM THE MIX, not from a round number. htdemucs
+   * decomposes its input, so a plane is a PART of something whose own peak is
+   * `r.mixPeak` — measured 1.033 and 0.972 for the two inputs here, against a
+   * loudest plane of 0.5475 (drums, segment 1). `PEAK_CEILING x mixPeak` is
+   * therefore ~3.5x above anything the decomposition has produced and far below
+   * what the fault it guards against produces: a plane that is finite and
+   * non-silent but wildly SCALED (a normalisation dropped, a packing read at the
+   * wrong stride) lands orders of magnitude out, not 2x. The previous fixed
+   * `< 8` was 15x the largest number the system has ever produced here — a
+   * threshold with no measurement behind it, which is the one number in this
+   * file the comment could not justify.
+   */
+  const PEAK_CEILING = 2;
+  const tooLoud = r.stems.filter((s) => s.peak >= PEAK_CEILING * r.mixPeak);
   ok(`${STEMS.length * 2} STEM PLANES CAME BACK, EACH WITH FINITE, NON-SILENT AUDIO${tag}  `
-    + `[entry point: engine/demucs.js postProcess(), layout (k*2+ch)*SEGMENT+i, mix RMS ${out.mixRms[0].toFixed(4)}/${out.mixRms[1].toFixed(4)}]`,
+    + `[entry point: engine/demucs.js postProcess(), layout (k*2+ch)*SEGMENT+i, mix RMS ${r.mixRms[0].toFixed(4)}/${r.mixRms[1].toFixed(4)}]`,
     r.stems.length === STEMS.length
-    && r.stems.every((s) => s.finite && s.rmsL > 0 && s.rmsR > 0 && s.peak < 8),
+    && r.stems.every((s) => s.finite && s.rmsL > 0 && s.rmsR > 0) && tooLoud.length === 0,
     r.stems.length !== STEMS.length
       ? `${r.stems.length} planes, not ${STEMS.length}`
       : r.stems.some((s) => !s.finite)
         ? `a stem carries NaN or Infinity: ${r.stems.filter((s) => !s.finite).map((s) => s.name).join(', ')}`
         : r.stems.some((s) => s.rmsL <= 0 || s.rmsR <= 0)
           ? `a stem is digital silence in a channel: ${r.stems.filter((s) => s.rmsL <= 0 || s.rmsR <= 0).map((s) => s.name).join(', ')}`
-          : r.stems.some((s) => s.peak >= 8)
-            ? `a stem clips absurdly: ${r.stems.filter((s) => s.peak >= 8).map((s) => `${s.name} ${s.peak.toFixed(1)}`).join(', ')}`
-            : table);
+          : tooLoud.length
+            ? `a stem is ${PEAK_CEILING}x the whole mix's own peak (${r.mixPeak.toFixed(2)}): `
+              + `${tooLoud.map((s) => `${s.name} ${s.peak.toFixed(1)}`).join(', ')}`
+            : `${r.variant} — ${table}`);
 
   /**
    * AND THE LABELS LINE UP WITH THE MODEL'S CHANNELS — which is an ORDER claim,
@@ -467,17 +511,19 @@ for (const [i, r] of good.entries()) {
   ok(`Σ STEMS RECONSTRUCTS THE MIX${tag} — the model's own definition of its job, and what a layout mistake destroys  `
     + '[entry point: the flat stems buffer, summed per channel against the input]',
     Number.isFinite(r.residualDb) && r.residualDb < -12,
-    `residual ${r.residualDb.toFixed(1)} dB  (prep ${r.prepMs.toFixed(0)} ms, infer ${r.inferMs.toFixed(0)} ms, post ${r.postMs.toFixed(0)} ms)`);
+    `residual ${r.residualDb.toFixed(1)} dB against ${r.variant}  `
+    + `(prep ${r.prepMs.toFixed(0)} ms, infer ${r.inferMs.toFixed(0)} ms, post ${r.postMs.toFixed(0)} ms)`);
 }
 
 console.log('');
 console.log('  per-stem RMS (L/R) and peak — for the human half of the audio-path check:');
 for (const [i, r] of good.entries()) {
-  console.log(`    segment ${i}:`);
+  console.log(`    segment ${i} (${r.variant}):`);
   for (const s of r.stems) {
     console.log(`      ${s.name.padEnd(7)} rms ${s.rmsL.toFixed(5)} / ${s.rmsR.toFixed(5)}   peak ${s.peak.toFixed(4)}`);
   }
-  console.log(`      ${'Σ'.padEnd(7)} residual vs mix ${r.residualDb.toFixed(1)} dB   (mix rms ${out.mixRms[0].toFixed(5)} / ${out.mixRms[1].toFixed(5)})`);
+  console.log(`      ${'Σ'.padEnd(7)} residual vs mix ${r.residualDb.toFixed(1)} dB   `
+    + `(mix rms ${r.mixRms[0].toFixed(5)} / ${r.mixRms[1].toFixed(5)}, peak ${r.mixPeak.toFixed(3)})`);
 }
 
 console.log(`\nbackend-audio: ${pass} passed, ${fail} failed`);
