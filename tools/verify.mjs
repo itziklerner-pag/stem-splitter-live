@@ -714,6 +714,15 @@ if (flag('self-check')) {
     + 'ok   the crawl reached the unit, not a corner of it  34 files from 2 entries + 5 roots, floor 25\n'
     + '   -  extension/vendor/ort/ is ABSENT (not in git by design) — run `bash tools/fetch-vendor.sh` before loading unpacked\n'
     + '\nunit-check: 67 passed, 0 failed\n', 'PASS', '67 passed, 0 failed');
+  // Added 2026-08-26 with the `seam` step, under the rule two blocks up: this is
+  // the ACTUAL first `ok` line and the ACTUAL summary line `node
+  // tools/seam-check.mjs` printed when it was run from here, not a guess at them.
+  // Same suite-name-prefixed passed/failed shape `unit-check` puts up, with `ok`
+  // at three spaces and the detail after the two-space separator.
+  shape('seam-check.mjs "seam-check: 12 passed, 0 failed" — suite-name prefix, ok at three spaces', 'seam',
+    'ok   THE FAKE PORT REFUSES IN THE SHIPPED WORKER\u2019S OWN WORDS  '
+    + '[entry point: extension/workers/inference.worker.js, the INFER case, comments stripped]  verbatim, 75 chars\n'
+    + '\nseam-check: 12 passed, 0 failed\n', 'PASS', '12 passed, 0 failed');
   check('...and its un-counted note lines are not mistaken for assertions',
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
@@ -866,6 +875,56 @@ if (reaped) {
  */
 const steps = [
   { id: 'unit', title: 'node test.js — DSP, WAV, rings, mixer', args: ['test.js'] },
+  /**
+   * Beside `unit` because it is the other half of `test.js`'s `backend` group,
+   * and a red in either is read next to the other: that group drives
+   * `serialiseBackend` over a fake BACKEND (does the queue queue?), this drives
+   * the same wrapper — over the SHIPPED `WorkerBackend` — at a fake worker PORT
+   * that carries `inference.worker.js`'s own `busy` guard (is the guard ever
+   * reached?). The second question needs a port with an opinion about being
+   * re-entered, which a fake backend does not have.
+   *
+   * The failure it catches is the one three files exist to prevent and no gate
+   * could see: ORT-Web serialises `run()` per wasm instance, and a rejected
+   * concurrent call leaves the session permanently unusable — not slow, DEAD,
+   * for the life of the worker. It is unreachable today, so nothing observable
+   * changes when the queue is deleted; `--quick` stayed green through every
+   * mutation below except this step.
+   *
+   * NOT ONE OF ITS ASSERTIONS READS A CLOCK. The fake port's work is a fixed
+   * number of MICROTASK TURNS, so every number it prints is a count and three
+   * consecutive runs were byte-identical. ~0.1 s, no browser, no weights.
+   *
+   * Watched going red before it was gated. EIGHT mutations, each applied ALONE
+   * against a green 12, and between them every one of the twelve assertions has
+   * been seen to fail:
+   *
+   *   - `serialiseBackend`'s queue removed (`const queued = (fn) => fn()`) —
+   *     7 of 12. All four wrapped-stack claims and the queued half of the
+   *     teardown claim; the three controls and the two mirror assertions stay
+   *     green, which is the whole point of having them.
+   *   - the chain advanced with `chain = p` instead of `p.then(noop, noop)` —
+   *     11 of 12: one refused segment latches the chain and the eight calls
+   *     behind it never settle. This is the mutation nothing else in the tree
+   *     catches.
+   *   - `dispose()` back to `this.pending.clear()` with no rejection — 9 of 12:
+   *     the call on the wire, the queued ones and an open `load()`.
+   *   - `dispose()` rejecting but recording no `deadReason` — 11 of 12: the
+   *     queued calls are told the backend "reported no reason" about a teardown
+   *     that had just happened.
+   *   - the FAKE PORT's guard disabled (`if (false)`) — 10 of 12, and both reds
+   *     are CONTROLS. A fake that waves a concurrent INFER through makes every
+   *     "0 guard trips" below it a statement about nothing, so the suite has to
+   *     fail rather than pass quietly, and it does.
+   *   - the FAKE PORT holding `busy` across its warm-up — 11 of 12: the warm-up
+   *     control, which exists to show the gap the shipped guard does not cover.
+   *   - `inference.worker.js` rewording its refusal — 11 of 12: the fake's copy
+   *     of that sentence has drifted off the original.
+   *   - `inference.worker.js` setting `busy` in `loadModel()` — 11 of 12: the
+   *     warm-up gap would be closed, and the control that models it would be
+   *     modelling a worker that no longer exists.
+   */
+  { id: 'seam', title: 'node tools/seam-check.mjs — the seam serialises: one call in flight per backend, no caller can wedge a session, and dispose() settles what it takes away', args: ['tools/seam-check.mjs'] },
   { id: 'ui', title: 'node extension/ui/dev/selftest.mjs — the deck\'s display laws, no browser', args: ['extension/ui/dev/selftest.mjs'] },
   { id: 'snippets', title: 'node docs/snippets/selftest.js — AUDIO.md §6.1 Tier 1: the testbed and bss-eval reference implementations', args: ['docs/snippets/selftest.js'] },
   { id: 'ground-truth', title: 'node qa/compare.mjs smoke — the testbed has one source per STEMS entry and Σ sources rebuilds the mix', args: ['qa/compare.mjs', 'smoke'] },
