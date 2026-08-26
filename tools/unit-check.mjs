@@ -741,9 +741,25 @@ for (const e of externals) {
   const body = fs.existsSync(script) ? fs.readFileSync(script, 'utf8') : '';
   ok(body.includes(e.prefix),
     `${e.fetch} is the recipe for ${e.prefix}, and names it  a vendoring product runs the script rather than copying the drop`);
-  note(fs.existsSync(path.join(EXT, e.prefix))
-    ? `extension/${e.prefix} is present — not in git by design, not part of the unit`
-    : `extension/${e.prefix} is ABSENT (not in git by design) — run \`bash ${e.fetch}\` before loading unpacked`);
+  /**
+   * TWO KINDS OF EXTERNAL, and this note used to know about one.
+   *
+   * `vendor/ort/` is fetched and gitignored, so its absence is a fact worth
+   * reporting rather than a broken tree. `models/` is COMMITTED (ADR 0002): the
+   * Basic Pitch weights are Apache-2.0, so this repository is allowed to carry
+   * them and does. Printing `not in git by design` over bytes that ARE in git is
+   * the small lie this file exists to stop, one level down — so the entry's own
+   * `committed` flag picks the sentence, and a committed entry that is missing is
+   * a BROKEN CHECKOUT rather than a step somebody has not run yet.
+   */
+  const there = fs.existsSync(path.join(EXT, e.prefix));
+  note(e.committed
+    ? (there
+      ? `extension/${e.prefix} is present and IS in git — it travels with the copy (${e.fetch})`
+      : `extension/${e.prefix} is ABSENT but is committed — this checkout is broken, not incomplete; see ${e.fetch}`)
+    : (there
+      ? `extension/${e.prefix} is present — not in git by design, not part of the unit`
+      : `extension/${e.prefix} is ABSENT (not in git by design) — run \`bash ${e.fetch}\` before loading unpacked`));
 }
 
 // ------------------------------------- ADR 0001 decision 3, as a presence check

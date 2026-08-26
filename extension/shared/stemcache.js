@@ -10,8 +10,10 @@
  * ---------------------------------------------------------------------------
  * FORMAT — 16-bit PCM, and only for playback.
  *
- * Export always re-derives from the model at 32f, so no lossy artefact can ever
- * reach a deliverable; the cache is a playback convenience and nothing else.
+ * The one file this product hands over is a MIDI transcription, and it is written
+ * off the LIVE stem ring as the player plays — never by bulk-reading this cache
+ * (ADR 0002) — so nothing lossy in here can reach a deliverable; the cache is a
+ * playback convenience and nothing else.
  * 16-bit is ~254 MB/track at six stems (169 MB at four) against ~508 MB for 32f,
  * which doubles how many tracks fit under a given cap. Stems are more revealing
  * of codec artefacts than full mixes (no masking material), which is why this is

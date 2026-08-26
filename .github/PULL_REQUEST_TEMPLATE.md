@@ -34,7 +34,14 @@ rejected regardless of how well it works. Please confirm:
 
 - [ ] **L1** — this does not obtain audio from anywhere other than
       `chrome.tabCapture`. No stream-URL resolution, no `yt-dlp`, no player-response
-      parsing, and nothing that lets the extension write a media file.
+      parsing, and **no audio export**. The line is not "no files": a
+      TRANSCRIPTION of what was heard is allowed, a COPY of it is not. The one
+      thing this build hands over is a zip of `.mid`, and what holds the line is
+      [`qa/midi-pack.mjs`](../blob/main/qa/midi-pack.mjs) against the
+      `{application/zip, audio/midi}` allowlist in `extension/shared/midi.js` —
+      widen that allowlist and the gate goes red. Not the absent `downloads`
+      permission, which never enforced this
+      ([ADR 0002](../blob/main/docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)).
 - [ ] **P1** — this adds no network request after the model download. No telemetry,
       no analytics, no error reporting, no fonts, no update pings.
 - [ ] **M1** — this loads no remote code. Anything fetched is fetched as *data*

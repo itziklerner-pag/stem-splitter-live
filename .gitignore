@@ -13,6 +13,23 @@ dist/
 *.so
 *.dylib
 
+# ...with ONE exception, spelt as a whole path rather than as a glob so that it
+# can only ever re-include this single file. extension/models/nmp.onnx is
+# Spotify's Basic Pitch (225 KiB) and it is committed DELIBERATELY: Apache-2.0
+# covers the code AND the weights, so redistribution is permitted, and carrying
+# the bytes removes the single point of failure, the fetch-script edit, the CI
+# cache change and the README install line in one move. ADR 0002 / the owner's
+# ruling R3. The identity is pinned where a pin belongs — extension/unit.json's
+# `external` entry carries the sha256 and the byte count — and the Apache §4(d)
+# NOTICE travels beside it as extension/models/NOTICE.basic-pitch, which nothing
+# here excludes.
+#
+# NOT the same decision as the /models/ rule further down, and the two are easy
+# to conflate at a glance: that one is the htdemucs_6s SEPARATOR, which is
+# fetched and never redistributed. Two models, two answers, and what separates
+# them is whether the publisher issued an explicit grant over the WEIGHTS.
+!extension/models/nmp.onnx
+
 # the ORT runtime: fetched by tools/fetch-vendor.sh, reproducible from a pinned
 # version + hashes, so it does not belong in the repo
 /extension/vendor/

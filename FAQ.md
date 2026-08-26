@@ -100,7 +100,16 @@ transformer bottleneck. It has 27.4 M parameters against 41.9 M.
 
 ### Can I export the stems as files?
 
-No, and this is deliberate rather than unimplemented. See below.
+**As audio, no — and that is deliberate rather than unimplemented.** As MIDI,
+yes: the deck will write a transcription of the six stems while the video plays
+and hand you a zip of seven `.mid` files. Notes, not sound. See
+[below](#are-you-going-to-add-a-download-button--offline-export--a-second-deck)
+for what changed and why.
+
+> **This answer was a flat "No" until 26 August 2026.** It read, in full:
+> *"No, and this is deliberate rather than unimplemented. See below."* It is
+> quoted here rather than replaced, because a silently vanished answer is worse
+> than a documented change of mind.
 
 ---
 
@@ -112,7 +121,9 @@ No, and the architecture is the argument rather than the promise.
 
 Stem Splitter Live separates audio **that your own browser is already playing**,
 through the same API a screen recorder uses, and plays the result back through
-your speakers. It has no capacity to obtain, store, or hand you a media file.
+your speakers. It has no capacity to obtain, store, or hand you a copy of the
+audio — the one file it can hand you is a MIDI transcription, which is notes and
+not sound.
 
 Concretely:
 
@@ -123,14 +134,20 @@ Concretely:
   element — `paused`, `currentTime`, `duration`. That is transport state, not
   media. It never reads `src`, `currentSrc`, `buffered` or `srcObject`, never
   calls `captureStream()`, and never runs in the page's JavaScript context.
-- **The extension cannot save a file.** It does not request the `downloads`
-  permission, and an automated gate asserts its continued absence on every
-  commit.
+- **The extension cannot hand you a file that reproduces what it heard.** It
+  makes exactly one kind of file — a MIDI transcription, which carries note
+  numbers and timings and not one sample of audio — and an automated gate
+  (`qa/midi-pack.mjs`) builds a real pack, asserts every entry of it begins
+  `MThd`, and asserts that the same pack with a WAV inside is **refused**. It
+  still does not request the `downloads` permission and a gate still asserts
+  that absence on every commit, but we no longer cite the permission as the
+  thing that enforces this: any extension page can make a `Blob`, and that was
+  true on the day the check was written.
 
 A content script on a video page is exactly where a ripper *would* live, which
 is why the boundary is stated in terms of what the code does rather than as a
 slogan. It is a project rule — no pull request may cross it, however well it
-works — and it is why offline export was built, and then cut.
+works — and it is why offline **audio** export was built, and then cut.
 
 ### Is it really MIT if the model isn't?
 
@@ -149,6 +166,12 @@ dataset. **Nobody can relicense them, including us.** So:
 
 We could have quietly said "MIT" and let people assume. Publishing a licence
 claim you cannot support is a worse problem than the constraint itself.
+
+The *transcription* model is the other way round. Spotify's Basic Pitch is
+Apache-2.0 over the weights as well as the code, so that one **is** committed to
+this repository — 225 KiB, with the upstream `NOTICE` beside it as Apache §4(d)
+requires. [`NOTICE.md`](NOTICE.md) carries both models and the one test we use
+to decide: has the publisher granted rights over the **weights**?
 
 ### Can I use this commercially?
 
@@ -185,12 +208,53 @@ the model is the unit's job). Watching for it is on us.
 
 ### Are you going to add a download button / offline export / a second deck?
 
-No to the first. An offline export mode and a two-deck DJ console were both
-built and both cut — `docs/ARCHITECTURE.md`'s appendix records what went and
-why, so a re-proposal starts from that rather than from scratch.
+**Audio export: still no, permanently.** An offline audio-export mode and a
+two-deck DJ console were both built and both cut — `docs/ARCHITECTURE.md`'s
+appendix records what went and why, so a re-proposal starts from that rather
+than from scratch. Writing a separated copy of somebody's track to disk is the
+thing this project exists not to do, and that has not changed.
 
-Export specifically is not coming back, because writing a separated copy of
-somebody's track to disk is the thing this project exists not to do.
+**MIDI: yes, and it shipped.** The deck transcribes the six stems while the
+video plays and hands you a zip of seven `.mid` files. A `.mid` holds note
+numbers, onsets, lengths and velocities. It holds no samples, no timbre, no
+performance and no vocal, and nothing can turn it back into the recording — your
+software plays it on its own synthesiser and it sounds like that synthesiser.
+
+> **This answer used to be "No" to all of it, and it changed on 26 August 2026.**
+> The old answer read: *"No to the first. An offline export mode and a
+> two-deck DJ console were both built and both cut … Export specifically is not
+> coming back, because writing a separated copy of somebody's track to disk is
+> the thing this project exists not to do."* Both sentences are still true of
+> **audio**. They were written without the word, and MIDI is the case that shows
+> the word was doing work. We are leaving the old answer here rather than
+> quietly replacing it.
+
+Three things worth being straight about:
+
+- **We had to narrow a claim we had made four times.** "The extension cannot
+  save a file" appeared in this file, the README, `PRIVACY.md` and ADR 0001. It
+  is now "cannot produce a file that reproduces the captured audio", and
+  [ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)
+  says so at length, including what it costs.
+- **The narrower claim is checked, not promised.** `qa/midi-pack.mjs` builds a
+  real pack, asserts every zip entry begins `MThd`, and refuses the same pack
+  with a WAV in it. The allowlist is exactly `application/zip` and `audio/midi`,
+  and widening it turns that gate red.
+- **The rights question is open and we are not pretending otherwise.** A
+  transcription is a derivative of the *composition*, which is a different
+  question from a copy of the *recording* — and "different" is not automatically
+  "safer". What we can state precisely is the engineering: capture is still
+  `chrome.tabCapture` only, no new permission was added, and nothing leaves your
+  machine. If you are a rights holder or a lawyer and you think that is wrong,
+  please open an issue. We would rather be corrected than be confidently wrong
+  in public.
+
+**The transcription is rough, and it is meant to be honest about that.** It
+finds fewer notes than a full offline transcriber on quiet or legato passages;
+drums are four General MIDI classes from hand-written onset detection, not a
+model; and it only writes what actually plays through, so if you skip forward,
+the pack has a hole where you skipped. The deck shows you how much of the song
+it wrote rather than claiming the song.
 
 ---
 

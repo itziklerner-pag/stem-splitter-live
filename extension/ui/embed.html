@@ -298,9 +298,10 @@
 <!--
   THE ONE-TIME MODEL DOWNLOAD, asked for rather than done.
 
-  It is 172 MiB and it is the only network request this product ever makes, so
-  it is the one thing the user must be told about before it happens. A real
-  <dialog> + showModal(): focus trap, Esc, inert background, no library.
+  It is 109 MiB (`MODEL.bytes` = 114,559,139) and it is the only network request
+  this product ever makes, so it is the one thing the user must be told about
+  before it happens. A real <dialog> + showModal(): focus trap, Esc, inert
+  background, no library.
 -->
 <dialog class="dlg" id="modeldlg" aria-labelledby="mdl-t">
   <h2 id="mdl-t">One-time download</h2>
@@ -372,6 +373,67 @@
   <div class="dlg__row"><span class="note"></span><button class="btn" id="keys-x" type="button">Close</button></div>
 </dialog>
 
+<!--
+  THE MIDI TAKE. One row, between the play-along tools and the footer, and it
+  exists only while a take does — `hidden` otherwise, so a deck nobody has asked
+  for MIDI on is exactly as tall as it was before this feature.
+
+  IT IS `.bpm`'S BLOCK ONE ROW DOWN, because it is the same shape: a label, a
+  state word, a big mono value and a fine line. What it adds is the RAIL — where
+  on the video's own timeline the coverage actually sits — because a single
+  number cannot say that a forward seek left a hole in the middle.
+
+  EIGHT STATES ON `data-show`, and two of them exist to prevent a lie:
+  `empty` (the take closed with zero notes, so there is NO Save button — a zip
+  of seven empty files is a confident-looking nothing) and `bad` (a gap in the
+  engine's `seq`, an unreadable payload, or a flush that never came). `bad` is
+  VISIBLE ON PURPOSE: a view that guarded with `midi && midi.notes` and
+  otherwise drew nothing would look healthy on precisely the runs where the
+  engine sent something wrong.
+
+  NOTHING HERE MOVES EXCEPT THE RAIL AND THE HEAD, and both of those are VALUES.
+  The dot never blinks: nothing in this row has a beat, so a blinking dot would
+  be decoration rather than information — which is why `prefers-reduced-motion`
+  needs no rule for this component at all (unlike `.bpm__pulse`, whose motion IS
+  the beat).
+
+  `aria-live="polite"` IS ON `#midi-state` AND ON NOTHING ELSE IN THIS ROW.
+  Licensed by the same two gates the BPM box's is: the word changes only on a
+  real transition (waiting -> writing -> finishing -> ready), and it is written
+  through `text()`, which compares before it writes, so a repaint that changes
+  nothing announces nothing. THE COVERAGE FIGURE IS DELIBERATELY NOT IN A LIVE
+  REGION — it moves about once a second, and announcing it would be a screen
+  reader reading a stopwatch aloud. The rail is `aria-hidden` because it is a
+  picture of the number beside it.
+-->
+<div class="midi" id="midibox" data-show="off" hidden>
+  <div class="midi__hd">
+    <span class="lbl">MIDI</span>
+    <span class="midi__dot" aria-hidden="true"></span>
+    <span class="midi__st" id="midi-state" aria-live="polite"></span>
+    <span class="midi__gap"></span>
+    <!-- `aria-describedby` points at the fine line BECAUSE THE REASON IS
+         RENDERED THERE — the same call `.sp` makes. When this button is greyed,
+         why it is greyed is a sentence on screen and not a `title`. -->
+    <button class="tp" id="midi-go" type="button"
+            aria-describedby="midi-fine">Convert now</button>
+    <!-- Both `title` and `aria-label`, and both change with the state: while a
+         take is open this discards a RECORDING IN PROGRESS, and at ready/saved
+         it discards a finished pack. Two different losses, two sentences. -->
+    <button class="ic" id="midi-x" type="button"
+            title="Stop and discard this MIDI take"
+            aria-label="Stop and discard this MIDI take">✕</button>
+  </div>
+  <div class="midi__names"><b class="midi__cov" id="midi-cov"></b></div>
+  <!-- One `<i>` per merged covered span, written by embed.js, plus a 1 px head
+       at the video's position. Not drawn at all when the video has no duration
+       (a livestream): a proportion you cannot compute must not be drawn as one. -->
+  <div class="midi__rail" id="midi-rail" aria-hidden="true">
+    <span class="midi__head" id="midi-head"></span>
+  </div>
+  <div class="midi__fine" id="midi-fine"></div>
+</div>
+
 <footer class="foot">
   <!--
     THE ONE SETTING. Checked = we suppress YouTube's autoplay-next, which is the
@@ -383,6 +445,32 @@
     <input type="checkbox" id="autonav-cb" checked>
     <span>Stop at the end of the video</span>
   </label>
+  <!--
+    THE TRIGGER, and it is the ONLY gesture into a MIDI take — there is no
+    keyboard shortcut and no `manifest.commands` entry, ever (ADR 0002 / the
+    owner's ruling R9). `1`-`6` are stem mutes, `7`-`9` and `Space` stay
+    YouTube's, and every free letter is worse than nothing: `M` is Mute on every
+    mixer ever built, and any other letter fires only when this iframe happens
+    to have focus — the "sometimes it works" failure the digit map exists to
+    avoid. Converting is once per song, not once per bar.
+
+    IT IS DISABLED EXACTLY WHEN `#src-sub` CARRIES TEXT, i.e. when the tab is
+    not armed — greyed control, reason already on screen one line up, and
+    `aria-describedby` is what connects the two rather than a second copy of the
+    sentence in a `title`.
+
+    IT DOES NOT PROMPT FOR THE MODEL. Arming a transcription costs no bytes; the
+    two existing routes into `startLive()` gate on the weights because THEIR
+    gesture is "give me audio", which needs the 109 MiB separator. If the
+    weights are absent the row simply says so. See `armTake()` in embed.js.
+    109 MiB is `MODEL.bytes` = 114,559,139, htdemucs_6s. The 172 MiB figure
+    still carried by embed.js and the engine is the FOUR-stem model FAQ.md
+    compares against under "Why six stems and not four?" — it is not what this
+    build downloads, and it should not be copied any further.
+  -->
+  <button class="btn" id="midi-arm" type="button"
+          title="Write MIDI from the six stems while the video plays"
+          aria-describedby="src-sub">Transcribe to MIDI</button>
   <span class="note" id="note"></span>
   <button class="lnk" id="keys-open" type="button" title="Keyboard shortcuts">? shortcuts</button>
 </footer>

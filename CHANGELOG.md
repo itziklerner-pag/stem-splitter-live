@@ -11,6 +11,66 @@ release, whether or not it is otherwise notable.
 
 ## [Unreleased]
 
+### Security and privacy
+
+- **The extension can now hand you one file, and the claim that it could not has
+  been narrowed rather than deleted.** It was *"the extension cannot save a
+  file"*, in four documents; it is now *"it cannot produce a user-accessible file
+  that **reproduces** the captured audio"*. The one file it makes is a MIDI
+  transcription — note numbers, onsets, lengths and velocities, and no samples of
+  anything. **Nothing about data collection changes**: still nothing collected,
+  still exactly one network request in the extension's lifetime, still nothing
+  transmitted, and the pack is built and handed over entirely on your machine.
+  [ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)
+  supersedes ADR 0001 decision 2 and records what the narrowing costs, including
+  the rights question it raises, which is **recorded as open**.
+- **No new permission.** There is still no `downloads` permission and the gate
+  asserting its absence is unchanged. What changed is that we stopped citing it
+  as the thing that enforced the claim: an extension page can create a `Blob`
+  and click an anchor without any permission, and always could. The claim is now
+  held by an allowlist of exactly `application/zip` and `audio/midi` in
+  `extension/shared/midi.js`, gated by `qa/midi-pack.mjs`, whose control is a
+  real WAV inside a real pack that must be **refused**.
+- **An obligation this release has not discharged yet:**
+  [`PRIVACY.md`](PRIVACY.md)'s change clause promises users are notified in the
+  extension itself before a change takes effect. That notice is product work and
+  **must land before release**. It is written down in `PRIVACY.md` itself rather
+  than in a tracker.
+
+### Added
+
+- **Transcribe to MIDI.** While the video plays, the deck writes a note
+  transcription of all six stems and hands you a zip of seven `.mid` files — one
+  per stem, plus a combined multi-track file. It rides the player: only what
+  actually plays through is written, the deck shows how much of the song it has,
+  and a stretch you skipped past is a hole rather than silence pretending to be
+  music. Pitched stems use Spotify's Basic Pitch; drums are hand-written onset
+  detection into four General MIDI classes, because no permissively licensed
+  drum transcriber exists to use instead.
+- **The Basic Pitch weights are committed to this repository** — 225 KiB,
+  Apache-2.0 over the code *and* the weights, with the upstream `NOTICE` beside
+  them as Apache §4(d) requires. Unlike the separator's 109 MB, there is no host
+  that can disappear. [`NOTICE.md`](NOTICE.md) carries the row and the one test
+  that decided it: has the publisher granted rights over the **weights**?
+- **Host interface v1.1** — one appended duty, `DeckHost.deliver(name, bytes,
+  mime)`. A MINOR change: every existing Host fails `assertHost` at boot until it
+  implements it, which is what that check is for. Bytes cross the seam, never a
+  URL.
+- **Four new gates**, all in `node tools/verify.mjs --quick`:
+  `extension/engine/resample2.js`, `extension/engine/notes.js`,
+  `extension/engine/drumtap.js` and `qa/midi-pack.mjs`. Each carries a control
+  that must lose — an unfiltered decimator, a one-class drum detector, and a WAV
+  the delivery guard has to refuse.
+
+### Changed
+
+- `tools/tree-check.mjs`'s downloads assertion is unchanged; its **message** is
+  narrowed from *"nothing in this build writes a file"* to *"this build cannot
+  use `chrome.downloads`"*, which is what it actually checks.
+- [`FAQ.md`](FAQ.md) keeps its old "No" to export **visible and dated** beside
+  the new answer. A silently vanished answer is worse than a documented change
+  of mind.
+
 ## [0.2.0] — 2026-08-26
 
 The Host seam. Nothing about what the extension does changes; what changes is

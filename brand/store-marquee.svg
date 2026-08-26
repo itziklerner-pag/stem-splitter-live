@@ -28,6 +28,6 @@
   <g font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif">
     <text x="88" y="288" font-size="72" font-weight="700" letter-spacing="-2" fill="#f5f7fa">Stem Splitter Live</text>
     <text x="88" y="356" font-size="36" font-weight="500" fill="#b3bcc8">Split any YouTube video into six stems, live.</text>
-    <text x="88" y="452" font-size="26" font-weight="600" fill="#4ce3bb">Runs on your GPU · Nothing is uploaded · Nothing is downloaded</text>
+    <text x="88" y="452" font-size="26" font-weight="600" fill="#4ce3bb">Runs on your GPU · Nothing is uploaded · No audio is downloaded</text>
   </g>
 </svg>

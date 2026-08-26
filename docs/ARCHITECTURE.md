@@ -16,7 +16,7 @@ for the stem set and its ordering, `CONTRIBUTING.md` for the rules that govern e
 | **1** | **Audio comes from `chrome.tabCapture` and nothing else.** | No URL resolution, no stream parsing, no downloader. This is `CONTRIBUTING.md` L1 and it is not a performance trade — it is what makes this an audio tool rather than a ripper. |
 | **2** | **One deck.** | There is no deck B, no crossfader surface, no tab picker. A `tabCapture` grant is per-tab and only a browser-level invocation *on that tab* mints one, so arming is a toolbar click or `Ctrl+Shift+9`, and it always points the one deck at the tab it was performed in. |
 | **3** | **The page is the surface.** | No side panel, no popup. A content script injects an iframe into the YouTube watch page, between the player and the title. The user never leaves the video they are listening to. |
-| **4** | **One `AudioContext` at 44 100 Hz — the model's native rate — and no JS resampling anywhere.** | Chrome converts the 48 k tab stream on the way in and the 44.1 k bus on the way to the device, both inside its own media pipeline. Capture worklet, segmenter, overlap-add and player all share one integer sample clock at the model's rate. `docs/AUDIO.md` §1 carries the 1000.00 Hz round-trip measurement. |
+| **4** | **One `AudioContext` at 44 100 Hz — the model's native rate — and no JS resampling between the capture clock and the model clock.** | Chrome converts the 48 k tab stream on the way in and the 44.1 k bus on the way to the device, both inside its own media pipeline. Capture worklet, segmenter, overlap-add and player all share one integer sample clock at the model's rate. `docs/AUDIO.md` §1 carries the 1000.00 Hz round-trip measurement. The tree's one JS resampler, `engine/resample2.js`, is not between those two clocks: it is the read-only MIDI tap's, downstream of the separator, and returns no sample to the audio graph — `CONTRIBUTING.md`'s carve-out list is the rank-1 statement of what is actually banned. |
 
 **Nothing goes to the network after the model downloads.** One request, to a
 pinned and hashed upstream host, cached thereafter. No telemetry, no fonts, no
@@ -131,10 +131,23 @@ applied inside the playback worklet.
 | `LIVE_START` / `LIVE_STOP` | deck → engine | run or stop the separation pipeline |
 | `STEM_GAIN`, `STEM_MUTE`, `STEM_SOLO`, `MASTER_GAIN` | deck → engine | the mixer |
 | `PITCH`, `SPEED`, `SET_HOP` | deck → engine | transpose, rate, chunk cadence |
-| `PAGE_VIDEO` | deck → engine | what the page's `<video>` is doing |
+| `PAGE_VIDEO` | deck → engine | what the page's `<video>` is doing — and the MIDI take's only clock |
+| `MIDI_START`, `MIDI_FLUSH`, `MIDI_STOP` | deck → engine | open a take, drain it, discard it. Three user gestures, never a timer |
 | `DECK_PREPARE` | sw → engine | warm the ORT session |
 | `STATE`, `LIVE_STATE`, `METERS`, `LIVE_ERROR`, `SPEED_STATE` | engine → deck | engine truth, ~10–20 Hz |
+| `MIDI_NOTES` | engine → deck | one per published transcription hop: the span it covers and the notes in it, in source seconds |
+| `MIDI_FLUSHED` | engine → deck | the drain is finished, and the last `seq` it sent |
+| `MIDI_ERROR` | engine → deck | the take cannot be trusted, with a code — the deck turns the row red |
 | `DIAG`, `TEARDOWN`, `DEV_*` | either | the debug surface — see §6 |
+
+**The six `MIDI_*` types are the only ones on this wire with a completeness
+rule.** Everything else is state chatter and is idempotent — a dropped `METERS`
+costs nothing because the next tick carries the same truth — but a take is a
+sequence, so the deck holds a complete one **iff** it holds every `seq` from 1
+to `MIDI_FLUSHED.seq`. A gap makes the take `bad`, which is drawn rather than
+hidden. `LIVE_STATE.midi` is a coarser, separate answer — `off | running |
+draining | fault`, the engine's view of whether the transcriber is working — and
+is deliberately not the same vocabulary as the row the deck renders.
 
 **`postMessage` — content script ⇄ deck**, across the iframe boundary, because
 that is the only channel a page and an extension frame share. `from:
@@ -173,6 +186,11 @@ listening.
         │                              │   equal-power ramps, no lookahead
         │                              ▼
         │                    shared/stemring.js — 14 planes
+        │                              ├──▶ offscreen/transcribe.js — the MIDI tap
+        │                              │      engine/drumtap.js on planes 0/1,
+        │                              │      engine/resample2.js + Basic Pitch on
+        │                              │      planes 2..11. READ-ONLY: nothing it
+        │                              │      produces comes back into this picture.
         │                              ▼
         │                    engine/pitchbank.js — optional transpose,
         │                              │   drums lane deliberately unshifted
@@ -189,6 +207,19 @@ listening.
 at `min(resolved stem gains)` — never at unity, or a killed vocal comes back for
 one hop.
 
+**The MIDI tap is drawn as a branch because it is one.** It is in the picture
+rather than left out of it — it runs on the live path, per hop, on every take —
+but it is a lagging, refusable, non-destructive read in the manner of
+`engine/keytap.js` and `engine/bpmtap.js`, and no sample it makes reaches the
+mixer, the master bus, the worklet or the DAC. Two consequences follow from
+*where* the branch leaves. It is **upstream of `pitchbank.js`**, so the notes
+are the recording's key and not the deck's transpose setting. And it is
+downstream of the separator, which is what puts `engine/resample2.js` —
+44 100 → 22 050 for Basic Pitch's own clock — inside `CONTRIBUTING.md`'s
+resampling carve-out rather than across §0 decision 4. Nothing waits on it: it
+may fall arbitrarily behind and catch up.
+[ADR 0002](adr/0002-midi-transcription-narrows-the-no-file-property.md).
+
 **The page's `<video>` is the clock.** Live mode locks the picture to the audio
 clock rather than the reverse; `ui/audio-math.js::syncCorrection` and
 `audioClockAt` own that arithmetic, and `content.js` applies it.
@@ -197,16 +228,27 @@ clock rather than the reverse; `ui/audio-math.js::syncCorrection` and
 
 ## 4. State
 
-The engine is authoritative for everything audible. The deck holds only what it
-is drawing, and reconciles on every `STATE` / `LIVE_STATE`.
+The engine is authoritative for everything audible. The deck holds what it is
+drawing, and reconciles on every `STATE` / `LIVE_STATE` — with exactly one
+exception, named below the table rather than left to be discovered.
 
 | where | what | lifetime |
 |---|---|---|
 | `chrome.storage.session` | the armed tab (`session`), the last arm refusal (`armError`) | until the browser closes |
 | `chrome.storage.local` | the user's preferences — instrument, autoplay-next | forever |
 | offscreen document | the AudioContext, the ring, the ORT session, all mixer state | until teardown or document death |
-| deck page | render state only | until the iframe closes |
+| offscreen document | the open take's transcriber — its own Worker, its own second ORT session, and the DSP state behind it | `MIDI_START` to `MIDI_STOP`; created lazily on the first take, terminated with it |
+| deck page | render state, **and the open MIDI take** — every `MIDI_NOTES` it has received, plus the built pack once the user asks for one | until the iframe closes |
 | OPFS | the cached model weights, the stem cache | forever, `unlimitedStorage` |
+
+**The open take is that exception, and it does not reconcile.** Everything else
+the deck holds it can rebuild from the next `STATE` / `LIVE_STATE`; a take
+cannot be rebuilt from anything, because the audio it was written from is gone
+and the engine keeps no copy of what it already sent. So it lives in the deck
+page's memory and **is never written to disk at all** — which is what makes a
+cancelled save dialog a non-event, and closing the deck, closing the tab or
+reloading a discard. `PRIVACY.md`'s storage table states the same thing to
+users, in their words.
 
 **A refusal is both sent and persisted.** `sendMessage` with nothing listening
 rejects into a `catch`, which is correct for state chatter — the next tick
@@ -251,7 +293,9 @@ node tools/verify.mjs --unit  # only the suites whose subject is the vendored un
 | gate | subject |
 |---|---|
 | `test.js` | the DSP: the chunk plan, the stem sum null test, the WAV round-trip, the FFT, the capture ring — **and** this Host's conformance to the seam, in `group('host')` |
-| `extension/engine/*.js` | each engine module runs its own suite as `node engine/<x>.js` — pitch, pitchbank, chroma, keytap, bpmtap |
+| `extension/engine/*.js` | each engine module runs its own suite as `node engine/<x>.js` — pitch, pitchbank, chroma, keytap, bpmtap, drumtap, resample2, notes |
+| `extension/offscreen/transcribe.js` | the MIDI take's joins: ring frames to lane samples to source seconds, over a fake worker port |
+| `qa/midi-pack.mjs` | **what holds the no-audio-export line** — builds a real pack, asserts every zip entry begins `MThd`, and asserts the same pack with a real WAV inside is refused |
 | `extension/ui/dev/selftest.mjs` | the deck's display laws — the fader, the meter scale, buffer health, the error families |
 | `extension/{autonav,speed}.js`, `ui/embed-state.js` | the content-script decisions and pure UI state |
 | `tools/seam-check.mjs` | the seam serialises: one call in flight per backend, and `dispose()` settles what it takes away |
@@ -263,10 +307,11 @@ node tools/verify.mjs --unit  # only the suites whose subject is the vendored un
 
 **`--unit` is the vendored unit's own plan**, built from the `suites` list in
 `extension/unit.json` rather than from a list in the runner, so a suite is gated
-by being declared there and by nothing else. It runs 12 of the 23 steps and
-needs no browser, no weights and no `node_modules`. `node tools/unit-hash.mjs`
-rewrites `extension/unit.sha256` after any change to a unit file — the gate
-above is what tells you that you forgot. [`docs/VENDORING.md`](VENDORING.md) is
+by being declared there and by nothing else. It runs 17 of the 28 steps and
+needs no browser, no weights and no `node_modules` — `node tools/unit-check.mjs`
+prints both counts, so this sentence is checkable rather than remembered.
+`node tools/unit-hash.mjs` rewrites `extension/unit.sha256` after any change to
+a unit file — the gate above is what tells you that you forgot. [`docs/VENDORING.md`](VENDORING.md) is
 the procedure a second product follows, dry-run from an empty directory.
 
 **`embed-smoke` carries more weight than a smoke test normally would**, and that
@@ -291,7 +336,19 @@ start from why it went.
   audio path and the only gate that would catch a mistake was itself part of the
   two-deck build, so they are left in place and marked rather than ripped out on
   a guess.
-- **Offline export (six WAVs to Downloads).** The manifest has no `downloads`
-  permission and no code path could reach it.
+- **Offline audio export (six WAVs to Downloads).** Still absent, still
+  deliberate, and not coming back. The manifest has no `downloads` permission
+  and nothing in the build writes audio anywhere a user can reach it.
+  **The second half of what this bullet used to say — "no code path could reach
+  it" — is what stopped being true.** Since S12 the deck hands over exactly one
+  file, a MIDI pack, through a `Blob` and an `<a download>` inside its own
+  extension-origin iframe, which needs no permission and never did. So the
+  permission's absence is a genuine reduction in what this build *can* do and is
+  asserted as one (`tools/tree-check.mjs`) — but it is not the thing that keeps
+  audio in. That is an allowlist of exactly `{application/zip, audio/midi}` in
+  `extension/shared/midi.js`, gated by `qa/midi-pack.mjs`, whose control is a
+  real WAV inside a real pack that must be **refused**.
+  [ADR 0002](adr/0002-midi-transcription-narrows-the-no-file-property.md)
+  records the narrowing, the blind spot beside it, and what it cost.
 - **The side panel and the DJ console.** §0 decision 3.
 - **A tab picker.** §5 R4 — not a UX choice.

@@ -5621,9 +5621,9 @@ if (group('host')) {
     const threw = (h) => { try { assertHost(h, DECK_HOST_DUTIES, 'DeckHost'); return null; } catch (e) { return e; } };
 
     const noSend = threw({ ...stubDeck(), send: undefined });
-    ok('assertHost-NAMES-the-missing-duty: a Host short ONLY `send` throws saying `send`, and says nothing about the five it has',
+    ok('assertHost-NAMES-the-missing-duty: a Host short ONLY `send` throws saying `send`, and says nothing about the six it has',
       noSend instanceof Error && /\bsend\b/.test(noSend.message) && /DeckHost/.test(noSend.message)
-      && !/onMessage|storageGet|armShortcut/.test(noSend.message),
+      && !/onMessage|storageGet|armShortcut|deliver/.test(noSend.message),
       noSend ? noSend.message : 'it did not throw');
 
     const noneAtAll = threw({});

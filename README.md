@@ -7,7 +7,7 @@
 ### Split any YouTube video into six stems, live and on your own machine.
 
 Mute the vocals. Solo the drums. Slow it down without changing the key.
-Nothing is uploaded, nothing is downloaded, nothing leaves your computer.
+Nothing is uploaded, no audio is downloaded, nothing leaves your computer.
 
 [![License: MIT](https://img.shields.io/badge/code-MIT-blue.svg)](LICENSE)
 [![Model: CC BY-NC 4.0](https://img.shields.io/badge/model-CC%20BY--NC%204.0-lightgrey.svg)](NOTICE.md)
@@ -35,12 +35,19 @@ producer actually did, or just turning the singer off.
 
 ## Two properties are load-bearing, not features
 
-**It only ever hears what your own player renders.** Audio comes from
-`chrome.tabCapture` and nothing else. No stream-URL resolution, no `yt-dlp`, no
-parsing of anybody's player response. It cannot save a file — there is no
-`downloads` permission, and an automated check asserts its continued absence.
-This is the line between an audio tool and a ripper, and it is enforced as a
-project rule that no pull request may cross.
+**It only ever hears what your own player renders, and it cannot hand you the
+audio.** Audio comes from `chrome.tabCapture` and nothing else. No stream-URL
+resolution, no `yt-dlp`, no parsing of anybody's player response. **It cannot
+produce a file that reproduces what it heard.** The one file it makes is a MIDI
+transcription — note, onset, duration, velocity, and no samples at all — and
+what holds that line is a gate rather than a promise: `qa/midi-pack.mjs` builds
+a real pack, asserts every entry of the delivered zip begins `MThd`, and asserts
+that the same pack with a WAV inside is **refused**. There is still no
+`downloads` permission and a check still asserts its absence, but that permission
+never enforced this and is not cited as if it did — any extension page can mint
+a `Blob`. This is the line between an audio tool and a ripper, and it is enforced
+as a project rule that no pull request may cross
+([ADR 0002](docs/adr/0002-midi-transcription-narrows-the-no-file-property.md)).
 
 **It makes exactly one network request, ever.** The model weights, from a pinned
 and hashed host, cached after the first fetch. No telemetry, no analytics, no
@@ -190,8 +197,10 @@ extension/         the extension — load this unpacked
   sw/                service worker: arming, the capture grant, routing
   offscreen/         THE ENGINE — AudioContext, capture ring, worklets
   engine/            pure DSP, each file with its own runnable suite
-  workers/           ONNX Runtime inference worker
-  shared/            config, the Host seam (host.js), ring buffers, WAV, stem cache
+  workers/           ONNX Runtime inference worker, MIDI transcription worker
+  models/            the Basic Pitch weights — committed, Apache-2.0 (NOTICE.md)
+  shared/            config, the Host seam (host.js), ring buffers, WAV, stem cache,
+                     the SMF + zip writers and the delivery allowlist (midi.js)
   unit.json          which file is on which side of the Host seam
   unit.sha256        one SHA-256 per unit file (tools/unit-hash.mjs writes it)
   ui/                the deck (embed.*), the welcome page, display maths
@@ -210,6 +219,12 @@ test.js            the DSP suite
 under **CC BY-NC 4.0** — non-commercial. We do not redistribute it; the extension
 downloads it at runtime from a pinned, hashed upstream revision, and this
 repository has never contained it.
+
+**The transcription model is the other way round, and it *is* in here.**
+Spotify's Basic Pitch (`extension/models/nmp.onnx`, 225 KiB) is Apache-2.0 over
+the code *and* the weights, so it is committed rather than fetched — one less
+host to disappear. That changes nothing about the paragraph above: the separator
+is still NC, so the project is still free and still stays free.
 
 The practical consequence, stated plainly: **Stem Splitter Live is free and will
 stay free.** There is no paid tier and no plan for one, because a commercial
