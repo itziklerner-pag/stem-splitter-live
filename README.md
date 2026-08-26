@@ -171,6 +171,7 @@ nothing** — silence is not a pass.
 | `extension/engine/*.js` | each engine module runs its own suite: `node extension/engine/pitch.js`, and so on |
 | `extension/ui/dev/selftest.mjs` | the deck's display laws — fader, meter scale, buffer health, error families |
 | `tools/tree-check.mjs` | `extension/` really loads: every manifest path, every transitive import |
+| `tools/unit-check.mjs` | the engine and the deck still come *out*: the vendored unit `extension/unit.json` declares resolves, names no `chrome`, and leaves only through a declared Host hole |
 | `tools/name-check.mjs` | no former product name survives, and both halves of each renamed IPC pair are present |
 | `tools/model-parity.mjs` | the pinned weights really carry six sources, in the contract's order |
 | `tools/embed-smoke.mjs` | real Chromium, the real extension, the deck injected into a real page |

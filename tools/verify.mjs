@@ -697,6 +697,26 @@ if (flag('self-check')) {
   shape('qa/live-wire.mjs "5 passed, 0 failed  (abort-path self-check only …)"', 'wire-abort',
     '  \x1b[32mPASS\x1b[0m ...and it names the error\n\n\x1b[32m5 passed, 0 failed\x1b[0m  (abort-path self-check only — run the suite with qa/live-qa.mjs wire)\n',
     'PASS', '5 passed, 0 failed');
+  // Added 2026-08-25 with the `unit-check` step, under the same rule as every
+  // block above: these are the ACTUAL lines the file printed when it was run
+  // from here, not a guess at them — its first `ok` line, its crawl-floor `ok`
+  // line with the detail after the two-space separator, and, verbatim, the note
+  // the external loop prints on a tree with no vendor drop (the CI case; with
+  // the drop present the same line reads "is present"). Corrected 2026-08-25
+  // after review: the two lines this block first shipped were truncated, which
+  // is exactly the claim the sentence above makes and has to keep.
+  //
+  // It puts the suite-name prefix on the passed/failed shape, prints `ok` at
+  // THREE spaces, and interleaves un-counted `   -  ` note lines that must not
+  // be read as assertions.
+  shape('unit-check.mjs "unit-check: 67 passed, 0 failed" — suite-name prefix, and a note line in the middle', 'unit-check',
+    'ok   scanner: a bare chrome.* is executable\n'
+    + 'ok   the crawl reached the unit, not a corner of it  34 files from 2 entries + 5 roots, floor 25\n'
+    + '   -  extension/vendor/ort/ is ABSENT (not in git by design) — run `bash tools/fetch-vendor.sh` before loading unpacked\n'
+    + '\nunit-check: 67 passed, 0 failed\n', 'PASS', '67 passed, 0 failed');
+  check('...and its un-counted note lines are not mistaken for assertions',
+    JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
+    JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
 
   // The half of the VOID rule the old `\d+` could not see. Both of these are
   // exit-0 runs that assert nothing while printing a summary that LOOKS like a
@@ -902,6 +922,45 @@ const steps = [
    * broken import, and a re-added `arm-tab-b` each turn it red.
    */
   { id: 'tree', title: 'node tools/tree-check.mjs — extension/ loads as an extension: every named path, every import, one deck', args: ['tools/tree-check.mjs'] },
+  /**
+   * Beside `tree` because it crawls the same tree with the same four regexes and
+   * asks the other half of the question. `tree` asks whether `extension/` loads
+   * as an extension; this asks whether the engine and the deck still come OUT of
+   * it — ADR 0001 decision 3's vendored unit, behind decision 4's Host seam.
+   *
+   * The failure it catches is invisible here by construction: a `chrome.` added
+   * to a unit file works perfectly in this repository, because this repository
+   * IS a Chrome extension. It costs nothing until it costs a day in a second one.
+   *
+   * Watched going red before it was gated, and RE-MEASURED after the review that
+   * found this comment's first three numbers wrong. Each mutation applied alone,
+   * against a green 67:
+   *
+   *   - `chrome.runtime.id` in `engine/mixer.js` — 66 of 67, one red, and the
+   *     closure scan names the file and the line.
+   *   - a unit file importing `../sw/service-worker.js` — 66 of 67, one red: the
+   *     escape, and ONLY the escape. The partition cannot fire with it, because
+   *     `crawl()` tests the declared Host paths BEFORE it descends and records
+   *     an escape instead, so the file never enters the closure for the
+   *     partition to see.
+   *   - deleting a declared hole from `unit.json` — 60 of 63. The denominator
+   *     moves because a hole carries four assertions of its own; three fire:
+   *     `offscreen/host.js` now imports `host-pin.js` out of the unit, it is a
+   *     closure file no ADR clause names, and its own `chrome.` is suddenly
+   *     inside the unit.
+   *   - `fs.readFile(new URL('../sw/service-worker.js', import.meta.url))` in
+   *     `engine/mixer.js` — 66 of 67. This is the one an import-only crawl reads
+   *     as green; it is why `refsOf` follows `new URL(…, import.meta.url)` too.
+   *   - dropping `workers/workerbackend.js` from `roots` — 64 of 67, and the
+   *     crawl-floor detail falls from 34 files to 31. Added when S6 (#8) and S9
+   *     (#10) landed together: S6 made `offscreen/host.js` the only importer of
+   *     `workerbackend.js`, so the crawl now stops one edge short of the entire
+   *     inference implementation. Three fire — `engine/demucs.js` and both
+   *     worker files leave the closure, so two ADR clauses go unmet and the
+   *     partition has three files it cannot classify. This is the assertion
+   *     that would have caught the integration silently mis-declaring the unit.
+   */
+  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**
    * Beside `tree` because it is the same kind of claim about the same tree — a
    * property of the whole published surface rather than of one module — and a

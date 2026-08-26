@@ -1,0 +1,667 @@
+#!/usr/bin/env node
+/**
+ * IS THE VENDORED UNIT STILL VENDORABLE?
+ *
+ *     node tools/unit-check.mjs
+ *
+ * WHY THIS FILE EXISTS. ADR 0001 decides that the engine and the deck are copied
+ * out of this repository into a second product by pinned tag plus SHA-256, and
+ * that both sit behind a Host seam so neither knows which Host it runs under.
+ * That property has exactly one enemy: a single `chrome.` added to a unit file
+ * during ordinary work on the extension, where it works perfectly. Nothing in
+ * this repository would go red — the extension IS a Chrome extension — and the
+ * cost lands months later, in another repository, as a module that throws at
+ * import with no clue in the message about which line put it there.
+ *
+ * `extension/unit.json` is the declaration; this file is the gate. It reads; it
+ * writes nothing, exactly as `tools/tree-check.mjs` does, and it reuses that
+ * file's four crawl regexes rather than inventing a second dialect for the same
+ * question — plus one tree-check does not have and does not need, documented
+ * where `refsOf` is defined.
+ *
+ * WHAT IT ASSERTS, and why each one is here rather than assumed:
+ *
+ *   1. The declaration is well formed: every path it names is on disk, and no
+ *      path is claimed by two roles at once.
+ *   2. Every reference in the closure resolves — tree-check's assertion, run
+ *      from the unit's entries rather than from the manifest's.
+ *   3. The closure is not empty. A crawl that stops after two files answers
+ *      "no `chrome.` found" perfectly and means nothing; the count is asserted
+ *      against a floor and printed.
+ *   4. The closure contains every path ADR 0001 decision 3 lists — as a PRESENCE
+ *      assertion against the declaration, because a crawl cannot reach five of
+ *      those files at all and a gate derived from the crawl would silently drop
+ *      them. Four have no importer (the three worklets and
+ *      `engine/pitchbank.js`); the fifth, `workers/workerbackend.js`, has
+ *      exactly one, and it is `offscreen/host.js` — a hole, which is the one
+ *      edge the crawl must not follow. All five are seeded as `roots`.
+ *   5. Comments stripped, no unit file reaches for `chrome`.
+ *   6. The only ways out of the closure are the declared holes and the one
+ *      declared Host read. A REFERENCE here is an `import`, an `export … from`,
+ *      a `new URL('./x', import.meta.url)` — the form `new Worker` and every
+ *      node-only fixture read take — or, in markup, `src=` / `href=`.
+ *   7. Every tracked file under `extension/` is classified exactly once — unit,
+ *      hole, Host or explicitly neither. A new file lands on one side of the
+ *      seam or the gate asks which.
+ *   8. Each hole's declared `duty` is a real interface: `shared/host.js` exports
+ *      the matching `*_DUTIES` list, and the unit checks a Host against it by
+ *      that name at boot. `unit.json` is the first thing a second Host reads;
+ *      a rename on either side must not leave it naming an interface that is
+ *      gone.
+ *
+ * AND THE TWO CONTROLS, WHICH ARE THE POINT. Assertion 5 is a search that finds
+ * nothing, and a search that finds nothing is indistinguishable from a search
+ * that did not run — this repo has shipped four assertions that failed exactly
+ * that way (`AGENTS.md`). So the scanner is pinned from both directions:
+ *
+ *   POSITIVE — the Host files DO speak `chrome.`, and each one is asserted to,
+ *     by name, with its count printed. A scanner that started classifying
+ *     everything as prose takes all of them red.
+ *   NEGATIVE — three unit files mention `chrome.` in prose, one per comment
+ *     dialect, and each is asserted to be seen as prose. A scanner that stopped
+ *     stripping takes all three red.
+ *
+ * Neither control can win by accident, and each fails on the mutation the other
+ * cannot see.
+ *
+ * WHAT THIS GATE CANNOT SEE, stated so nobody reads it as more than it is.
+ * `fetch`, the Cache API, `getUserMedia` and `navigator.storage` are not
+ * `chrome`. A unit file that opened a socket would pass every assertion below.
+ * This gate does not discharge P1; `CONTRIBUTING.md` and review do.
+ *
+ * A green here does not mean the unit RUNS under a second Host either. The
+ * engine builds `SharedArrayBuffer`s directly — `offscreen/engine.js:934` and
+ * `:969`, `offscreen/deck.js:382`, `offscreen/live.js:594`,
+ * `offscreen/cacheddeck.js:231` — and asserts on the constructor rather than on
+ * `crossOriginIsolated`, which is false on an extension page and does not need
+ * to be true there (`offscreen/engine.js:105-106`). A Host serving the unit
+ * from any other scheme has to arrange COOP/COEP, or the flag, before the
+ * engine loads, or it throws where `offscreen/engine.js:895` says it does. That
+ * is a Host duty this declaration does not name and no assertion below checks.
+ *
+ * And a reference that is assembled rather than written stays invisible,
+ * because the crawl matches a string literal: `engine/pitchbank.js:1040` reads
+ * the worklet's verbatim copy of itself through
+ * `path.join(here, '../offscreen/playback-processor.js')`, which is a real
+ * unit-to-unit read nothing below follows. Both ends are in the closure anyway;
+ * a `path.join` that left it would not be seen.
+ *
+ * WHY NOT THE STRIPPER THIS REPO ALREADY HAS. Four files carry the same regex
+ * pair — `tools/name-check.mjs:63`, `qa/speed-pitch.mjs:444`, `test.js:4562` and
+ * `test.js:5833` — and it is right for all four, because all four look only at
+ * `.js`. It cannot serve here: `extension/ui/embed.html` is in the closure and
+ * mentions `chrome.runtime` and `chrome.storage.local` inside `<!-- -->`, which
+ * that pair does not know about, so the deck's own markup would be the gate's
+ * first false red. The scanner below handles all three dialects the closure
+ * actually uses and tracks string literals rather than guarding one `:` case.
+ *
+ * ponytail: hand-rolled comment scan rather than a real JS parser, the same
+ * trade `tools/svg-check.mjs` documents for XML — Node ships no parser for
+ * either and the failure class here is one rule. It tracks strings and template
+ * literals so a `//` inside a URL does not open a comment; it does NOT track
+ * regex literals, so a regex containing an unescaped `/*` would open a block
+ * comment that is not there. There is no such regex in the tree today (checked),
+ * and if one ever ships, swap `commentMask` for a real parse. The call shape
+ * stays the same. Every other misreading this scanner can make is in the safe
+ * direction: it reports prose as executable, which is a red somebody looks at.
+ */
+
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const EXT = path.join(ROOT, 'extension');
+
+/**
+ * A closure smaller than this is a crawl that stopped, not a unit that shrank.
+ * ADR 0001 decision 3 names 34 paths today and the closure is 34; the floor sits
+ * well below that on purpose, because its job is to catch a broken crawl rather
+ * than to pin a file count that legitimately moves.
+ */
+const MIN_CLOSURE = 25;
+
+/**
+ * Same idea one level up: an emptied `required` list makes assertion 4 vacuous.
+ *
+ * The floor is all it is. `docs/adr/0001-*.md` is never opened by this file —
+ * decision 3 is TRANSCRIBED into `unit.json`, and the fidelity of that
+ * transcription rests on review, not on this gate. Between the floor and
+ * today's 34 there is room to drop up to nine paths from a clause and see
+ * nothing but a smaller number in the detail. What catches that instead is the
+ * assertion below that every file the crawl reaches is a file some clause
+ * names: delete `ui/embed-state.js` from the deck clause and the closure still
+ * contains it, so the clauses no longer cover the closure and the gate says so.
+ */
+const MIN_REQUIRED = 25;
+
+/** ...and the negative control needs a subject. Today the closure carries 31. */
+const MIN_PROSE = 10;
+
+let checks = 0, fails = 0;
+const ok = (cond, what) => {
+  checks++;
+  if (!cond) { fails++; console.error(`FAIL ${what}`); } else console.log(`ok   ${what}`);
+};
+const note = (what) => console.log(`   -  ${what}`);
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// --------------------------------------------------------------- the scanner
+/**
+ * Which characters of `src` are inside a comment.
+ *
+ * `kind` picks the dialect, because the three file types in the closure carry
+ * `chrome.` in three different kinds of comment and a scanner that knew only
+ * one of them would report the other two as executable:
+ *
+ *   js    `//` to end of line, and `/* … *\/`; strings and template literals are
+ *         skipped so a `//` inside one cannot open a comment.
+ *   html  `<!-- … -->` only. `extension/ui/embed.html` has one <script> and it
+ *         has a `src`, so there is no inline JS to scan. If inline script ever
+ *         appears, its `//` comments read as executable — a false red, which is
+ *         the direction this is allowed to be wrong in.
+ *   css   `/* … *\/` only. `//` is not a comment in CSS.
+ *
+ * Exported so `demo()` below can pin it without a browser or a fixture file.
+ */
+export function commentMask(src, kind = 'js') {
+  const mask = new Uint8Array(src.length);
+  const n = src.length;
+  const js = kind === 'js';
+  const html = kind === 'html';
+  const block = kind !== 'html';
+  let i = 0;
+  while (i < n) {
+    const c = src[i], d = src[i + 1];
+    if (html && c === '<' && src.startsWith('<!--', i)) {
+      const end = src.indexOf('-->', i + 4);
+      const stop = end === -1 ? n : end + 3;
+      mask.fill(1, i, stop); i = stop; continue;
+    }
+    if (block && c === '/' && d === '*') {
+      const end = src.indexOf('*/', i + 2);
+      const stop = end === -1 ? n : end + 2;
+      mask.fill(1, i, stop); i = stop; continue;
+    }
+    // `\` guards an escaped slash inside a regex literal; `:` guards a bare
+    // `https://` that is not in a string. Both can only make this scanner strip
+    // LESS than it should, which surfaces as a red rather than as a false green.
+    if (js && c === '/' && d === '/' && src[i - 1] !== '\\' && src[i - 1] !== ':') {
+      const end = src.indexOf('\n', i);
+      const stop = end === -1 ? n : end;
+      mask.fill(1, i, stop); i = stop; continue;
+    }
+    if (js && (c === "'" || c === '"' || c === '`')) {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === c) { j++; break; }
+        // A quote that never closes on its line was an apostrophe, not a string.
+        if (c !== '`' && src[j] === '\n') break;
+        j++;
+      }
+      i = j; continue;
+    }
+    i++;
+  }
+  return mask;
+}
+
+const KIND = (rel) => (rel.endsWith('.html') ? 'html' : rel.endsWith('.css') ? 'css' : 'js');
+
+/**
+ * Every reach for `chrome` in `src`, each tagged with the line it is on and
+ * whether it is prose.
+ *
+ * `\bchrome\b` rather than `\bchrome\s*\.`, because the dot is not what makes it
+ * Host knowledge. `typeof chrome !== 'undefined'` is the single most idiomatic
+ * way a shared module finds out which Host it is running under, and it is
+ * exactly the thing ADR 0001 decision 4 forbids the unit to know; so are
+ * `globalThis.chrome ?? browser` and `const api = chrome`. None of the three has
+ * a dot after the identifier. The word boundary still holds `notchrome.foo` out.
+ *
+ * The one exclusion is the URL spellings — `chrome://` and `chrome-extension://`
+ * — which name a scheme rather than the API object and appear in strings the
+ * deck legitimately prints (`ui/embed-state.js:1571` tells the user where to
+ * rebind the chord). A scheme cannot be called; the object can.
+ */
+const CHROME = /\bchrome\b(?!\s*[:-])/g;
+
+export function chromeSites(src, kind = 'js') {
+  const mask = commentMask(src, kind);
+  const out = [];
+  for (const m of src.matchAll(CHROME)) {
+    out.push({
+      line: src.slice(0, m.index).split('\n').length,
+      prose: mask[m.index] === 1,
+    });
+  }
+  return out;
+}
+
+const executable = (src, kind) => chromeSites(src, kind).filter((s) => !s.prose);
+const prose = (src, kind) => chromeSites(src, kind).filter((s) => s.prose);
+
+/**
+ * THE SCANNER'S OWN CHECKS. `tools/verify.mjs` calls a suite that exits 0 while
+ * asserting nothing VOID; the same rule one level down says the instrument gets
+ * checked before it is trusted. Every case below is a shape that appears in the
+ * tree or a mistake the scanner could plausibly make.
+ */
+function demo() {
+  const ex = (s, k) => executable(s, k).length;
+  const pr = (s, k) => prose(s, k).length;
+
+  ok(ex('chrome.runtime.id;') === 1, 'scanner: a bare chrome.* is executable');
+  ok(ex("if (typeof chrome !== 'undefined') hostify();") === 1,
+    'scanner: a bare chrome with no dot is a reach too  typeof chrome is how a shared module learns which Host it is under');
+  ok(ex('const api = globalThis.chrome ?? browser;') === 1,
+    'scanner: globalThis.chrome with no dot after it is a reach  the other idiom for the same question');
+  ok(ex('const u = "chrome://extensions/shortcuts"; const v = "chrome-extension://x/y";') === 0,
+    'scanner: the URL spellings are NOT a reach — a scheme cannot be called  ui/embed-state.js:1571 prints one');
+  ok(ex('// chrome.runtime.id\n') === 0 && pr('// chrome.runtime.id\n') === 1,
+    'scanner: a line comment is prose  the offscreen/live.js dialect');
+  ok(ex('/* chrome.storage */') === 0, 'scanner: a block comment is prose');
+  ok(ex('/**\n * `chrome.tabCapture`, and the engine\'s copy of it\n */\n') === 0,
+    'scanner: a JSDoc block is prose, apostrophe and backticks and all  the offscreen/cacheddeck.js dialect');
+  ok(ex('const s = `chrome.runtime`;') === 1,
+    'scanner: a chrome. inside a string or a template literal reads as EXECUTABLE  conservative by design — a false red gets investigated');
+  ok(ex('<!-- chrome.storage.local -->', 'html') === 0 && pr('<!-- chrome.storage.local -->', 'html') === 1,
+    'scanner: an HTML comment is prose  the ui/embed.html dialect');
+  ok(ex('const u = "https://x/y"; chrome.runtime.id;') === 1,
+    'scanner: a // inside a string does not open a comment and swallow the code after it');
+  ok(ex('chrome.runtime.id; // and here is why\n') === 1,
+    'scanner: code before a trailing comment is still code');
+  ok(ex('const re = /\\/\\//; chrome.runtime.id;') === 1,
+    'scanner: an escaped slash pair in a regex does not open a comment');
+  ok(ex('/* unterminated\nchrome.runtime.id') === 0,
+    'scanner: an unterminated block comment swallows the rest — this scanner\'s ONE false-green direction, and nothing here rules it out');
+  ok(ex('notchrome.foo; mychrome.bar;') === 0, 'scanner: the word boundary holds — notchrome.foo is not chrome');
+  ok(ex('window.chrome.runtime.id;') === 1, 'scanner: window.chrome.* is executable too');
+  ok(ex('// chrome.a\nchrome.b;\n/* chrome.c */\nchrome.d;') === 2
+    && pr('// chrome.a\nchrome.b;\n/* chrome.c */\nchrome.d;') === 2,
+    'scanner: prose and code interleaved are counted apart  2 of each');
+  ok(ex('/* a */ chrome.runtime.id; /* b */') === 1,
+    'scanner: a comment on each side does not eat what is between them');
+  ok(ex('// chrome.a\n', 'css') === 1,
+    'scanner: // is NOT a comment in CSS, so a chrome. after one stays executable (the safe direction)');
+}
+
+demo();
+
+// -------------------------------------------------------- the declaration
+const declPath = path.join(EXT, 'unit.json');
+if (!fs.existsSync(declPath)) {
+  ok(false, 'extension/unit.json exists — without it there is no declaration to hold the tree to');
+  console.log(`\nunit-check: ${checks - fails} passed, ${fails} failed`);
+  process.exit(1);
+}
+const decl = JSON.parse(fs.readFileSync(declPath, 'utf8'));
+
+const P = (xs) => xs.map((x) => (typeof x === 'string' ? x : x.path));
+const entries = P(decl.entries || []);
+const roots = P(decl.roots || []);
+const holes = decl.holes || [];
+const holePaths = P(holes);
+const hostFiles = decl.host || [];
+const hostPaths = P(hostFiles);
+const outsidePaths = P(decl.outside || []);
+const externals = decl.external || [];
+const hostReads = decl.hostReads || [];
+
+ok(entries.length > 0 && roots.length > 0 && holePaths.length > 0
+   && hostPaths.length > 0 && externals.length > 0,
+  `the declaration names every role  ${entries.length} entries, ${roots.length} roots, `
+  + `${holePaths.length} holes, ${externals.length} external, ${hostPaths.length} host`);
+
+const declared = [...entries, ...roots, ...holePaths, ...hostPaths, ...outsidePaths];
+const missing = declared.filter((rel) => !fs.existsSync(path.join(EXT, rel)));
+ok(missing.length === 0,
+  `every path the declaration names is on disk${missing.length ? ` — MISSING: ${missing.join(', ')}` : `  ${declared.length} paths`}`);
+if (missing.length) {
+  // A PRECONDITION, NOT AN ASSERTION AMONG OTHERS. The control loops below read
+  // every declared hole and Host file by name, and a read of a path that is not
+  // there throws an ENOENT trace OVER the assertion that already knows the
+  // answer — the run stops mid-suite, the summary line never prints, and a
+  // one-word typo in the declaration reads as a crash. Stop here instead, with
+  // the verdict this assertion just gave.
+  console.log(`\nunit-check: ${checks - fails} passed, ${fails} failed`);
+  process.exit(1);
+}
+
+const twice = declared.filter((rel, i) => declared.indexOf(rel) !== i);
+ok(twice.length === 0,
+  `no path is claimed by two roles${twice.length ? ` — DOUBLE-CLAIMED: ${[...new Set(twice)].join(', ')}` : ''}`);
+
+// ------------------------------------------------------------------ the crawl
+/**
+ * tree-check's four regexes, unchanged: static and dynamic `import`,
+ * `export … from`, and — in `.html` only — `src=` / `href=`. Only specifiers
+ * starting with `.` are followed, which is the same blind spot tree-check has.
+ *
+ * PLUS A FIFTH THIS GATE NEEDS AND tree-check DOES NOT:
+ * `new URL('./x', import.meta.url)`. tree-check asks whether `extension/` loads
+ * as an extension, and by the time a `new URL` is evaluated it already has. This
+ * file asks what TRAVELS, and that form is how a module names a sibling file it
+ * does not import: `offscreen/deck.js:161` starts the inference worker with it,
+ * and `ui/embed-state.js` reads three fixtures with it. Without the fifth regex
+ * the header's claim 6 would be import-only while saying "reference" — a unit
+ * file could load a Host file into a `new Worker` and this gate would be green.
+ *
+ * Each reference carries HOW it was made, because the two are not the same
+ * promise. An `import` of a Host file is a module the unit cannot run without.
+ * A `new URL` read of one is data, and can be declared (`hostReads`) — see the
+ * two assertions below, which is which.
+ *
+ * Specifiers are normalised LEXICALLY, by `path.resolve` + `path.relative`,
+ * because `extension/ui/embed-state.js` reaches its self-check fixtures through
+ * `../../extension/engine/pitch.js` — a specifier that leaves `extension/` and
+ * comes straight back in. tree-check's string join leaves that as a second,
+ * differently-spelt copy of a file already in the crawl; here it has to collapse
+ * onto `engine/pitch.js` or the closure double-counts and the classification of
+ * the same file could differ between its two spellings. Lexical is the whole of
+ * it: no `realpath`, so a declared path behind a SYMLINK is not canonicalised
+ * and would be classified under the spelling it was written with.
+ */
+const closure = new Set();
+const cameFrom = new Map();       // rel -> the first file that referenced it
+const unresolved = [];
+const escapes = [];               // { from, target, via } — a unit file reaching a Host file
+const readUses = [];              // `${from} -> ${target}` for each DECLARED Host read
+const holeUses = new Map();       // hole -> [importers]
+const externalUses = [];          // { from, target }
+const leftTree = [];              // a specifier that escapes extension/ entirely
+
+/** A file with no source in it: nothing to scan, nothing to follow. */
+const UNREADABLE = /\.(png|wasm)$/;
+
+const isExternal = (rel) => externals.find((e) => rel.startsWith(e.prefix));
+
+function refsOf(rel, src) {
+  const refs = [];
+  const push = (spec, via) => refs.push({ spec, via });
+  for (const m of src.matchAll(/(?:^|\s)(?:import|export)[\s\S]{0,400}?from\s*['"](\.[^'"]+)['"]/g)) push(m[1], 'import');
+  for (const m of src.matchAll(/^import\s*['"](\.[^'"]+)['"]/gm)) push(m[1], 'import');
+  for (const m of src.matchAll(/import\(\s*['"](\.[^'"]+)['"]/g)) push(m[1], 'import');
+  for (const m of src.matchAll(/new\s+URL\(\s*['"](\.[^'"]+)['"]\s*,\s*import\.meta\.url/g)) push(m[1], 'url');
+  if (rel.endsWith('.html')) {
+    for (const m of src.matchAll(/(?:src|href)=["'](?!https?:|#|data:)([^"']+)["']/g)) push('./' + m[1], 'markup');
+  }
+  return refs;
+}
+
+function crawl(rel) {
+  if (closure.has(rel)) return;
+  closure.add(rel);
+  const abs = path.join(EXT, rel);
+  if (!fs.existsSync(abs) || UNREADABLE.test(rel)) return;
+  const src = fs.readFileSync(abs, 'utf8');
+  const dir = path.dirname(rel);
+  for (const { spec, via } of refsOf(rel, src)) {
+    const absTarget = path.resolve(EXT, dir, spec);
+    const target = path.relative(EXT, absTarget);
+    if (target.startsWith('..')) { leftTree.push(`${rel} -> ${spec}`); continue; }
+    if (!cameFrom.has(target)) cameFrom.set(target, rel);
+    if (holePaths.includes(target)) {
+      holeUses.set(target, [...(holeUses.get(target) || []), rel]);
+      continue;                                    // the seam. Do not descend.
+    }
+    if (isExternal(target)) { externalUses.push({ from: rel, target }); continue; }
+    if (hostPaths.includes(target)) {
+      // A Host file. Declared as data in `hostReads` it is allowed and counted;
+      // anything else is an escape, and the crawl stops either way — a Host file
+      // must not enter the closure, which is why the partition below can never
+      // be the assertion that catches this one.
+      if (via === 'url' && hostReads.some((r) => r.from === rel && r.path === target)) {
+        readUses.push(`${rel} -> ${target}`);
+      } else {
+        escapes.push({ from: rel, target, via });
+      }
+      continue;
+    }
+    if (!fs.existsSync(absTarget)) { unresolved.push(`${rel} -> ${spec}`); continue; }
+    crawl(target);
+  }
+}
+
+for (const rel of [...entries, ...roots]) crawl(rel);
+
+ok(unresolved.length === 0,
+  `every reference in the closure resolves${unresolved.length ? ` — BROKEN: ${unresolved.join(', ')}` : ''}`);
+ok(leftTree.length === 0,
+  `no reference escapes extension/${leftTree.length ? ` — ESCAPED: ${leftTree.join(', ')}` : ''}`);
+ok(closure.size >= MIN_CLOSURE,
+  `the crawl reached the unit, not a corner of it  ${closure.size} files from `
+  + `${entries.length} entries + ${roots.length} roots, floor ${MIN_CLOSURE}`);
+
+// ------------------------------------------- the only way out is a declared hole
+const show = (xs) => xs.map((e) => `${e.from} -${e.via}-> ${e.target}`).join(', ');
+const loaded = escapes.filter((e) => e.via !== 'url');
+ok(loaded.length === 0,
+  `nothing in the unit imports a Host file${loaded.length ? ` — ESCAPED: ${show(loaded)}` : `  the only way out is a hole`}`);
+
+/**
+ * ...AND THE OTHER HALF OF THE SAME QUESTION, which is import-only assertions'
+ * blind spot. `new URL('../speed.js', import.meta.url)` is not an import and no
+ * import-shaped regex sees it, but a vendoring product that copies the unit gets
+ * the read and not the file: ENOENT, in a message naming a file that was never
+ * supposed to travel. So a Host file read as DATA is allowed only where
+ * `unit.json` says so, by name, with the argument in its `why`.
+ */
+const dataReads = escapes.filter((e) => e.via === 'url');
+ok(dataReads.length === 0,
+  `...and the only Host file it reads as data is a declared one${dataReads.length
+    ? ` — UNDECLARED READ: ${show(dataReads)}` : `  ${readUses.join(', ') || 'it reads none'}`}`);
+
+for (const r of hostReads) {
+  ok(hostPaths.includes(r.path),
+    `the declared read ${r.from} -> ${r.path} names a Host file  a read of a unit file is not an exception, it is the closure`);
+  ok(readUses.includes(`${r.from} -> ${r.path}`),
+    `...and the unit really makes it  ${readUses.includes(`${r.from} -> ${r.path}`)
+      ? 'found in the crawl' : 'NOT FOUND — the declaration outlived the code it excuses'}`);
+}
+
+for (const h of holes) {
+  const users = holeUses.get(h.path) || [];
+  ok(users.length > 0,
+    `the ${h.duty} hole is real: ${h.path} is imported by the unit  ${users.join(', ') || 'NOBODY'}`);
+}
+
+/**
+ * THE DUTY NAME IS THE FIRST THING A SECOND HOST READS, and until now it was a
+ * string in a JSON file that nothing tied to the interface it names. Rename
+ * `DeckHost` on either side and the declaration would go on naming an interface
+ * that is gone, in the one document a vendoring product opens first.
+ *
+ * Two claims, not one: `shared/host.js` publishes the duty list, and the unit
+ * checks a Host against it BY THAT NAME at boot — `assertHost(host, …,
+ * 'DeckHost')`. The second is the one that would survive a copied-and-renamed
+ * export, and it names its entry point, which is what AGENTS.md asks of an
+ * assertion about a function with more than one caller. `assertHost` has four:
+ * `offscreen/engine.js:89` ('EngineHost') and `ui/embed.js:118` ('DeckHost')
+ * are the two a hole is declared for; `ui/embed.js:119` checks 'DeckHost.page'
+ * and `shared/host.js:764` is `assertHostOption` delegating. The regex requires
+ * the closing quote straight after the duty, so 'DeckHost.page' is not
+ * 'DeckHost'.
+ */
+const ifacePath = path.join(EXT, 'shared/host.js');
+const ifaceSrc = fs.existsSync(ifacePath) ? fs.readFileSync(ifacePath, 'utf8') : '';
+const closureSrc = new Map();
+for (const rel of [...closure].sort()) {
+  const abs = path.join(EXT, rel);
+  if (fs.existsSync(abs) && !UNREADABLE.test(rel)) closureSrc.set(rel, fs.readFileSync(abs, 'utf8'));
+}
+for (const h of holes) {
+  const list = `${h.duty.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_DUTIES`;
+  ok(new RegExp(`export const ${list}\\b`).test(ifaceSrc),
+    `the ${h.path} hole names an interface that exists: shared/host.js exports ${list}`);
+  const bootsites = [...closureSrc].filter(([, src]) => new RegExp(`assertHost\\([^)]*'${h.duty}'\\)`).test(src));
+  ok(bootsites.length > 0,
+    `...and the unit checks a Host against it at boot  ${bootsites.map(([rel]) => rel).join(', ') || `NOBODY calls assertHost(…, '${h.duty}')`}`);
+}
+
+const undeclaredExternal = externalUses.filter((u) => !externals.some((e) => e.entry === u.target));
+ok(undeclaredExternal.length === 0,
+  `every reference out to a vendored runtime is declared${undeclaredExternal.length
+    ? ` — UNDECLARED: ${undeclaredExternal.map((u) => `${u.from} -> ${u.target}`).join(', ')}`
+    : `  ${externalUses.map((u) => `${u.from} -> ${u.target}`).join(', ')}`}`);
+
+for (const e of externals) {
+  const script = path.join(ROOT, e.fetch);
+  const body = fs.existsSync(script) ? fs.readFileSync(script, 'utf8') : '';
+  ok(body.includes(e.prefix),
+    `${e.fetch} is the recipe for ${e.prefix}, and names it  a vendoring product runs the script rather than copying the drop`);
+  note(fs.existsSync(path.join(EXT, e.prefix))
+    ? `extension/${e.prefix} is present — not in git by design, not part of the unit`
+    : `extension/${e.prefix} is ABSENT (not in git by design) — run \`bash ${e.fetch}\` before loading unpacked`);
+}
+
+// ------------------------------------- ADR 0001 decision 3, as a presence check
+/**
+ * `git ls-files`, minus the two things that are in the tree but outside this
+ * question: anything under a declared `external` prefix, and the icon PNGs,
+ * which carry no source to classify.
+ *
+ * ONE predicate, used by the `dir` clauses here AND by the partition at the end
+ * of the file. They disagreed until this line existed, and a `dir` clause that
+ * expanded to a file the partition had filtered out would demand a binary in the
+ * closure that no crawl could ever put there — a false red, read as a seam
+ * breach.
+ *
+ * The `external` half is belt and braces TODAY and says so: `extension/vendor/`
+ * is gitignored, so `git ls-files` never offers it — the predicate reads from
+ * the declaration rather than testing a hard-coded `vendor/` so that a drop
+ * which IS committed, under whatever prefix `unit.json` gives it, needs no
+ * change here.
+ *
+ * `.wasm` is deliberately NOT filtered here. A wasm decoder dropped under
+ * `extension/` outside a declared `external` prefix is exactly the file a second
+ * Host must be told whether to copy, and the partition is where it gets asked.
+ * Only the crawl skips it, because there is nothing in it to read.
+ */
+const NOT_SOURCE = /\.png$/;
+const inScope = (p) => !isExternal(p) && !NOT_SOURCE.test(p);
+const lsFiles = (rel) => execFileSync('git', ['ls-files', `extension/${rel}`], { cwd: ROOT, encoding: 'utf8' })
+  .split('\n').filter(Boolean).map((p) => p.replace(/^extension\//, '')).filter(inScope);
+
+// Fail closed rather than throw: a clause with neither `dir` nor `paths` used to
+// die on `paths.length` three lines down, which is a stack trace where the
+// assertion under it already has the answer.
+const malformed = (decl.required || []).filter((c) => !c.dir && !Array.isArray(c.paths));
+ok(malformed.length === 0,
+  `every ADR 0001 decision 3 clause declares a dir or a path list${malformed.length
+    ? ` — MALFORMED: ${malformed.map((c) => `"${c.adr}"`).join(', ')}` : `  ${plural((decl.required || []).length, 'clause')}`}`);
+
+const requiredAll = [];
+for (const clause of decl.required || []) {
+  const paths = clause.dir ? lsFiles(clause.dir) : (clause.paths || []);
+  // A `dir` clause that expands to nothing is the VOID case wearing a green
+  // tick: the glob is wrong, not the directory empty.
+  ok(paths.length > 0, `ADR 0001 decision 3 — "${clause.adr}" names at least one path  ${plural(paths.length, 'path')}`);
+  requiredAll.push(...paths);
+  const absent = paths.filter((p) => !closure.has(p));
+  ok(absent.length === 0,
+    `the closure contains "${clause.adr}"${absent.length ? ` — MISSING: ${absent.join(', ')}` : `  ${plural(paths.length, 'path')}`}`);
+}
+ok(requiredAll.length >= MIN_REQUIRED,
+  `ADR 0001 decision 3 is transcribed, not emptied  ${requiredAll.length} required paths, floor ${MIN_REQUIRED}`);
+
+/**
+ * ...AND THE CLAUSES COVER THE CLOSURE, which is the half a floor cannot carry.
+ * The floor above catches an emptied list; this catches a narrowed one — delete
+ * `ui/embed-state.js` from the deck clause and the crawl still reaches it
+ * through `ui/embed.js`, so it is a unit file no clause names, and the ADR
+ * transcription has quietly stopped describing what ships.
+ *
+ * It is also the gate on the other direction: a new file that a unit file
+ * imports joins the closure by itself, and this is what makes somebody add it to
+ * the declaration — or decide it is a Host file — rather than let it travel
+ * unnamed. The two whole-directory clauses mean `engine/` and `shared/` are
+ * automatic; `offscreen/` and `ui/` are the ones with files on both sides.
+ */
+const unnamed = [...closure].filter((p) => !requiredAll.includes(p)).sort();
+ok(unnamed.length === 0,
+  `every file the crawl reaches is a file ADR 0001 decision 3 names${unnamed.length
+    ? ` — NAMED BY NO CLAUSE: ${unnamed.join(', ')}`
+    : `  ${closure.size} in the closure, ${requiredAll.length} required`}`);
+
+// ------------------------------------------------ comments stripped, no chrome.
+const speaking = [];
+let proseInClosure = 0;
+for (const [rel, src] of closureSrc) {
+  const kind = KIND(rel);
+  const ex = executable(src, kind);
+  proseInClosure += prose(src, kind).length;
+  if (ex.length) speaking.push(`${rel}:${ex.map((s) => s.line).join(',')}`);
+}
+ok(speaking.length === 0,
+  `no file in the unit reaches for chrome${speaking.length ? ` — SPEAKS CHROME: ${speaking.join(' · ')}` : `  ${closureSrc.size} files scanned, comments stripped`}`);
+
+// NEGATIVE CONTROL. If the scanner stopped stripping, every one of these turns
+// red — and the assertion above would have turned red with them, which is the
+// only reason it can be trusted when it is green.
+const DIALECTS = [
+  ['offscreen/live.js', '// line comment'],
+  ['offscreen/cacheddeck.js', '/* JSDoc */'],
+  ['ui/embed.html', '<!-- HTML -->'],
+];
+for (const [rel, dialect] of DIALECTS) {
+  const src = fs.existsSync(path.join(EXT, rel)) ? fs.readFileSync(path.join(EXT, rel), 'utf8') : '';
+  const kind = KIND(rel);
+  const p = prose(src, kind).length, x = executable(src, kind).length;
+  ok(closure.has(rel) && p > 0 && x === 0,
+    `${rel} discusses chrome. in prose and stays green  ${dialect}, ${p} mentions, 0 executable`);
+}
+ok(proseInClosure >= MIN_PROSE,
+  `the unit really does talk about chrome. in prose — the control has a subject  ${proseInClosure} mentions, floor ${MIN_PROSE}`);
+
+// POSITIVE CONTROL. If the scanner started calling everything prose, every
+// `speaksChrome: true` line below turns red. It can lose: a Host file that
+// genuinely stopped speaking chrome. is a file that belongs in the unit.
+for (const h of [...holes, ...hostFiles]) {
+  const src = fs.readFileSync(path.join(EXT, h.path), 'utf8');
+  const kind = KIND(h.path);
+  const ex = executable(src, kind);
+  if (h.speaksChrome) {
+    ok(ex.length > 0,
+      `control: the Host file ${h.path} DOES speak chrome. — the scanner can see one  ${ex.length} executable references`);
+  } else {
+    ok(ex.length === 0,
+      `the Host file ${h.path} is quiet${ex.length ? ` — SPEAKS CHROME at ${ex.map((s) => s.line).join(',')}` : '  0 executable references'}`);
+  }
+}
+
+// ------------------------------------------------- every file lands on one side
+/**
+ * The partition. Without it a new file under `extension/` joins neither side of
+ * the seam and nothing says so — which is how nine real extension files ended up
+ * unreachable from tree-check's crawl without anybody deciding they should be.
+ *
+ * `inScope` is the same predicate the `dir` clauses expand through, so the two
+ * cannot drift; what it leaves out, and why, is documented where it is defined.
+ */
+const tracked = lsFiles('');
+const classified = new Set([...closure, ...holePaths, ...hostPaths, ...outsidePaths]);
+const orphans = tracked.filter((p) => !classified.has(p));
+ok(orphans.length === 0,
+  `every tracked file under extension/ is unit, hole, Host or declared neither${orphans.length
+    ? ` — UNCLASSIFIED: ${orphans.join(', ')}` : `  ${tracked.length} files`}`);
+
+/**
+ * WHAT THIS ONE CAN ACTUALLY CATCH, because its name used to promise more.
+ * The Host half is unfalsifiable on its own: `crawl()` tests `hostPaths` BEFORE
+ * it descends and records an escape instead, so a declared Host file can only
+ * reach the closure by also being an entry or a root — and `no path is claimed
+ * by two roles` fires on that first, in the same run. The `outside` half is the
+ * half that fires alone: a unit file importing `./dev/selftest.mjs` or
+ * `../unit.json` is not a Host file, nothing above rejects it, and the suite
+ * that verifies the unit is not part of the unit it verifies.
+ */
+const both = [...closure].filter((p) => hostPaths.includes(p) || outsidePaths.includes(p));
+ok(both.length === 0,
+  `nothing in the unit is also declared Host or declared outside it${both.length
+    ? ` — BOTH: ${both.map((p) => `${cameFrom.get(p) || '?'} -> ${p}`).join(', ')}` : ''}`);
+
+console.log(`\nunit-check: ${checks - fails} passed, ${fails} failed`);
+process.exit(fails ? 1 : 0);
