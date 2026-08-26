@@ -381,16 +381,41 @@ export class WorkerBackend {
    * acknowledge a graceful shutdown should await one here; this one cannot, so
    * it says so instead of pretending.
    *
-   * ponytail: pending calls are dropped rather than rejected, which is today's
-   * behaviour (`deck.js` cleared the map the same way). S8 (#9) changes it —
-   * "dispose() rejects pending calls by name" — and owns the assertion.
+   * IT SETTLES EVERYTHING IT TAKES AWAY, AND THAT IS A BEHAVIOUR CHANGE RATHER
+   * THAN A PORT (S8, #9). `deck.js` cleared the pending map without rejecting it
+   * and this file inherited that: every call in flight at teardown was left
+   * unsettled for ever. Nothing times an inference out and there is no cancel
+   * path, so `await separate(...)` inside `LivePipeline.runChunk` simply never
+   * returned — Review finding M1 arriving through the one door `die()` does not
+   * cover, because a deliberate teardown is not a death.
+   *
+   * IT IS NOT `die()`, for exactly that reason. `die()` announces through
+   * `onFail`, and `Deck`'s `onFail` latches `session = 'error'` and logs
+   * `ERROR [deck A backend]`. Giving a backend back on purpose is not an error
+   * and must not be reported as one, so the rejection here is silent to
+   * everything except the calls it settles.
+   *
+   * THE REASON IS RECORDED AS WELL AS THROWN. `serialiseBackend` does NOT queue
+   * `dispose()` — teardown is the moment you most need to stop a backend that is
+   * not answering — so calls can still be sitting in that queue when this runs,
+   * and each of them reaches `separate()` afterwards. `require()` is what refuses
+   * them, out of `deadReason`; without a reason recorded here it would tell a
+   * caller the backend "is not running and reported no reason" about a teardown
+   * this very method performed.
+   *
+   * BOTH MESSAGES NAME THE BACKEND. Two decks own one each, they fail
+   * independently, and "the inference worker is gone" names neither.
    */
   async dispose() {
     const w = this.worker;
     this.disposed = true;
     this.worker = null;
+    this.deadReason = `${this.name}: the inference backend was disposed — a backend given back does not come back`;
+    const gone = new Error(`${this.name}: the inference backend was disposed with a call still in flight — `
+      + 'its worker is terminated, so nothing will ever answer it');
+    for (const [, p] of this.pending) p.reject(gone);
     this.pending.clear();
-    this.loadGate = null;
+    if (this.loadGate) { const g = this.loadGate; this.loadGate = null; g.rej(gone); }
     this.progress = null;
     if (w) { w.onmessage = null; w.onerror = null; w.terminate(); }
   }
