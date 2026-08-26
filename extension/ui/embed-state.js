@@ -484,10 +484,15 @@ const ACCEL_MOD = {
  * The toolbar chord, spelled for the platform: `⌃⇧9` on a Mac, `Ctrl+Shift+9`
  * everywhere else — the convention README.md line 47 already uses.
  *
- * ENTRY POINT: welcome.js, on the `shortcut` field of the `arm-tab` command
- * `chrome.commands.getAll()` returns. It is READ FROM CHROME rather than typed
- * into the markup because the user can rebind it, so this has to cope with any
- * accelerator and not just the manifest's.
+ * TWO ENTRY POINTS, BOTH ON THE SAME STRING: welcome.js's step 2, and the deck's
+ * not-armed hint (`paintArmHint()` in embed.js). Each spells the `shortcut`
+ * field of the `arm-tab` command, welcome.js from `chrome.commands.getAll()`
+ * directly and the deck through `host.armShortcut()`. It is READ FROM THE
+ * BROWSER rather than typed into the markup because the user can rebind it, so
+ * this has to cope with any accelerator and not just the manifest's — and both
+ * callers make the same `say !== text` decision on the result, which is why that
+ * comparison is a documented answer here and not a convention they share by
+ * accident.
  *
  * THE HALF THAT IS WORK ON A GLYPH PLATFORM, since Chrome hands back the
  * glyphs on macOS already: `say`. `⌃⇧9` read out character by character is not
@@ -1455,9 +1460,9 @@ async function demo() {
   // --- the key caps, lettered for the keyboard ------------------------------
   /**
    * ENTRY POINT for all of these: `relabel()` in embed.js, which is the ONLY
-   * caller of `modLabel()` in the deck, and welcome.js's chord for
-   * `chordLabel()`. `isMac()` is called once at boot on each of those two
-   * surfaces.
+   * caller of `modLabel()` in the deck, and — for `chordLabel()` — welcome.js's
+   * step 2 and the deck's own not-armed hint. `isMac()` is called once at boot
+   * on each of those two surfaces, and the deck's one call feeds both.
    *
    * WHY THIS BLOCK EXISTS. The bindings were never broken on a Mac — Option
    * sets `event.altKey` and the digits match on `event.code` — so nothing here
@@ -1509,16 +1514,17 @@ async function demo() {
    * and the manifest-token form the other platforms use.
    */
   eq(chordLabel('⌃⇧9', true), { text: '⌃⇧9', say: 'Control Shift 9' },
-    'ENTRY welcome.js: the glyph form Chrome actually returns on macOS is left exactly as it is on screen and given "Control Shift 9" to be ANNOUNCED as — read out character by character it is not an instruction');
+    'ENTRY welcome.js step 2 and the deck\'s not-armed hint: the glyph form Chrome actually returns on macOS is left exactly as it is on screen and given "Control Shift 9" to be ANNOUNCED as — read out character by character it is not an instruction');
   eq(chordLabel('MacCtrl+Shift+9', true), { text: '⌃⇧9', say: 'Control Shift 9' },
     '...and the MANIFEST TOKEN form reaches the same two strings, so a Chrome that hands back what the manifest declared does not put the word "MacCtrl" — a key no keyboard is printed with — into step 2');
   eq(chordLabel('Ctrl+Shift+9', false), { text: 'Ctrl+Shift+9', say: 'Ctrl+Shift+9' },
-    '...and off a Mac the accelerator is already the instruction, so what is drawn is unchanged AND it is what is announced — the two strings are one string, which is how welcome.js knows to leave the accessible name off');
+    '...and off a Mac the accelerator is already the instruction, so what is drawn is unchanged AND it is what is announced — the two strings are one string, which is how welcome.js AND paintArmHint() both know to leave the accessible name off — one branch, asserted once, made by two callers');
   /**
-   * THE PLATFORM QUESTION, WHICH IS THE ONE THE CALLER ACTUALLY ASKS. welcome.js
-   * branches on `chord.say !== chord.text` to decide whether to set `role="img"`
-   * and an `aria-label`, so this pair IS that branch, evaluated: it must be true
-   * where the chord is drawn in glyphs and false where it is drawn in words.
+   * THE PLATFORM QUESTION, WHICH IS THE ONE BOTH CALLERS ACTUALLY ASK. welcome.js
+   * and the deck's `paintArmHint()` each branch on `chord.say !== chord.text` to
+   * decide whether to set `role="img"` and an `aria-label`, so this pair IS that
+   * branch, evaluated: it must be true where the chord is drawn in glyphs and
+   * false where it is drawn in words.
    *
    * IT WAS TRUE ON BOTH FOR THE LIFE OF THE FUNCTION, because `say` was joined
    * with a space while `text` was joined with `'+'` — so every multi-key chord
@@ -1538,11 +1544,23 @@ async function demo() {
   const chordSplits = (a, mac) => { const c = chordLabel(a, mac); return c.say !== c.text; };
   eq(['Ctrl+Shift+9', 'Alt+Shift+K', 'MacCtrl+Shift+F9'].map((a) => [chordSplits(a, true), chordSplits(a, false)]),
     [[true, false], [true, false], [true, false]],
-    'ENTRY welcome.js: a chord is ANNOUNCED differently from how it is DRAWN exactly when the platform draws GLYPHS, which is the whole of welcome.js\'s role="img" test — a say that differs off a Mac as well suppresses the visible text and buys nothing');
+    'ENTRY welcome.js step 2 and the deck\'s not-armed hint: a chord is ANNOUNCED differently from how it is DRAWN exactly when the platform draws GLYPHS, which is the whole of welcome.js\'s role="img" test — a say that differs off a Mac as well suppresses the visible text and buys nothing');
   eq(chordLabel('Command+Shift+9', true).text, '⌘⇧9',
     '...a user who rebinds the chord onto ⌘ gets ⌘, not the manifest\'s ⌃: the string is READ, never assumed');
+  /**
+   * THE ONE ANSWER THE TWO CALLERS DO DIFFERENT THINGS WITH, which is why it is
+   * the one most worth naming both of them on. welcome.js prints a sentence
+   * telling the user where to set a chord; the deck keeps `armChord` null and
+   * prints the toolbar-icon instruction with no key cap after it.
+   *
+   * AND IT IS THE ONE THE BROWSER GATE CANNOT REACH. `tools/embed-smoke.mjs`
+   * drives a real Chrome with the manifest's suggested key bound, and there is
+   * no API that unbinds a command — so the deck's no-chord fallback is gated
+   * HERE and nowhere else. Read that as scope, not as coverage: this line pins
+   * the value the fallback keys on, not the sentence it prints.
+   */
   eq([chordLabel('', true), chordLabel(undefined, true), chordLabel(null, false)], [null, null, null],
-    'no chord bound is NULL rather than an empty key cap, so welcome.js prints "set one at chrome://extensions/shortcuts" instead of an empty box that looks like a chord');
+    'ENTRY welcome.js step 2 and the deck\'s not-armed hint: no chord bound is NULL rather than an empty key cap — welcome.js prints "set one at chrome://extensions/shortcuts", and the deck leaves `armChord` null and falls back to the toolbar-icon sentence alone, which is the one case where the two callers do DIFFERENT things with the same answer');
 
   /**
    * THE MODIFIER HALF OF THE OVERLAY PIN, and the same shape as the digit pin

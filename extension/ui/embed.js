@@ -25,10 +25,11 @@ import {
   behindText, bufState, errorSummary, errorAction, ARM_CODES, armErrorFresh,
   normalizeDeck, syncCorrection, audioClockAt,
 } from './audio-math.js';
-import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, SR } from '../shared/config.js';
+import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, PREFS_KEY, SR } from '../shared/config.js';
 /**
  * THE HOST. Everything this surface does that is not "draw the numbers it was
- * given" leaves through here — today the message bus, and nothing else yet.
+ * given" leaves through here — the message bus, the two storage areas and the
+ * one question only the platform can answer, which key the user presses to arm.
  * `ui/host.js` is the extension's implementation of it and the only module this
  * file imports that knows what `chrome` is; `shared/host.js` carries the duty
  * list and the rules a second application would have to hold.
@@ -39,7 +40,7 @@ import {
   chip, follow, RUNNING, peakTick,
   shortcut, hostKeys, stemKeyHint, keyPlan, clampSemitones, SEMITONE_MIN, SEMITONE_MAX,
   snapSpeed, stepSpeed, speedFar, speedGate, SPEED_HOME, bpmPlan, beatPulse,
-  isMac, modLabel,
+  isMac, modLabel, chordLabel,
 } from './embed-state.js';
 /**
  * THE MUSIC HALF, from the engine's own tree. `displayKey` is the ONE place the
@@ -121,6 +122,14 @@ const toSw = (m) => host.send({ v: 1, to: 'sw', from: 'ui', ...m });
 let session = { tabId: null };
 let engineInfo = null;
 let err = null;            // {code, message, advisory, seq}
+/**
+ * The arm chord, spelled for this keyboard — `{text, say}` from `chordLabel()`,
+ * or `null` while it is still being read and for a build with nothing bound.
+ * `null` IS A REAL STATE AND NOT JUST A STARTING VALUE: the user can unbind the
+ * chord at chrome://extensions/shortcuts, and the hint that names it has to have
+ * a sentence for that case rather than an empty gap where a key cap goes.
+ */
+let armChord = null;
 const live = {
   status: 'idle',
   phase: null,             // 'model' | 'ring' | null — which wait `priming` is
@@ -1035,15 +1044,66 @@ function paintModel() {
 // -------------------------------------------------------------------- paint
 function paint() {
   const armed = !!session.tabId;
-  // The header names no title and no URL — the page behind this frame is
-  // already showing both (embed.html). The one thing it cannot say is how to
-  // arm a tab, and a browser-level invocation is the only thing that grants
-  // capture, so no button here can stand in for the sentence.
-  text($('src-sub'), armed ? '' : 'Click the Stem Splitter Live toolbar icon on this tab to arm it.');
-
+  paintArmHint(armed);
   paintStatus();
   paintBanner();
   paintStrips();
+}
+
+/**
+ * HOW TO ARM A TAB THAT IS NOT ARMED — the one thing the page behind this frame
+ * cannot say. The header names no title and no URL because the watch page is
+ * already showing both; this sentence is what survives, and it is here because a
+ * browser-level invocation is the only thing that mints a capture grant, so no
+ * button on this surface could ever stand in for it (ARCHITECTURE §7 R4).
+ *
+ * IT NOW NAMES THE CHORD TOO. The keyboard route existed from the first release
+ * and only the setup page — seen once, on install — ever said so. The deck is
+ * where a user is standing when they want it.
+ *
+ * READ FROM THE PLATFORM, NEVER TYPED HERE. `host.armShortcut()` answers with
+ * whatever the browser is actually bound to, because the user can rebind it, and
+ * a deck that stated a chord the browser does not honour would be worse than one
+ * that said nothing. With nothing bound the sentence falls back to the toolbar
+ * icon alone rather than printing an empty key cap.
+ *
+ * THE ANNOUNCED FORM IS THE SAME BRANCH `welcome.js` MAKES, and it is one line
+ * of reasoning rather than two: `chordLabel()` returns `say !== text` exactly
+ * when the platform DRAWS GLYPHS, so that comparison is the whole test for
+ * whether an accessible name is worth having. Setting one unconditionally is not
+ * a neutral extra — it REPLACES text a screen reader could already read, which
+ * is the defect this repo shipped on every non-Mac machine until `chordLabel()`
+ * was corrected to join both forms with the separator it draws.
+ *
+ * BOTH ROUTES THIS SENTENCE OFFERS ARE THE SHOW/HIDE GESTURE, and following
+ * either one from this exact state puts the deck away. `armTab()` ends with
+ * `notifyTab(tab.id, 'toggle')` and `content.js` unmounts on a `'toggle'` that
+ * finds a deck already up — so the tab arms and the surface the instruction was
+ * read on disappears, and a second press brings it back armed. That is not new
+ * and not the chord's: the toolbar icon this line has named since 0.1.0 reaches
+ * the identical `armTab()`. It is written down here because the sentence is now
+ * an instruction with two halves, and the next person to read the first half
+ * should not have to rediscover what the second one does.
+ */
+function paintArmHint(armed) {
+  const chord = armed ? null : armChord;
+  text($('src-lead'), armed ? ''
+    : (chord
+      ? 'Click the Stem Splitter Live toolbar icon on this tab to arm it, or press '
+      : 'Click the Stem Splitter Live toolbar icon on this tab to arm it.'));
+  const el = $('src-chord');
+  text(el, chord ? chord.text : '');
+  // `text()` is null-safe and the two attribute branches below are not, so they
+  // take the same guard rather than a different one: `paint()` is on the repaint
+  // path and a throw here takes every later repaint with it.
+  if (!el) return;
+  if (chord && chord.say !== chord.text) {
+    el.setAttribute('role', 'img');
+    el.setAttribute('aria-label', chord.say);
+  } else {
+    el.removeAttribute('role');
+    el.removeAttribute('aria-label');
+  }
 }
 
 function paintStatus() {
@@ -1808,16 +1868,22 @@ const BPM_STATE_TEXT = {
 
 // --------------------------------------------------------------- preferences
 /**
- * `chrome.storage.local`, key `prefs`. `local` and not `sync` because `sync` is
- * a network write and P1 forbids the network after the model download; not
- * `session` because a preference has to outlive the browser.
+ * WHICH LIFETIME EACH READ AND WRITE MEANT. `PREFS_KEY` comes from
+ * `shared/config.js`, because the extension host's own content script reads the
+ * same key and the two must not drift. The AREA is spelled out at every call
+ * site rather than defaulted inside the Host, because this surface uses BOTH and
+ * means something different by each — `'local'` here and `'session'` for the
+ * durable arm refusal at the foot of this file.
  *
- * THE CONTENT SCRIPT READS THIS KEY ITSELF and follows `storage.onChanged`, so
- * nothing here messages it — and that is deliberate rather than lazy: hiding the
- * deck removes the iframe while the pipeline keeps running, and a preference
+ * `'local'` FOR PREFERENCES: not `'sync'`, which is a network write and P1
+ * forbids the network after the model download; and not `'session'`, because a
+ * preference has to outlive the browser.
+ *
+ * THE CONTENT SCRIPT READS `PREFS_KEY` ITSELF and follows its own change
+ * listener, so nothing here messages it — deliberate rather than lazy: hiding
+ * the deck removes the iframe while the pipeline keeps running, and a preference
  * that travelled by postMessage would go stale at exactly that moment.
  */
-const PREFS_KEY = 'prefs';
 
 /**
  * ponytail: the suppression rule is `resolveSuppress` in `autonav.js` and
@@ -1853,7 +1919,7 @@ function applyPrefs(p) {
 
 function writePrefs(patch) {
   prefs = { ...prefs, ...patch };
-  chrome.storage.local.set({ [PREFS_KEY]: prefs }).catch(() => {});
+  host.storageSet('local', PREFS_KEY, prefs);
 }
 
 // ------------------------------------------------------- autoplay advisory
@@ -2269,16 +2335,37 @@ paint();
 postDeck();
 
 /**
- * The preference, read once and then followed. `onChanged` matters because
+ * The preference, read once and then followed. Following matters because
  * `content.js` is the other reader of this key and a second deck in a second
  * tab is the other writer — a checkbox that disagreed with the behaviour would
  * be worse than no checkbox.
+ *
+ * THE `.catch` IS FOR A READ THAT FAILED, and it is now the only thing it can
+ * be: `storageGet` resolves `null` for a key that is simply not there, so a
+ * fresh profile lands in `applyPrefs(null)` and gets the defaults DRAWN rather
+ * than skipped. Storage that could not be read at all still lands here, where
+ * leaving the markup's defaults alone is the honest answer.
  */
-chrome.storage.local.get(PREFS_KEY).then((got) => applyPrefs(got && got[PREFS_KEY])).catch(() => {});
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area !== 'local' || !changes[PREFS_KEY]) return;
-  applyPrefs(changes[PREFS_KEY].newValue);
-});
+host.storageGet('local', PREFS_KEY).then((p) => applyPrefs(p)).catch(() => {});
+host.onStorageChanged('local', PREFS_KEY, (p) => applyPrefs(p));
+
+/**
+ * THE ARM CHORD, asked once and then drawn. It cannot be read synchronously —
+ * the platform answers with a promise — so `paint()` runs first without it and
+ * again when it lands, which is why `paintArmHint()` treats `null` as a state
+ * and not as an error. The gap is a few milliseconds on a surface that is
+ * already waiting on the engine for everything else it shows.
+ *
+ * ASKED ONCE, NOT FOLLOWED. A rebind at chrome://extensions/shortcuts is a
+ * different page in a different tab; by the time the user is back here reading
+ * this line the deck has been remounted, because the deck is created by the arm
+ * gesture. There is no listener to attach and nothing to keep in sync.
+ *
+ * THE `.catch` IS THE PLATFORM SAYING IT HAS NO SUCH THING — a host with no
+ * command table at all. `armChord` stays null and the sentence falls back to the
+ * toolbar icon, which is the true instruction on such a host anyway.
+ */
+host.armShortcut().then((accel) => { armChord = chordLabel(accel, MAC); paint(); }).catch(() => {});
 
 toSw({ type: 'SW_STATUS' });
 toOff({ type: 'STATUS' });
@@ -2309,7 +2396,7 @@ const bootPoll = setInterval(() => {
  */
 (async () => {
   let rec = null;
-  try { rec = (await chrome.storage.session.get(ARM_ERROR_KEY))[ARM_ERROR_KEY] || null; } catch (e) { return; }
+  try { rec = await host.storageGet('session', ARM_ERROR_KEY); } catch (e) { return; }
   if (!armErrorFresh(rec, Date.now(), ARM_ERROR_TTL_MS)) return;
   if (err) return;   // a live message already beat us here; it is fresher
   if (normalizeDeck(rec.deck) !== DECK) return;

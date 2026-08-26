@@ -49,6 +49,16 @@ if (!fs.existsSync(path.join(EXT, 'vendor', 'ort'))) {
 }
 
 let fails = 0, checks = 0;
+/**
+ * THE ASSERTION NAME STOPS AT TWO SPACES. `assertionNames()` in
+ * `tools/verify.mjs` splits each printed line on the first double space and
+ * keeps the left half as the name, which is what `coverageDrift()` diffs run to
+ * run. So a measured value — a tab id, an elapsed millisecond count, a pixel
+ * height — goes AFTER two spaces or the name churns on every run, and the first
+ * change that also moves the assertion COUNT gets those churning names reported
+ * as gone/added beside its real one. Three assertions in this file carried a
+ * measured value in the name until S4 moved them.
+ */
 const ok = (c, what) => { checks++; console.log(`${c ? 'ok  ' : 'FAIL'} ${what}`); if (!c) fails++; };
 
 /**
@@ -313,7 +323,10 @@ try {
   ok(await page.locator('#stem-splitter-live-deck').count() === 1, 'the arm gesture injected the deck into the page');
 
   const a = await sw.evaluate(async () => (await chrome.storage.session.get('session')).session || {});
-  ok(!!a.tabId, `...and armed the tab it was pressed in (tabId ${a.tabId})`);
+  // The tab id goes AFTER two spaces: `assertionNames()` in tools/verify.mjs cuts
+  // a name at the first double space, so a per-run value inside the name makes
+  // this assertion read as gone-and-added in every drift report that fires.
+  ok(!!a.tabId, `...and armed the tab it was pressed in  tabId ${a.tabId}`);
   /**
    * ONE DECK, ASSERTED WHERE A REGRESSION WOULD ACTUALLY SHOW.
    *
@@ -389,7 +402,8 @@ try {
     await page.waitForTimeout(16);
   }
   ok(deckBooted,
-    `the deck page's module finished booting inside the frame (${deckBooted ? `__embed present after ${bootMs} ms` : `NOT BOOTED — no __embed after ${bootMs} ms, gave up at the ${BOOT_BUDGET_MS} ms cap`}) — every assertion below reads state this module defines`);
+    'the deck page\'s module finished booting inside the frame — every assertion below reads state this module defines'
+    + `  ${deckBooted ? `__embed present after ${bootMs} ms` : `NOT BOOTED — no __embed after ${bootMs} ms, gave up at the ${BOOT_BUDGET_MS} ms cap`}`);
   const nStrips = await frame.locator('.strip').count();
   ok(deckBooted && nStrips === 6,
     `...and built six stem strips (${nStrips}) — read after the marker above, so a wrong count here is the RACK and never the clock`);
@@ -1472,7 +1486,8 @@ try {
    * would otherwise call that a perfect fit.
    */
   ok(bodyH > 0 && Math.abs(hFinal - bodyH) <= 1,
-    `the frame is exactly as tall as the deck (${hFinal} px frame, ${bodyH} px content, settled in ${settleMs} ms of ${SETTLE_BUDGET_MS}) — the host clamps at 900 and never scrolls`);
+    'the frame is exactly as tall as the deck — the host clamps at 900 and never scrolls'
+    + `  ${hFinal} px frame, ${bodyH} px content, settled in ${settleMs} ms of ${SETTLE_BUDGET_MS}`);
   ok(hFinal < 900, `...and inside the clamp with room to spare (${hFinal} px)`);
 
   // ===================================================== the armed-state gate
@@ -1497,6 +1512,238 @@ try {
   await page.waitForTimeout(700);
   ok(await page.locator('#stem-splitter-live-deck').count() === 0,
     'a second press puts the deck away — the icon is a show/hide gesture');
+
+  // ============================== the durable arm refusal, and the chord to fix it
+  /**
+   * APPEND ABOVE THIS BLOCK, NOT BELOW IT. Everything from here to the end of
+   * the `try` runs against a DISARMED deck with a BANNER UP, and both of those
+   * are states earlier assertions in this file assert the NEGATION of: `#banner`
+   * is checked hidden twice, and the armed-state assertions read
+   * `session.tabId`. This block writes `session: { tabId: null, … }` and seeds a
+   * refusal deliberately, so an assertion appended after it is reading a
+   * different deck from the one it thinks it is — and its last act replaces the
+   * frame's `chrome.commands` table for the rest of the run.
+   * `extension/shared/host.js` carries the same note for its duty lists, for the
+   * same reason.
+   *
+   * THE ONE READ ON THIS PAGE THAT NO BROWSER ASSERTION HAS EVER COVERED.
+   *
+   * A refusal to arm is sent AND persisted (`sw/service-worker.js`), because the
+   * deck page is created BY the arm gesture: on a refusal it is still loading
+   * while the worker posts `ARM_ERROR` to nobody, and `toUi()` swallows the
+   * rejection. Reading `chrome.storage.session` at boot is therefore the ONLY
+   * reason a refused arm says anything at all here — and until now the only
+   * thing that checked it was a unit test of `armErrorFresh()`, which is the
+   * freshness rule and not the read.
+   *
+   * WHY IT IS DRIVEN THIS WAY AND NOT BY ARMING SOMETHING THAT FAILS. A refusal
+   * seeded before the chord press cannot survive it: a successful arm calls
+   * `clearArm()` unconditionally, which is exactly the behaviour that stops a
+   * stale refusal outliving the problem it described. So the record is written
+   * and the deck is then asked to mount by the SAME message the worker itself
+   * sends on a refusal — `{type:'STEM_SPLITTER_LIVE_EMBED', mode:'show'}`,
+   * posted from the service worker, which is the file's existing technique for
+   * injecting a real message onto a real bus.
+   *
+   * AND THE SESSION IS CLEARED IN THE SAME WRITE, for a second assertion out of
+   * one remount: a deck with nothing armed is the only state in which the
+   * not-armed hint is on screen at all.
+   */
+  const armedTabId = await sw.evaluate(async () => {
+    const s = (await chrome.storage.session.get('session')).session || {};
+    return s.tabId || null;
+  });
+  ok(!!armedTabId,
+    'INSTRUMENT CHECK: the worker still knows which tab this run armed, so the remount below has somewhere to go'
+    + `  tabId ${armedTabId}`);
+
+  /**
+   * A SENTINEL, not a plausible message. Nothing else in this build can produce
+   * this string, so a banner carrying it came from the record seeded two lines
+   * below and from nowhere else — which is what makes the claim "the boot read
+   * painted it" rather than "a banner is up".
+   */
+  const SEEDED_ARM_MSG = 'embed-smoke seeded this refusal into session storage before the deck existed.';
+  await sw.evaluate(async ([tabId, message]) => {
+    await chrome.storage.session.set({
+      // Nothing armed: this is what the deck's not-armed hint needs, and what
+      // `getSession()` hands back to the SW_STATUS the fresh deck sends.
+      session: { tabId: null, title: null, url: null, armedAt: null },
+      // `at` is epoch ms and must be recent: `armErrorFresh()` refuses a record
+      // older than ARM_ERROR_TTL_MS, which is the rule that stops a refusal from
+      // a previous sitting painting as current.
+      armError: { code: 'TAB_BUSY', message, at: Date.now(), seq: 4242 },
+    });
+    await chrome.tabs.sendMessage(tabId, {
+      v: 1, to: 'tab', from: 'sw', type: 'STEM_SPLITTER_LIVE_EMBED', mode: 'show',
+    });
+  }, [armedTabId, SEEDED_ARM_MSG]);
+
+  await page.waitForSelector('#stem-splitter-live-deck', { timeout: 8000 }).catch(() => {});
+  const reT0 = Date.now();
+  let reBooted = false, reMs = 0;
+  for (;;) {
+    reBooted = await frame.locator('body').evaluate(() => !!globalThis.__embed).catch(() => false);
+    reMs = Date.now() - reT0;
+    if (reBooted || reMs > BOOT_BUDGET_MS) break;
+    await page.waitForTimeout(16);
+  }
+  ok(reBooted,
+    'the refusal message remounted the deck — every claim below reads a deck that booted with the record already in storage'
+    + `  ${reBooted ? `__embed present after ${reMs} ms` : `NOT BOOTED — no __embed after ${reMs} ms, gave up at the ${BOOT_BUDGET_MS} ms cap`}`);
+
+  // Wait for the CONDITION, not for a clock: the boot read is one storage round
+  // trip inside the page and there is no timer anywhere in that path.
+  await frame.locator('#banner').waitFor({ state: 'visible', timeout: 5000 }).catch(() => {});
+  const bannerUp = await frame.locator('#banner').isVisible().catch(() => false);
+  const bannerMsg = ((await frame.locator('#err-p').textContent().catch(() => '')) || '').trim();
+  const bannerTitle = ((await frame.locator('#err-t').textContent().catch(() => '')) || '').trim();
+  /**
+   * `#banner` IS ASSERTED NEGATIVELY TWICE EARLIER IN THIS RUN — on the armed
+   * deck at boot and again after the autoplay block — so "a banner is up" is a
+   * state this build demonstrably does not reach on its own. That is the
+   * control, and the sentinel above is the belt to its brace.
+   */
+  ok(reBooted && bannerUp && bannerMsg === SEEDED_ARM_MSG,
+    'A REFUSAL PERSISTED BEFORE THE DECK EXISTED IS PAINTED BY THE DECK\'S BOOT READ — the only path by which a refused arm says anything at all'
+    + `  banner ${bannerUp ? 'visible' : 'HIDDEN'}, message ${JSON.stringify(bannerMsg)}`);
+  ok(bannerUp && /TAB_BUSY/.test(bannerTitle) && !/Restart/i.test(bannerTitle),
+    '...and it is headlined as the arm family rather than as a stopped deck, because nothing here ever started'
+    + `  ${JSON.stringify(bannerTitle)}`);
+
+  /**
+   * THE NOT-ARMED HINT NAMES A CHORD THE USER HAS — and NO MORE THAN THAT is
+   * claimed here, which is the correction review forced on this block.
+   *
+   * `chrome.commands.getAll()` is read out of the SERVICE WORKER, a different
+   * context from the deck reached by a different path, and the first version of
+   * this comment called that "two independent readings of one binding". It is
+   * not. On every machine this suite runs on — and on CI — the binding IS the
+   * manifest's suggested key, so a deck that ignored the platform and TYPED
+   * `Ctrl+Shift+9` into `paintArmHint()` passes this equality unchanged. Both
+   * mutations were run: a literal in `paintArmHint`, and a boot site that calls
+   * `host.armShortcut()` and throws the answer away. Neither moved this number.
+   * That is a control that cannot lose, and AGENTS.md is explicit about what
+   * that is worth.
+   *
+   * SO THE READING IS MADE INDEPENDENT BELOW instead of being asserted to be.
+   * The block after this one replaces the frame's command table with a chord no
+   * manifest in this repo declares and remounts the deck — the only arrangement
+   * in which "drawn" and "returned" are two different values that can disagree.
+   * This pair stays because it is the claim about the REAL binding (the chord
+   * the user would actually press is the chord on screen), and because it is the
+   * same pair the setup page gets: what is DRAWN, and what is ANNOUNCED.
+   */
+  const deckRawChord = await sw.evaluate(async () => {
+    const all = await chrome.commands.getAll().catch(() => []);
+    const c = all.find((x) => x.name === 'arm-tab');
+    return (c && c.shortcut) || '';
+  }).catch(() => '');
+  const hintLead = ((await frame.locator('#src-lead').textContent().catch(() => '')) || '');
+  const hintChord = ((await frame.locator('#src-chord').textContent().catch(() => '')) || '').trim();
+  const hintSaid = await frame.locator('#src-chord')
+    .evaluate((el) => el.getAttribute('aria-label') || '').catch(() => '');
+  ok(deckRawChord !== '' && hintChord === deckRawChord && /toolbar icon/.test(hintLead),
+    'THE DECK\'S NOT-ARMED HINT NAMES A CHORD THE BROWSER HAS BOUND, beside the toolbar icon it already named'
+    + `  chrome.commands.getAll() says "${deckRawChord}" for arm-tab, the deck drew "${hintChord}"`);
+  /**
+   * The same branch `welcome.js` makes, asserted the same way: an accessible
+   * name exactly when the chord is drawn in GLYPHS. Setting one unconditionally
+   * is not a neutral extra — it replaces text a screen reader could already
+   * read, which is what this build shipped on every non-Mac machine until
+   * `chordLabel()` was corrected to join both forms with the separator it draws.
+   */
+  ok(/^[A-Za-z]/.test(hintChord) ? hintSaid === '' : /^[A-Za-z]+( [A-Za-z0-9]+)+$/.test(hintSaid),
+    '...and the deck ANNOUNCES it in words exactly when it DRAWS it in glyphs, the same test the setup page makes'
+    + `  drawn "${hintChord}", announced "${hintSaid || '(nothing — the text is already words)'}"`);
+
+  /**
+   * ON SCREEN, NOT MERELY IN `textContent` — because `.hint` is
+   * `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`, and the
+   * chord is the LAST thing on the line. Everything above reads `textContent`,
+   * which survives clipping perfectly intact: a chord ellipsised away is a chord
+   * every assertion in this block still passes on.
+   *
+   * THE SENTENCE GREW BY THE LENGTH OF A KEY CAP in this slice, so this is the
+   * line that goes red the day it grows again past the width the deck actually
+   * gets. `scrollWidth === clientWidth` is the whole test on a nowrap box.
+   * FLOOR: a chord must be drawn at all, so an empty hint cannot pass it by
+   * being trivially narrow.
+   */
+  const hintBox = await frame.locator('#src-sub')
+    .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }))
+    .catch(() => null);
+  ok(hintChord !== '' && !!hintBox && hintBox.scroll <= hintBox.client,
+    '...and the whole sentence FITS the deck, so the chord is not the first thing an ellipsis eats'
+    + `  #src-sub scrollWidth ${hintBox ? hintBox.scroll : '?'} px, clientWidth ${hintBox ? hintBox.client : '?'} px`);
+
+  /**
+   * THE CHORD IS READ FROM THE PLATFORM, AND THIS IS THE ONLY ARRANGEMENT IN
+   * WHICH THAT CAN GO RED.
+   *
+   * The equality above compares the deck's chord with the browser's, and on
+   * every machine that runs this suite those are the same string for a second
+   * reason: the manifest suggests it. So the command table in the DECK'S FRAME
+   * is replaced, before the frame exists, with a chord no manifest in this repo
+   * declares and no keyboard in this harness is bound to — and the deck is
+   * remounted so its boot read runs under the replacement. A deck that types a
+   * chord, or that calls `host.armShortcut()` and discards the answer, now draws
+   * `Ctrl+Shift+9` at a browser that says `Alt+Shift+7`.
+   *
+   * WHY AN INIT SCRIPT AND NOT A PATCH AFTER MOUNT: the chord is asked for ONCE,
+   * at boot, and never followed (a rebind happens on another page, and this deck
+   * is created by the arm gesture). There is no second read to intercept, so the
+   * patch has to be in place before the frame's module evaluates.
+   *
+   * WHY A REMOUNT AND NOT A RELOAD: `content.js` owns the frame, `mount()` is a
+   * no-op while one is connected, and `'toggle'` from the service worker is the
+   * gesture that removes it. Two real messages on the real bus, which is this
+   * file's technique everywhere else.
+   *
+   * THE INJECTED CHORD IS DELIBERATELY NOT THE MANIFEST'S in either of its
+   * parts: `Alt` is not `Ctrl`, `7` is not `9`. A deck that got half of it from
+   * the platform and half from a template cannot pass.
+   */
+  const INJECTED_CHORD = 'Alt+Shift+7';
+  await page.addInitScript((chord) => {
+    // Only the extension frame HAS a command table; the YouTube page has no
+    // `chrome` at all and must be left exactly as it was.
+    try {
+      if (globalThis.chrome && chrome.commands && typeof chrome.commands.getAll === 'function') {
+        chrome.commands.getAll = () => Promise.resolve([{ name: 'arm-tab', shortcut: chord, description: '' }]);
+      }
+    } catch (e) { /* a context without `chrome` is not one we meant to patch */ }
+  }, INJECTED_CHORD);
+
+  await sw.evaluate(async (tabId) => {
+    const msg = (mode) => chrome.tabs.sendMessage(tabId, {
+      v: 1, to: 'tab', from: 'sw', type: 'STEM_SPLITTER_LIVE_EMBED', mode,
+    });
+    await msg('toggle');   // the show/hide gesture: this removes the frame
+    await new Promise((r) => setTimeout(r, 200));
+    await msg('show');     // and this builds a new one, under the patch
+  }, armedTabId);
+
+  // Wait for the CONDITION, not for a clock — the same shape as the remount
+  // above. A deck that draws the wrong chord spins to the cap and then reports
+  // the chord it drew, which is the sentence worth reading.
+  let injChord = '', injMs = 0;
+  {
+    const t0 = Date.now();
+    for (;;) {
+      injChord = ((await frame.locator('#src-chord').textContent().catch(() => '')) || '').trim();
+      injMs = Date.now() - t0;
+      if (injChord === INJECTED_CHORD || injMs > BOOT_BUDGET_MS) break;
+      await page.waitForTimeout(16);
+    }
+  }
+  const injSaid = await frame.locator('#src-chord')
+    .evaluate((el) => el.getAttribute('aria-label') || '').catch(() => '');
+  ok(injChord === INJECTED_CHORD && injSaid === '',
+    'THE DECK DRAWS WHAT THE PLATFORM RETURNED: a command table answering with a chord no manifest here declares puts THAT chord on the deck'
+    + `  the frame's chrome.commands.getAll() was made to answer "${INJECTED_CHORD}" and the deck drew "${injChord}"`
+    + `${injSaid ? `, announced "${injSaid}" — a chord already drawn in words needs no accessible name` : ''}`
+    + `  (settled in ${injMs} ms of ${BOOT_BUDGET_MS})`);
 } catch (e) {
   /**
    * AN UNEXPECTED THROW IS ONE RED, NOT A CRASH — because a crash is loud but

@@ -5259,9 +5259,20 @@ if (group('host')) {
    * So these name the deck's list, not "a host".
    */
   {
-    const complete = { send() {}, onMessage() {} };
+    /**
+     * A DeckHost that owes EXACTLY what is declared, built from the list rather
+     * than written out — and that is not tidiness, it is the difference between
+     * these cases testing what they say they test and not testing it at all.
+     * The list went from two duties to six in S4. A hand-written
+     * `{ send() {}, onMessage() {} }` is short four of them, so every refusal
+     * below would have gone on passing for the wrong reason: refused for the
+     * four it never had, whatever was done to the one the case meant to break.
+     */
+    const stubDeck = () => Object.fromEntries(deckDuties.map((k) => [k, () => {}]));
+    const complete = stubDeck();
     ok('assertHost-returns-the-host-it-was-given: a complete DeckHost boots',
-      assertHost(complete, DECK_HOST_DUTIES, 'DeckHost') === complete);
+      assertHost(complete, DECK_HOST_DUTIES, 'DeckHost') === complete,
+      `${deckDuties.length} duties`);
 
     ok('assertHost-passes-the-SHIPPED-ui/host.js — this is the gate on its export list',
       assertHost(deckHost, DECK_HOST_DUTIES, 'DeckHost') === deckHost,
@@ -5269,9 +5280,10 @@ if (group('host')) {
 
     const threw = (h) => { try { assertHost(h, DECK_HOST_DUTIES, 'DeckHost'); return null; } catch (e) { return e; } };
 
-    const noSend = threw({ onMessage() {} });
-    ok('assertHost-NAMES-the-missing-duty: a Host without `send` throws saying `send`',
-      noSend instanceof Error && /\bsend\b/.test(noSend.message) && /DeckHost/.test(noSend.message),
+    const noSend = threw({ ...stubDeck(), send: undefined });
+    ok('assertHost-NAMES-the-missing-duty: a Host short ONLY `send` throws saying `send`, and says nothing about the five it has',
+      noSend instanceof Error && /\bsend\b/.test(noSend.message) && /DeckHost/.test(noSend.message)
+      && !/onMessage|storageGet|armShortcut/.test(noSend.message),
       noSend ? noSend.message : 'it did not throw');
 
     const noneAtAll = threw({});
@@ -5293,14 +5305,56 @@ if (group('host')) {
      * deliberate change with its own assertion, not a side effect.
      */
     const wrongShapes = [
-      ['a lost export, which reads as a string rather than as absence', { send: 'sendMessage', onMessage() {} }],
-      ['a namespace object where a callable was meant', { send: {}, onMessage() {} }],
-      ['an array', { send: [], onMessage() {} }],
+      ['a lost export, which reads as a string rather than as absence', { ...stubDeck(), send: 'sendMessage' }],
+      ['a namespace object where a callable was meant', { ...stubDeck(), send: {} }],
+      ['an array', { ...stubDeck(), send: [] }],
+      ['a storage duty that is an object, which is the shape S4 was warned it would arrive in', { ...stubDeck(), storageGet: {} }],
     ];
     const waved = wrongShapes.filter(([, h]) => threw(h) === null).map(([why]) => why);
     ok('assertHost-refuses-a-duty-that-is-present-but-NOT-CALLABLE, in every shape a wrong one arrives in',
-      wrongShapes.length === 3 && waved.length === 0,
-      waved.length ? `ACCEPTED: ${waved.join('; ')}` : `refused all ${wrongShapes.length}`);
+      wrongShapes.length === 4 && waved.length === 0,
+      waved.length ? `ACCEPTED: ${waved.join('; ')}` : `refused all ${wrongShapes.length}, each short exactly one callable of ${deckDuties.length}`);
+
+    /**
+     * THE S4 DECISION, ASSERTED RATHER THAN ASSUMED. `shared/host.js` gave the
+     * slice two ways to carry storage across the seam: three FLAT callable
+     * duties, or one `storage` namespace with `assertHost` widened to accept it
+     * and the widening asserted. The flat branch was taken, and the whole reason
+     * to prefer it was that `typeof host[k] === 'function'` stays exactly as
+     * strong as it was.
+     *
+     * So the namespace shape must be REFUSED, and refused by name.
+     *
+     * WHAT ACTUALLY TURNS THIS LINE RED, stated because the first version of the
+     * PR body claimed the wrong mutation for it and review caught that:
+     *
+     *   - `assertHost` widened to MAP the namespace — `typeof host[k] !==
+     *     'function' && !(host.storage && /^(storageGet|storageSet|
+     *     onStorageChanged)$/.test(k))`, which is the accidental widening a
+     *     namespace migration actually arrives as. Watched: 1 red, this one,
+     *     `… was ACCEPTED — the boot check has been widened without an
+     *     assertion saying so`.
+     *   - The DUTY-LIST half — `DECK_HOST_DUTIES` declaring a `storage` entry in
+     *     place of the three flat duties. Watched: the shipped `ui/host.js` is
+     *     then short a duty and the group dies at `assertHost` before reaching
+     *     this line, which is a louder red than this one and not a substitute
+     *     for it.
+     *
+     * WHAT DOES NOT REACH IT: widening the CALLABILITY test alone, e.g. to
+     * `host[k] == null`. That is caught by the two not-callable checks above and
+     * NOT here, because the three flat duties are `undefined` in this fixture and
+     * `undefined == null` is still missing. Two halves, two assertions; neither
+     * stands in for the other, and saying otherwise is reported coverage sitting
+     * one assertion away from where it is claimed.
+     */
+    const nsShaped = threw({
+      ...stubDeck(), storageGet: undefined, storageSet: undefined, onStorageChanged: undefined,
+      storage: { get() {}, set() {}, onChanged() {} },
+    });
+    ok('assertHost-refuses-a-STORAGE-NAMESPACE and names the three flat duties it wanted instead',
+      nsShaped !== null && /storageGet/.test(nsShaped.message)
+      && /storageSet/.test(nsShaped.message) && /onStorageChanged/.test(nsShaped.message),
+      nsShaped ? nsShaped.message : '`{ storage: { get, set, onChanged } }` was ACCEPTED — the boot check has been widened without an assertion saying so');
 
     /**
      * "An assertion must FAIL when it cannot look" (AGENTS.md). A boot check
@@ -5317,10 +5371,11 @@ if (group('host')) {
      */
     const namesTheSeam = (h) => {
       const e = threw(h);
-      return e !== null && /DeckHost/.test(e.message) && /\bsend\b/.test(e.message) && /\bonMessage\b/.test(e.message);
+      return e !== null && /DeckHost/.test(e.message)
+        && deckDuties.every((k) => new RegExp(`\\b${k}\\b`).test(e.message));
     };
     const noHost = threw(undefined);
-    ok('assertHost-with-no-Host-AT-ALL-throws rather than passing vacuously, and the error still names the seam and both duties',
+    ok('assertHost-with-no-Host-AT-ALL-throws rather than passing vacuously, and the error still names the seam and every duty it owed',
       namesTheSeam(undefined) && namesTheSeam(null),
       noHost === null ? 'assertHost(undefined) returned without throwing' : noHost.message);
   }
@@ -5459,6 +5514,415 @@ if (group('host')) {
     ok('onMessage-never-holds-the-response-channel-open, not even for a handler that returns true',
       rets.length === 5 && rets.every((r) => r === false),
       rets.map((r) => String(r)).join(' '));
+  }
+
+  // ------------------------------------------------------------- storage
+  /**
+   * THE AREA IS THE WHOLE POINT — `shared/host.js` rule 5. `local` outlives the
+   * browser and `session` does not, and the deck uses one of each on purpose: a
+   * preference must survive a restart, and a refusal to arm must not, because a
+   * stale refusal painted as current teaches the user to ignore the banner.
+   *
+   * A Host that took the area and then ignored it is invisible to any check that
+   * uses one area, so the stub below holds the SAME KEY in BOTH areas with
+   * DIFFERENT values. That is the one arrangement in which "it read the area it
+   * was given" and "it always reads local" give different answers.
+   */
+  {
+    const store = { local: {}, session: {} };
+    const writes = [];
+    let unreadable = null;
+    const areaApi = (name) => ({
+      get(key) {
+        if (unreadable === name) return Promise.reject(new Error(`${name} could not be read`));
+        return Promise.resolve(Object.prototype.hasOwnProperty.call(store[name], key) ? { [key]: store[name][key] } : {});
+      },
+      set(obj) { writes.push({ area: name, obj }); Object.assign(store[name], obj); return Promise.resolve(); },
+    });
+    const feedListeners = [];
+    globalThis.chrome = {
+      storage: {
+        local: areaApi('local'),
+        session: areaApi('session'),
+        onChanged: { addListener: (f) => feedListeners.push(f) },
+      },
+    };
+
+    store.local.prefs = { autoplayNext: true };
+    store.session.prefs = { autoplayNext: false };
+    const fromLocal = await deckHost.storageGet('local', 'prefs');
+    const fromSession = await deckHost.storageGet('session', 'prefs');
+    ok('storageGet-READS-THE-AREA-IT-WAS-GIVEN: one key held in both areas comes back as the two different values  '
+      + '[entry point: extension/ui/host.js storageGet(), reached from embed.js for local/prefs and session/armError]',
+      fromLocal !== null && fromSession !== null
+      && fromLocal.autoplayNext === true && fromSession.autoplayNext === false,
+      `local ${JSON.stringify(fromLocal)}, session ${JSON.stringify(fromSession)} — a host that hard-coded one area returns the same object twice`);
+
+    ok('storageGet-UNWRAPS-THE-BAG: the deck is handed the VALUE, never the platform\'s `{ [key]: value }` envelope',
+      fromLocal !== null && typeof fromLocal === 'object' && !('prefs' in fromLocal),
+      JSON.stringify(fromLocal));
+
+    const absent = await deckHost.storageGet('local', 'nothing-was-ever-stored-here');
+    ok('storageGet-answers-NULL-for-a-key-that-is-not-there, which is a fresh profile and not a fault',
+      absent === null, String(absent));
+
+    /**
+     * ABSENT AND UNREADABLE ARE NOT THE SAME ANSWER — rule 6. Folding them
+     * together is `!x || (real check)` one layer out: the deck would apply its
+     * defaults most confidently on the run where storage could not be read at
+     * all, and a preference silently reset is indistinguishable from one chosen.
+     *
+     * THE CONTROL IS THE LINE ABOVE: the same call, on the same area, resolved
+     * `null` a moment ago. So a rejection here is the failure being reported,
+     * and not this stub being broken.
+     */
+    unreadable = 'local';
+    let rejected = null;
+    try { await deckHost.storageGet('local', 'prefs'); } catch (e) { rejected = e; }
+    unreadable = null;
+    ok('storageGet-REJECTS-a-read-that-FAILED rather than reporting it as a key that was not there',
+      rejected instanceof Error && /could not be read/.test(rejected.message),
+      rejected ? rejected.message : 'it resolved — the deck cannot tell "no preferences" from "no storage"');
+
+    /**
+     * A BAD AREA IS A REJECTION, NOT A SYNCHRONOUS THROW. `chrome.storage.nope`
+     * is undefined and `.get` on it throws at once; the deck's prefs read is a
+     * bare `.then(...).catch(...)` at module scope, and a synchronous throw is
+     * not caught by that `.catch` — it takes the rest of the deck's boot with
+     * it. `async` on the method is what turns it into the rejection the call
+     * site is already written to survive.
+     */
+    let badArea = null;
+    try {
+      await deckHost.storageGet('nope', 'prefs').catch((e) => { badArea = e; });
+    } catch (e) { badArea = 'THREW SYNCHRONOUSLY'; }
+    ok('storageGet-on-an-area-that-does-not-exist-REJECTS, so the deck\'s module-scope `.catch` can still catch it',
+      badArea instanceof Error,
+      badArea === 'THREW SYNCHRONOUSLY'
+        ? 'it threw synchronously — the boot `.catch` never sees it and the rest of the deck never runs'
+        : String(badArea && badArea.message));
+
+    /**
+     * P1, HELD AS A REFUSAL RATHER THAN AS A CONVENTION — and the review that
+     * asked for this named the exact hazard: `chrome.storage[area]` is an
+     * unvalidated index into the WHOLE namespace, so making the area a parameter
+     * turned `sync` — a NETWORK WRITE, which CONTRIBUTING.md P1 forbids after
+     * the model download and SECURITY.md promotes to a security property — from
+     * structurally unreachable into a one-token typo. Before the parameter every
+     * call site read `chrome.storage.local` literally and there was nothing to
+     * get wrong.
+     *
+     * THE CONTROL CAN LOSE, WHICH IS THE POINT OF THE FIXTURE: `chrome.storage`
+     * here really does carry a working `sync` area that records what it is
+     * handed. Drop the guard and the read resolves, the write LANDS IN
+     * `syncWrites`, and the listener registers — so this is not "an area that
+     * happens not to exist", which is the version of this test that would pass
+     * on `undefined.get` throwing and prove nothing about the policy.
+     *
+     * ALL THREE DUTIES, because the guard is per-duty and "right at one call
+     * site, wrong at another" is the defect AGENTS.md counts five of here.
+     */
+    {
+      const syncWrites = [];
+      const syncListeners = [];
+      const platform = globalThis.chrome.storage;
+      globalThis.chrome.storage = {
+        local: platform.local,
+        session: platform.session,
+        onChanged: { addListener: (f) => syncListeners.push(f) },
+        sync: {
+          get: () => Promise.resolve({ prefs: { autoplayNext: 'FROM THE NETWORK' } }),
+          set: (o) => { syncWrites.push(o); return Promise.resolve(); },
+        },
+      };
+      let getThrewSync = false;
+      let getSettled = 'never settled';
+      try {
+        await deckHost.storageGet('sync', 'prefs')
+          .then((v) => { getSettled = `RESOLVED ${JSON.stringify(v)}`; }, (e) => { getSettled = e; });
+      } catch (e) { getThrewSync = true; getSettled = e; }
+      let setOutcome = 'RETURNED';
+      try { deckHost.storageSet('sync', 'prefs', { autoplayNext: true }); } catch (e) { setOutcome = e; }
+      let feedOutcome = 'RETURNED';
+      try { deckHost.onStorageChanged('sync', 'prefs', () => {}); } catch (e) { feedOutcome = e; }
+      globalThis.chrome.storage = platform;
+
+      const refused = [getSettled, setOutcome, feedOutcome].filter((o) => o instanceof Error).length;
+      ok('NO DUTY WILL TOUCH AN AREA THE UNIT NEVER NAMED: all three refuse `sync`, and nothing reached it  '
+        + '[entry point: extension/ui/host.js storageGet/storageSet/onStorageChanged, called with an area no call site spells]',
+        refused === 3 && syncWrites.length === 0 && syncListeners.length === 0,
+        `${refused} of 3 refused; ${syncWrites.length} write(s) reached sync${syncWrites.length ? ` (${JSON.stringify(syncWrites)})` : ''}`
+        + `, ${syncListeners.length} listener(s) registered — sync is a NETWORK write and P1 forbids the network here`);
+
+      /**
+       * AND EACH REFUSES IN THE SHAPE ITS OWN CALL SITE CAN SURVIVE, which is
+       * the asymmetry review asked to have declared instead of inherited.
+       * `storageGet` is `async` so its refusal arrives as a rejection — the
+       * deck's preferences read is a module-scope `.then(…).catch(…)` that a
+       * synchronous throw jumps straight past, taking the rest of boot with it,
+       * and one duty must not answer two ways at its two call sites. The other
+       * two throw where they were called, which is the cheapest place to be told
+       * that the deck asked for a lifetime it has no word for.
+       */
+      ok('...and each refuses in the shape its call site can survive: storageGet REJECTS, the write and the feed THROW where they were called',
+        !getThrewSync && getSettled instanceof Error
+        && setOutcome instanceof Error && feedOutcome instanceof Error,
+        getThrewSync
+          ? 'storageGet threw SYNCHRONOUSLY — the deck\'s boot `.catch` never sees it'
+          : `get ${getSettled instanceof Error ? 'rejected' : String(getSettled)}`
+            + `, set ${setOutcome instanceof Error ? 'threw' : String(setOutcome)}`
+            + `, onChanged ${feedOutcome instanceof Error ? 'threw' : String(feedOutcome)}`);
+    }
+
+    // ---- writes
+    const ret = deckHost.storageSet('session', 'armError', { code: 'TAB_BUSY' });
+    ok('storageSet-WRITES-TO-THE-AREA-IT-WAS-GIVEN and returns nothing, so no call site can start awaiting a preference  '
+      + '[entry point: extension/ui/host.js storageSet(), reached from embed.js writePrefs()]',
+      ret === undefined && writes.length === 1 && writes[0].area === 'session'
+      && JSON.stringify(writes[0].obj) === '{"armError":{"code":"TAB_BUSY"}}',
+      `returned ${String(ret)}; ${writes.length} write(s): ${writes.map((w) => `${w.area} ${JSON.stringify(w.obj)}`).join(' | ')}`);
+
+    /**
+     * DELIVERY FAILURE IS THE HOST'S TO SWALLOW here too, and for a sharper
+     * reason than on `send`: this one runs from a checkbox handler, where the
+     * value being written is already the value on screen. There is nothing a
+     * rejected write could tell the user that the next read would not tell them
+     * better — and an unhandled rejection is a console nobody can read.
+     */
+    {
+      let unhandled = 0;
+      const count = () => { unhandled++; };
+      process.on('unhandledRejection', count);
+      Promise.reject(new Error('control: this one is deliberately not caught'));
+      await new Promise((r) => setTimeout(r, 20));
+      const instrument = unhandled;
+      unhandled = 0;
+      globalThis.chrome.storage.local = { set: () => Promise.reject(new Error('QUOTA_BYTES quota exceeded')) };
+      deckHost.storageSet('local', 'prefs', { autoplayNext: true });
+      await new Promise((r) => setTimeout(r, 20));
+      process.off('unhandledRejection', count);
+      globalThis.chrome.storage.local = areaApi('local');
+      ok('storageSet-swallows-a-failed-write — and the INSTRUMENT that would have counted it was live',
+        instrument === 1 && unhandled === 0,
+        `${instrument} counted for the deliberate control, ${unhandled} from the rejected write`);
+    }
+
+    // ---- the change feed
+    /**
+     * INSTRUMENT CHECK FIRST: everything below drives `feedListeners[0]`, so an
+     * `onStorageChanged` that registered nothing would leave each of them
+     * inspecting a stub of this file's own making.
+     */
+    const seen = [];
+    deckHost.onStorageChanged('local', 'prefs', (v) => seen.push(v));
+    ok('INSTRUMENT CHECK: onStorageChanged registered exactly one listener on the platform feed',
+      feedListeners.length === 1, `${feedListeners.length} registered`);
+
+    const feed = feedListeners[0];
+    if (feed) {
+      feed({ prefs: { newValue: { autoplayNext: true } } }, 'local');       // mine
+      feed({ instrument: { newValue: 'x' } }, 'local');                     // my area, another key
+      feed({ prefs: { newValue: { autoplayNext: false } } }, 'session');    // my key, another area
+      feed({ prefs: { oldValue: { autoplayNext: true } } }, 'local');       // mine, REMOVED
+    }
+    ok('onStorageChanged-delivers-only-MY-key-in-MY-area: 2 of 4 on a feed that carries every key of every area  '
+      + '[entry point: extension/ui/host.js onStorageChanged(), reached from embed.js boot for local/prefs]',
+      seen.length === 2 && seen[0] !== undefined && seen[0].autoplayNext === true,
+      `${seen.length} delivered of 4 (mine; my area other key; my key other area; mine removed)`);
+    /**
+     * A REMOVAL IS `undefined`, NOT A DROPPED EVENT. The platform reports a
+     * deleted key as a change record with an `oldValue` and no `newValue`, and
+     * the deck's `applyPrefs(undefined)` is exactly "nothing is stored", which
+     * is the right reading. A host that filtered on `newValue` being present
+     * would leave the checkbox showing a preference that no longer exists.
+     */
+    ok('...and a REMOVAL arrives as undefined rather than being filtered out, which is what "the record is gone" means',
+      seen.length === 2 && seen[1] === undefined,
+      seen.map((v) => (v === undefined ? 'undefined' : JSON.stringify(v))).join(' then '));
+  }
+
+  // -------------------------------------------------------- the arm chord
+  /**
+   * RAW, NOT RENDERED — rule 7. The Host reads the binding and the unit spells
+   * it: `chordLabel()` in `ui/embed-state.js` is where DRAWN and ANNOUNCED are
+   * decided, it is gated without a browser, and it has already been wrong once
+   * in a way a per-Host copy would have reproduced per Host.
+   *
+   * THE STUB RETURNS A GLYPH FORM ON PURPOSE. Chrome hands macOS back `⌃⇧9`
+   * already drawn, so a Host that "helpfully" normalised what it found would be
+   * doing it to a string that is already the answer.
+   */
+  {
+    let table = [];
+    globalThis.chrome = { commands: { getAll: () => Promise.resolve(table) } };
+
+    table = [{ name: 'not-the-one', shortcut: 'Ctrl+K' }, { name: 'arm-tab', shortcut: '⌃⇧9' }];
+    const bound = await deckHost.armShortcut();
+    ok('armShortcut-returns-the-ACCELERATOR-VERBATIM, for `arm-tab` and not for whichever command came first  '
+      + '[entry point: extension/ui/host.js armShortcut(), reached from embed.js boot]',
+      bound === '⌃⇧9', JSON.stringify(bound));
+
+    table = [{ name: 'arm-tab', shortcut: '' }];
+    const unbound = await deckHost.armShortcut();
+    ok('armShortcut-answers-NULL-for-a-command-with-no-chord-bound, so the deck prints a sentence instead of an empty key cap',
+      unbound === null, JSON.stringify(unbound));
+
+    table = [{ name: 'not-the-one', shortcut: 'Ctrl+K' }];
+    const missing = await deckHost.armShortcut();
+    ok('...and NULL again when there is no such command at all, rather than the first chord it could find',
+      missing === null, JSON.stringify(missing));
+  }
+
+  // ------------------------------------------------- the deck's call sites
+  /**
+   * THE SAME TWO CLAIMS THE ENGINE HALF MAKES, and for the same reason: every
+   * refusal above drives `assertHost` and the shipped Host directly, which
+   * proves nothing whatever about `ui/embed.js` reaching for them. The engine's
+   * version of this caught a real gap — a deleted module-scope call left the
+   * whole tree green while two assertions went on naming it as their entry
+   * point.
+   *
+   * `embed.js` CANNOT BE IMPORTED FROM NODE — it touches `document` at module
+   * scope — so it is read as text with comments stripped, exactly as `engine.js`
+   * is. A claim a doc comment can satisfy is not a claim.
+   */
+  {
+    const { readFileSync } = await import('node:fs');
+    const stripSrc = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const deckSrc = stripSrc(readFileSync(new URL('./extension/ui/embed.js', import.meta.url), 'utf8'));
+    const hostSrc = stripSrc(readFileSync(new URL('./extension/ui/host.js', import.meta.url), 'utf8'));
+
+    const reached = [...new Set([...deckSrc.matchAll(/\bhost\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+    const undeclared = reached.filter((k) => !deckDuties.includes(k));
+    ok('EVERY HOST DUTY THE DECK REACHES FOR IS DECLARED  '
+      + '[entry point: extension/ui/embed.js, comments stripped]',
+      reached.length > 0 && undeclared.length === 0,
+      reached.length === 0
+        ? 'the deck calls no host duty at all — either the seam is gone or this scan cannot see it'
+        : undeclared.length
+          ? `undeclared: ${undeclared.map((k) => `host.${k}()`).join(', ')} — declare it in DECK_HOST_DUTIES or a Host will pass assertHost and still throw`
+          : `${reached.length} reached: ${reached.join(', ')}`);
+
+    const unreached = deckDuties.filter((k) => !reached.includes(k));
+    ok('...and every declared duty is actually reached for, so a second Host implements nothing dead',
+      reached.length > 0 && unreached.length === 0,
+      unreached.length ? `declared but never called: ${unreached.join(', ')}` : `all ${deckDuties.length}`);
+
+    /**
+     * WHAT S3 AND S4 TOGETHER WERE FOR, put as the one fact that is either true
+     * or not: with the storage duties landed there is no executable `chrome.`
+     * left in the deck at all. Four prose mentions remain, which is why the
+     * comments come off first.
+     *
+     * THE CONTROL IS THE DECK'S OWN HOST, AND IT CAN LOSE. `ui/host.js` is the
+     * module that is SUPPOSED to name the platform; a broken stripper, a wrong
+     * path or a regex that simply never matches would read zero on both halves
+     * and this would pass on nothing at all. Requiring the Host to be non-zero
+     * is what stops that.
+     *
+     * S9 gates this over the whole declared unit. This is the deck's half of it,
+     * asserted in the slice that finished it, so a `chrome.` reached for again
+     * in `embed.js` is caught by `--quick` rather than by a manifest that does
+     * not exist yet.
+     */
+    const inDeck = (deckSrc.match(/\bchrome\./g) || []).length;
+    const inHost = (hostSrc.match(/\bchrome\./g) || []).length;
+    ok('THE DECK NAMES NO PLATFORM: zero executable `chrome.` in extension/ui/embed.js, while the Host it imports is made of them  '
+      + '[entry point: extension/ui/embed.js and extension/ui/host.js, comments stripped]',
+      inDeck === 0 && inHost > 0,
+      `${inDeck} in embed.js, ${inHost} in host.js${inHost === 0 ? ' — THE CONTROL CANNOT LOSE, so this assertion is reading nothing' : ''}`);
+
+    /**
+     * WHICH LIFETIME EACH CALL SITE ASKED FOR, PINNED — the half of the storage
+     * seam that nothing else can see.
+     *
+     * `test.js` proves the Host HONOURS whatever area it is handed (the
+     * same-key-in-both-areas fixture above is the arrangement that catches a
+     * Host that ignored it). The browser proves the WRITE lands somewhere the
+     * content script reads. Nothing proved the deck hands over the right area at
+     * the two sites where it is only READ — and review flipped each of them to
+     * `'session'` on its own and watched the whole tree stay green.
+     *
+     * BOTH FAILURE MODES ARE SILENT, WHICH IS WHY THEY ARE WORTH FOUR LINES. A
+     * boot read on `'session'` means preferences never survive a browser
+     * restart: the defaults are re-applied every morning and nothing anywhere
+     * says so. A change feed on `'session'` means a second deck's change never
+     * arrives. Neither is a crash, neither is visible in one sitting, and both
+     * are one token.
+     *
+     * THE PAIRS, NOT A COUNT — because "four storage call sites" is satisfied by
+     * four wrong ones. A slice that adds a fifth is meant to fail here: the area
+     * is a lifetime decision (`shared/host.js` rule 5) and this is where the
+     * decision gets written down.
+     */
+    const storageSites = [...deckSrc.matchAll(/\bhost\.(storageGet|storageSet|onStorageChanged)\(\s*'([a-z]+)'\s*,\s*(\w+)/g)]
+      .map((m) => `${m[1]}('${m[2]}', ${m[3]})`).sort();
+    const WANT_SITES = [
+      "onStorageChanged('local', PREFS_KEY)",
+      "storageGet('local', PREFS_KEY)",
+      "storageGet('session', ARM_ERROR_KEY)",
+      "storageSet('local', PREFS_KEY)",
+    ];
+    ok('EVERY STORAGE CALL SITE SPELLS ITS OWN LIFETIME, and these are the four  '
+      + '[entry point: extension/ui/embed.js, comments stripped — boot read, change feed, writePrefs(), and the durable arm refusal]',
+      storageSites.length === WANT_SITES.length
+      && storageSites.every((v, i) => v === WANT_SITES[i]),
+      storageSites.length === 0
+        ? 'the deck reaches storage through no literal area at all — either the seam moved or this scan cannot see it'
+        : `got ${storageSites.join(' | ')}${storageSites.join() === WANT_SITES.join() ? '' : ` — want ${WANT_SITES.join(' | ')}`}`);
+
+    /**
+     * THE CHORD IS READ FROM THE PLATFORM — CI'S HALF OF A CLAIM THE BROWSER
+     * OWNS.
+     *
+     * `tools/embed-smoke.mjs` proves this properly: it replaces the deck frame's
+     * command table with a chord no manifest here declares and watches the deck
+     * draw THAT. Nothing in `--quick` can do that, and `--quick` is all
+     * `.github/workflows/verify.yml` runs — so a deck that typed a chord, or
+     * that called `host.armShortcut()` and discarded the answer, would reach a
+     * green badge on every pull request and be caught only by a gate someone
+     * remembered to run locally. That is the same gap `e352b49` had to leave an
+     * `embed-state` assertion behind for, and the same one the `chrome.` control
+     * above exists to close.
+     *
+     * TWO SHAPES, BECAUSE THE TWO MUTATIONS REVIEW FOUND ARE DIFFERENT MISTAKES.
+     * One types the chord; the other calls the Host and throws the answer away.
+     * The first is caught by the literal ban below, the second by the thread
+     * here — and a third, `chordLabel(SOME_IMPORTED_DEFAULT, MAC)`, is caught by
+     * the thread alone, which is why the thread is not redundant.
+     *
+     * IT IS DELIBERATELY SHAPE-BOUND: it wants the resolved accelerator threaded
+     * straight into `chordLabel()` on one line. A refactor that spells the boot
+     * site differently should UPDATE this line rather than delete the claim; the
+     * browser gate is what says whether the claim still holds.
+     */
+    const armLine = (deckSrc.match(/^.*\bhost\.armShortcut\(\).*$/m) || [''])[0];
+    const armThread = /\(\s*(\w+)\s*\)\s*=>[\s\S]*?\bchordLabel\(\s*(\w+)\b/.exec(armLine);
+    ok('THE CHORD THE DECK SPELLS IS THE ONE armShortcut() RESOLVED, threaded and not re-derived  '
+      + '[entry point: extension/ui/embed.js boot, comments stripped — the browser half is in tools/embed-smoke.mjs]',
+      !!armThread && armThread[1] === armThread[2],
+      armLine === ''
+        ? 'the deck never calls host.armShortcut() at all — either the seam moved or this scan cannot see it'
+        : armThread
+          ? `armShortcut() resolves \`${armThread[1]}\` and chordLabel() is handed \`${armThread[2]}\``
+          : `no \`(accel) => … chordLabel(accel…)\` on the boot line: ${armLine.trim()}`);
+
+    /**
+     * AND NO ACCELERATOR IS TYPED INTO THE DECK AT ALL. A complete accelerator
+     * is a modifier token followed by `+`, or an Apple glyph — `'Ctrl+Shift+9'`,
+     * `'MacCtrl+Shift+9'`, `'⌃⇧9'`. The deck's own keyboard table lives in
+     * `embed.html` and is spelled with `data-mod` attributes rather than
+     * accelerators, so this scan is `embed.js`'s alone and reads ZERO today.
+     * FLOOR: `armLine` again, so this cannot pass on a file the scan could not
+     * read or on a deck that stopped asking for the chord.
+     */
+    const ACCEL_LITERAL = /(['"`])[^'"`\n]*(?:MacCtrl|Ctrl|Command|Alt|Shift)\s*\+[^'"`\n]*\1|(['"`])[^'"`\n]*[⌃⌘⌥⇧][^'"`\n]*\2/g;
+    const typedChords = (deckSrc.match(ACCEL_LITERAL) || []);
+    ok('...and no accelerator is TYPED into the deck, so the only chord it can draw is the one it was handed',
+      typedChords.length === 0 && armLine !== '',
+      typedChords.length
+        ? `${typedChords.length} accelerator literal(s) in embed.js: ${typedChords.join(', ')}`
+        : 'zero accelerator literals in embed.js');
   }
 
   delete globalThis.chrome;
