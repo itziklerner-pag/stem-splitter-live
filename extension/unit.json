@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "doc": [
+    "THE VENDORED UNIT — what a second product copies out of this repository.",
+    "",
+    "ADR 0001 decision 3: the engine and the deck are vendored by pinned tag plus",
+    "SHA-256, the discipline tools/fetch-vendor.sh already applies to ONNX Runtime.",
+    "Decision 4: the unit sits behind a Host seam, and the engine and the deck must",
+    "not know which Host they run under. This file is the declaration of that",
+    "boundary, and tools/unit-check.mjs is the gate that holds the tree to it.",
+    "",
+    "Every path here is relative to extension/, the directory Chrome loads. The",
+    "layout is part of the contract: deck.js reaches its worker with",
+    "new URL('../workers/inference.worker.js', import.meta.url), so a vendoring",
+    "copy that flattens or renames directories does not run.",
+    "",
+    "JSON has no comments, so every entry carries its own `why`. Read them: they",
+    "are the argument for the classification, and the classification is what the",
+    "gate enforces."
+  ],
+
+  "entries": [
+    {
+      "path": "offscreen/engine.js",
+      "why": "The engine's orchestration. Host-agnostic since S1; imports its platform surface from ./host.js, which is a hole. The extension reaches it through offscreen/offscreen.html; a second Host supplies its own page and loads this same module."
+    },
+    {
+      "path": "ui/embed.html",
+      "why": "The deck. Its markup is part of the unit, not of the Host: embed.html's CSP is script-src 'self', so the deck cannot be booted by an inline boot(host) and the page has to carry its own <script>. Everything the deck needs from a Host arrives through ./host.js."
+    }
+  ],
+
+  "roots": [
+    {
+      "path": "workers/inference.worker.js",
+      "why": "Reached by new Worker(new URL('../workers/inference.worker.js', import.meta.url)) in offscreen/deck.js. No static import names it, so no crawl finds it — and ADR 0001 decision 3 names it explicitly."
+    },
+    {
+      "path": "offscreen/capture-processor.js",
+      "why": "An AudioWorklet module, reached by addModule(host.assetUrl(...)). Worklets have no import statements and nothing imports them."
+    },
+    {
+      "path": "offscreen/playback-processor.js",
+      "why": "The playback worklet, same reachability. It also carries a verbatim copy of engine/pitch.js and engine/pitchbank.js, because an AudioWorklet has no module system."
+    },
+    {
+      "path": "offscreen/master-meter-processor.js",
+      "why": "The master-bus meter worklet, same reachability."
+    },
+    {
+      "path": "engine/pitchbank.js",
+      "why": "A DSP module with no importer at all: it is copied verbatim into offscreen/playback-processor.js and it is the copy that runs. The source is the one that can be checked (node extension/engine/pitchbank.js), so it travels with the unit."
+    }
+  ],
+
+  "holes": [
+    {
+      "path": "offscreen/host.js",
+      "duty": "EngineHost",
+      "speaksChrome": true,
+      "why": "The extension's EngineHost: send, onMessage, assetUrl, captureStream, modelBytes/modelCached/clearModel. The one module offscreen/engine.js imports that a second product replaces wholesale. Typedefs and the boot-time assertHost live in shared/host.js, which is unit."
+    },
+    {
+      "path": "ui/host.js",
+      "duty": "DeckHost",
+      "speaksChrome": true,
+      "why": "The extension's DeckHost: send, onMessage, storage, armShortcut, transport, page. The one module ui/embed.js imports that a second product replaces wholesale."
+    }
+  ],
+
+  "external": [
+    {
+      "prefix": "vendor/ort/",
+      "entry": "vendor/ort/ort.all.bundle.min.mjs",
+      "fetch": "tools/fetch-vendor.sh",
+      "why": "ONNX Runtime Web. Not in git, not in the unit, and not this project's code: fetched at a pinned version and verified against a recorded SHA-256 by tools/fetch-vendor.sh. A vendoring product runs that script rather than copying the drop. The crawl stops at this prefix — walking 27 MB of minified runtime looking for `chrome.` would only ever produce a false red."
+    }
+  ],
+
+  "host": [
+    {
+      "path": "sw/service-worker.js",
+      "speaksChrome": true,
+      "why": "MV3 service worker: the arm gesture, the tabCapture grant, the offscreen document. ADR 0001 decision 4 — only this context can do any of it."
+    },
+    {
+      "path": "content.js",
+      "speaksChrome": true,
+      "why": "The content script that mounts the deck and owns the page's <video>. It is the other end of every transport and page duty the DeckHost declares."
+    },
+    {
+      "path": "ui/welcome.js",
+      "speaksChrome": true,
+      "why": "The setup page. ADR 0001 decision 4 lists ui/welcome* as host-side, and it is: it exists to explain how to arm THIS product in THIS browser."
+    },
+    {
+      "path": "ui/welcome.html",
+      "speaksChrome": false,
+      "why": "The setup page's markup. Host-side with its script."
+    },
+    {
+      "path": "autonav.js",
+      "speaksChrome": false,
+      "why": "A classic content script — YouTube's autoplay-next suppression. Host-side, and it speaks no chrome.* at all: `node extension/autonav.js` is a verify step, so a chrome. reference at module scope here would take that step out at import."
+    },
+    {
+      "path": "speed.js",
+      "speaksChrome": false,
+      "why": "A classic content script — the page-speed transport and the ad gate. Host-side, and quiet for the same reason autonav.js is: `node extension/speed.js` is a verify step."
+    },
+    {
+      "path": "offscreen/host-pin.js",
+      "speaksChrome": false,
+      "why": "Where THIS Host gets the model bytes and where it keeps them: the URL and the Cache API bucket. Host-side because fetching bytes is a Host's duty; the SHA-256 and the byte count stay in shared/config.js because deciding whether the bytes are the model is the unit's. It must stay quiet: tools/host.mjs and tools/fetch-model.sh import it under plain node."
+    },
+    {
+      "path": "offscreen/offscreen.html",
+      "speaksChrome": false,
+      "why": "The MV3 offscreen document — the page this Host creates to give the engine an AudioContext. A second Host supplies its own page and loads offscreen/engine.js into it, which is why the entry is the module and not this file."
+    },
+    {
+      "path": "manifest.json",
+      "speaksChrome": false,
+      "why": "The extension's declaration of itself. ADR 0001 decision 4 names it host-side; ADR 0001 decision 2 is why it stays that way — no downloads permission, one arm chord."
+    }
+  ],
+
+  "outside": [
+    {
+      "path": "unit.json",
+      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names."
+    },
+    {
+      "path": "ui/dev/selftest.mjs",
+      "why": "A suite, not shipped code: it runs the deck's display laws under plain node. It exercises the unit but is not part of it. S10 (#11) declares the suites that verify the unit; until then it is neither unit nor Host, and saying so here is what keeps the classification total."
+    }
+  ],
+
+  "required": [
+    {
+      "adr": "the DSP modules in extension/engine/",
+      "dir": "engine/",
+      "why": "ADR 0001 decision 3, verbatim. Whole-directory rather than a hand list, so a new DSP module that nothing imports fails this gate instead of silently missing the next tag."
+    },
+    {
+      "adr": "extension/shared/",
+      "dir": "shared/",
+      "why": "ADR 0001 decision 3, verbatim. Whole-directory for the same reason. shared/config.js is the constants and the model's identity; shared/host.js is the Host interface itself."
+    },
+    {
+      "adr": "the audio graph in extension/offscreen/ (deck.js, live.js, master.js, cacheddeck.js, the worklet processors)",
+      "paths": [
+        "offscreen/engine.js",
+        "offscreen/deck.js",
+        "offscreen/live.js",
+        "offscreen/master.js",
+        "offscreen/cacheddeck.js",
+        "offscreen/worklets.js",
+        "offscreen/capture-processor.js",
+        "offscreen/playback-processor.js",
+        "offscreen/master-meter-processor.js"
+      ],
+      "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it."
+    },
+    {
+      "adr": "extension/workers/inference.worker.js",
+      "paths": ["workers/inference.worker.js"],
+      "why": "ADR 0001 decision 3, verbatim."
+    },
+    {
+      "adr": "the deck is extension/ui/embed*.js",
+      "paths": [
+        "ui/embed.html",
+        "ui/embed.js",
+        "ui/embed-state.js",
+        "ui/embed.css",
+        "ui/audio-math.js",
+        "ui/tokens.css"
+      ],
+      "why": "ADR 0001 decision 3 says embed*.js; the deck as it actually ships is that plus the markup it cannot be booted without, its two stylesheets, and ui/audio-math.js, which is the deck's display maths under a name the glob misses."
+    }
+  ]
+}
