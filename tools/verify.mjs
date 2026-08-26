@@ -699,13 +699,21 @@ if (flag('self-check')) {
     'PASS', '5 passed, 0 failed');
   // Added 2026-08-25 with the `unit-check` step, under the same rule as every
   // block above: these are the ACTUAL lines the file printed when it was run
-  // from here, not a guess at them. It puts the suite-name prefix on the
-  // passed/failed shape, prints `ok` at THREE spaces, and interleaves un-counted
-  // `   -  ` note lines that must not be read as assertions.
-  shape('unit-check.mjs "unit-check: 55 passed, 0 failed" — suite-name prefix, and a note line in the middle', 'unit-check',
-    'ok   the crawl reached the unit, not a corner of it  33 files\n'
-    + '   -  extension/vendor/ort/ is ABSENT (not in git by design)\n'
-    + '\nunit-check: 55 passed, 0 failed\n', 'PASS', '55 passed, 0 failed');
+  // from here, not a guess at them — its first `ok` line, its crawl-floor `ok`
+  // line with the detail after the two-space separator, and, verbatim, the note
+  // the external loop prints on a tree with no vendor drop (the CI case; with
+  // the drop present the same line reads "is present"). Corrected 2026-08-25
+  // after review: the two lines this block first shipped were truncated, which
+  // is exactly the claim the sentence above makes and has to keep.
+  //
+  // It puts the suite-name prefix on the passed/failed shape, prints `ok` at
+  // THREE spaces, and interleaves un-counted `   -  ` note lines that must not
+  // be read as assertions.
+  shape('unit-check.mjs "unit-check: 67 passed, 0 failed" — suite-name prefix, and a note line in the middle', 'unit-check',
+    'ok   scanner: a bare chrome.* is executable\n'
+    + 'ok   the crawl reached the unit, not a corner of it  33 files from 2 entries + 4 roots, floor 25\n'
+    + '   -  extension/vendor/ort/ is ABSENT (not in git by design) — run `bash tools/fetch-vendor.sh` before loading unpacked\n'
+    + '\nunit-check: 67 passed, 0 failed\n', 'PASS', '67 passed, 0 failed');
   check('...and its un-counted note lines are not mistaken for assertions',
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
@@ -924,14 +932,27 @@ const steps = [
    * to a unit file works perfectly in this repository, because this repository
    * IS a Chrome extension. It costs nothing until it costs a day in a second one.
    *
-   * Watched going red before it was gated, on the three mutations the slice
-   * named: `chrome.runtime.id` in `engine/mixer.js` (54 of 55, and the closure
-   * scan names the file and line); a unit file importing `../sw/service-worker.js`
-   * (53 of 55 — the escape and the partition both fire); and deleting a declared
-   * hole from `unit.json` (53 of 55 — `offscreen/host.js`'s own `chrome.` is
-   * suddenly inside the unit).
+   * Watched going red before it was gated, and RE-MEASURED after the review that
+   * found this comment's first three numbers wrong. Each mutation applied alone,
+   * against a green 67:
+   *
+   *   - `chrome.runtime.id` in `engine/mixer.js` — 66 of 67, one red, and the
+   *     closure scan names the file and the line.
+   *   - a unit file importing `../sw/service-worker.js` — 66 of 67, one red: the
+   *     escape, and ONLY the escape. The partition cannot fire with it, because
+   *     `crawl()` tests the declared Host paths BEFORE it descends and records
+   *     an escape instead, so the file never enters the closure for the
+   *     partition to see.
+   *   - deleting a declared hole from `unit.json` — 60 of 63. The denominator
+   *     moves because a hole carries four assertions of its own; three fire:
+   *     `offscreen/host.js` now imports `host-pin.js` out of the unit, it is a
+   *     closure file no ADR clause names, and its own `chrome.` is suddenly
+   *     inside the unit.
+   *   - `fs.readFile(new URL('../sw/service-worker.js', import.meta.url))` in
+   *     `engine/mixer.js` — 66 of 67. This is the one an import-only crawl reads
+   *     as green; it is why `refsOf` follows `new URL(…, import.meta.url)` too.
    */
-  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, speaks no chrome., and leaves only through a declared hole', args: ['tools/unit-check.mjs'] },
+  { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**
    * Beside `tree` because it is the same kind of claim about the same tree — a
    * property of the whole published surface rather than of one module — and a
