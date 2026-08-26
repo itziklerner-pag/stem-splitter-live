@@ -103,6 +103,30 @@ export class WorkerBackend {
     /** Why the worker is gone, recorded at the moment it went. */
     this.deadReason = null;
 
+    /** Set by `dispose()`. A backend given back does not come back. */
+    this.disposed = false;
+    /** @type {Worker|null} */
+    this.worker = null;
+    /** @type {Promise<string|null>|null} the ORT presence diagnosis, per spawn */
+    this.probe = null;
+    this.spawn();
+  }
+
+  /**
+   * Start a worker and hand it its `INIT`.
+   *
+   * CALLED FROM THE CONSTRUCTOR AND FROM `load()`, AND FROM NOWHERE ELSE. That
+   * pairing is the pre-seam behaviour kept intact, and the asymmetry in it is
+   * deliberate: `ensureSession()` used to call `ensureWorker()`, which spawned a
+   * replacement when the last one had died, so a worker killed for memory cost
+   * the user one gesture rather than a reload. `infer()` called `requireWorker()`
+   * instead, which refused — because a worker that cannot resolve its imports
+   * dies identically every time, and re-spawning per chunk would produce one per
+   * capture tick while the failure ladder never saw a stable error to halt on.
+   * `load()` is once per gesture; `separate()` is once per 1.95 s. Same rule,
+   * same two sides, one module further in.
+   */
+  spawn() {
     /**
      * THE PROBE IS STARTED HERE AND AWAITED IN `load()`.
      *
@@ -112,14 +136,17 @@ export class WorkerBackend {
      * its static import fires `onerror` with an EMPTY message, so without this
      * the whole chain never names the missing file.
      *
-     * It moved from the deck's `ensureSession()` to the backend's construction
-     * because it is a diagnosis of the RUNTIME this backend needs, and a native
-     * backend has no ORT bundle to look for. Starting it here also overlaps it
-     * with the worker's own module load instead of serialising it in front of
-     * the model. The one visible consequence: on a checkout that never ran
+     * It moved from the deck's `ensureSession()` to the backend because it is a
+     * diagnosis of the RUNTIME this backend needs, and a native backend has no
+     * ORT bundle to look for. Starting it at spawn also overlaps it with the
+     * worker's own module load instead of serialising it in front of the model.
+     * The one visible consequence: on a checkout that never ran
      * `fetch-vendor.sh`, the deck now reads the weights before it reports the
      * missing runtime, instead of after. Deck A's backend is built at boot, so
      * by the time anyone arms, this has been settled for minutes.
+     *
+     * RE-RUN ON EVERY SPAWN, because the answer can change: the whole point of
+     * the message is that someone goes and runs the script.
      */
     this.probe = this.probeRuntime();
 
@@ -146,13 +173,15 @@ export class WorkerBackend {
      * Reject them all. PER BACKEND: deck B dying must not settle deck A's calls,
      * which is one more thing a fresh instance per deck buys.
      */
-    w.onerror = (e) => this.die(new Error((e && e.message) || `inference worker (${name}) crashed`));
+    w.onerror = (e) => this.die(new Error((e && e.message) || `inference worker (${this.name}) crashed`));
     w.onmessage = (e) => this.receive(e.data);
     // A DIRECTORY URL, trailing slash and all: ORT appends its own file names to
     // it. R0 measured the file-URL form failing inside the runtime with
     // "w is not a function", several layers from the mistake.
     w.postMessage({ type: 'INIT', wasmDirUrl: this.assetUrl('vendor/ort/') });
+    this.deadReason = null;
     this.worker = w;
+    return w;
   }
 
   /**
@@ -279,6 +308,9 @@ export class WorkerBackend {
    * (`shared/host.js`, model-bytes rule 2).
    */
   async load(bytes, onProgress = () => {}) {
+    // The ONE place a dead worker is replaced — see `spawn()` for why it is here
+    // and not in `separate()`.
+    if (!this.worker && !this.disposed) this.spawn();
     const missing = await this.probe;
     if (missing) throw new Error(missing);
     const w = this.require();
@@ -334,6 +366,7 @@ export class WorkerBackend {
    */
   async dispose() {
     const w = this.worker;
+    this.disposed = true;
     this.worker = null;
     this.pending.clear();
     this.loadGate = null;

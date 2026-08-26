@@ -7617,6 +7617,134 @@ if (group('backend')) {
     await disposing;
   }
 
+  // ------------------------------------------------ a worker that died under it
+  /**
+   * THE THREE THINGS A DEAD WORKER MUST DO, all of which used to live in
+   * `offscreen/deck.js` and moved into `engine/workerbackend.js` with the seam.
+   * A port is exactly where behaviour goes missing quietly, and none of the
+   * three had an assertion on either side of the move.
+   *
+   *   1. EVERY PENDING CALL REJECTS. Review finding M1: a failure that does not
+   *      arrive as `{type:'ERROR'}` — a module load failure, an uncaught
+   *      rejection, an OOM that kills the worker — leaves entries nothing will
+   *      ever settle, and `await separate(...)` then hangs for ever with no
+   *      cancel path. Nothing times it out; nothing else would notice.
+   *   2. THE NEXT `separate()` REFUSES WITH THE RECORDED REASON, and does not
+   *      spawn a replacement. A worker that cannot resolve its imports dies
+   *      identically every time, so one per chunk is what re-spawning here
+   *      buys — and the failure ladder never sees a stable error to halt on.
+   *   3. `load()` DOES REPLACE IT. That is the pre-seam asymmetry:
+   *      `ensureSession()` called `ensureWorker()` (which spawned) and `infer()`
+   *      called `requireWorker()` (which refused), so a worker killed for memory
+   *      cost the user one gesture rather than a reload. `load()` is once per
+   *      gesture; `separate()` is once per 1.95 s.
+   *
+   * The SHIPPED `WorkerBackend` is driven over a stubbed `Worker` and `fetch`.
+   * The stub is the only thing a browser would have supplied — there is no fake
+   * backend here, which is the point: this block is about the real one.
+   */
+  {
+    const { WorkerBackend } = await import('./extension/engine/workerbackend.js');
+    const spawnedHere = [];
+    const failures = [];
+    const realWorker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    let pendingRejected = null;
+    let refused = null;
+    let reloaded = null;
+    let spawnedByRefusal = null;
+    try {
+      globalThis.Worker = class {
+        constructor(url) { this.url = String(url); this.onmessage = null; this.onerror = null; this.posts = []; spawnedHere.push(this); }
+        postMessage(m) { this.posts.push(m); }
+        terminate() {}
+      };
+      Object.defineProperty(globalThis, 'fetch', {
+        value: async () => ({ ok: true }), configurable: true, writable: true,
+      });
+      const wb = new WorkerBackend({
+        assetUrl: (rel) => `stub://unit/${rel}`,
+        name: 'deck A',
+        onFail: (e) => failures.push(e.message),
+      });
+      // In flight when the worker goes: nothing on the wire will ever answer it.
+      //
+      // RECORDED, NOT AWAITED. The mutation this assertion exists to catch — a
+      // `die()` that does not reject the pending map — leaves this promise
+      // pending for ever, and `await` on it would HANG the suite instead of
+      // failing one line. A hang is the same defect wearing a worse costume:
+      // verify.mjs kills the step with no assertion name attached to it.
+      let settled = null;
+      wb.separate(new ArrayBuffer(8), new ArrayBuffer(8)).then(() => { settled = '(it RESOLVED)'; }, (e) => { settled = e.message; });
+      // A module worker that cannot resolve its static import fires `onerror`
+      // with an EMPTY message — the exact shape that used to reach the deck.
+      spawnedHere[0].onerror({ message: '' });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      pendingRejected = settled;
+      // Recorded rather than awaited, for the reason above: the mutation here is
+      // a `separate()` that spawns a replacement, and THAT call would sit
+      // unanswered for ever because nothing ever posts it a RESULT.
+      let refusedMsg = null;
+      wb.separate(new ArrayBuffer(8), new ArrayBuffer(8)).then(() => { refusedMsg = '(it was ACCEPTED)'; }, (e) => { refusedMsg = e.message; });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      refused = refusedMsg;
+      // The count AT THIS INSTANT is the half that says "and did not spawn one":
+      // by the end of the block `load()` has legitimately made a second worker,
+      // so a total taken later cannot tell the two apart.
+      spawnedByRefusal = spawnedHere.length;
+      const loading = wb.load(new ArrayBuffer(4)).then(() => 'ok', (e) => e.message);
+      // Wait for LOAD_MODEL to be ON the replacement rather than for the
+      // replacement to exist: `spawn()` is synchronous and the post is three
+      // awaits later, so counting workers would answer MODEL_READY into a gate
+      // that is not open yet and the load would hang.
+      const loadPosted = () => spawnedHere.length === 2 && spawnedHere[1].posts.some((m) => m && m.type === 'LOAD_MODEL');
+      for (let i = 0; i < 200 && !loadPosted(); i++) await new Promise((r) => setTimeout(r, 0));
+      if (loadPosted() && spawnedHere[1].onmessage) {
+        spawnedHere[1].onmessage({ data: { type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 } });
+      }
+      reloaded = await loading;
+    } finally {
+      if (realWorker) Object.defineProperty(globalThis, 'Worker', realWorker); else delete globalThis.Worker;
+      if (realFetch) Object.defineProperty(globalThis, 'fetch', realFetch); else delete globalThis.fetch;
+    }
+
+    ok('A WORKER THAT DIES REJECTS EVERY CALL IN FLIGHT — nothing on the wire would ever answer them  '
+      + "[entry point: extension/engine/workerbackend.js die(), reached from the worker's onerror]",
+      pendingRejected != null && pendingRejected.includes('deck A'),
+      pendingRejected == null
+        ? 'the in-flight separate() is still pending after the worker died — with no timeout anywhere, '
+          + 'LivePipeline.runChunk awaits it for ever and the deck stops without saying anything'
+        : pendingRejected);
+
+    ok('...and it is ANNOUNCED, because at that moment nothing else is listening  '
+      + '[entry point: the createBackend() `onFail` hook, reached from deck.js Deck.ensureBackend()]',
+      failures.length === 1 && failures[0].includes('deck A'),
+      failures.length === 0
+        ? 'the death was silent — the deck goes on reporting a session it no longer has until the next arm'
+        : failures.join(' | '));
+
+    ok('...and the NEXT separate() refuses with the recorded reason rather than spawning a replacement per chunk  '
+      + '[entry point: extension/engine/workerbackend.js require(), reached from Deck.infer() inside gpu.run()]',
+      refused != null && refused.includes('deck A') && spawnedByRefusal === 1,
+      refused == null
+        ? 'separate() neither resolved nor rejected — a backend with no worker swallowed the call'
+        : spawnedByRefusal !== 1
+          ? `separate() spawned a replacement (${spawnedByRefusal} workers by then) — a worker that cannot resolve `
+            + 'its imports dies identically every time, so that is one per capture tick and a ladder that never '
+            + 'sees a stable error to halt on'
+          : refused);
+
+    ok('...while load() DOES replace it — a worker killed for memory costs one gesture, not a reload  '
+      + '[entry point: extension/engine/workerbackend.js spawn(), reached from Deck.ensureSession()]',
+      spawnedHere.length === 2 && reloaded === 'ok',
+      spawnedHere.length !== 2
+        ? `${spawnedHere.length} worker(s) were spawned in all — load() did not replace the dead one, so an OOM `
+          + 'is terminal until the offscreen document is reloaded'
+        : reloaded !== 'ok'
+          ? `the replacement never loaded: ${reloaded}`
+          : '2 workers in all: one dead, one replacement, and none spawned by separate()');
+  }
+
   // ------------------------------------- a Host that answered with the wrong shape
   /**
    * `assertHost` at engine boot checks that `createBackend` is CALLABLE; it
