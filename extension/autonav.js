@@ -6,6 +6,11 @@
  *
  *     node extension/autonav.js
  *
+ * The one qualification on "no imports": the self-check at the foot of this file
+ * pulls `PREFS_KEY` out of `shared/config.js` to pin the copy below against it.
+ * That `import()` is inside `demo()`, which only ever runs under Node — the page
+ * world has no `process` — so nothing the browser loads evaluates it.
+ *
  * WHY THIS IS A SEPARATE FILE IN A REPO THAT BANS ABSTRACTION. Because the
  * decision has five outcomes, two of which are failures, and the failures are
  * the ones that matter — a control we cannot find and a preference we flipped
@@ -73,7 +78,22 @@ var AUTONAV_TOGGLE_SEL = '.ytp-right-controls [class*="autonav-toggle"][aria-che
  */
 var AUTONAV_CANCEL_SEL = '.ytp-autonav-endscreen-upnext-cancel-button';
 
-/** `chrome.storage.local` key holding this build's user preferences. */
+/**
+ * `chrome.storage.local` key holding this build's user preferences.
+ *
+ * A SECOND COPY OF `shared/config.js`'s `PREFS_KEY`, AND IT HAS TO BE. This file
+ * is listed in `manifest.json`'s `content_scripts`, which are CLASSIC SCRIPTS —
+ * they cannot `import`, and the value has to exist in the page world before
+ * `content.js` (the next entry in the same list) reads it out of this shared
+ * isolated world.
+ *
+ * ponytail: two literals for one key. Ceiling — the deck writes `prefs` and the
+ * content script reads a different key, which is autoplay suppression silently
+ * never applying and nothing anywhere going red. Upgrade path: a build step that
+ * emits this line, or MV3 growing module content scripts. Until then the drift
+ * is what is gated: the self-check at the foot of this file imports the export
+ * and pins this literal against it, so the two cannot part company in silence.
+ */
 var PREFS_KEY = 'prefs';
 
 /**
@@ -160,7 +180,7 @@ function autonavPlan(s) {
 }
 
 // ------------------------------------------------------------------- check
-function demo() {
+async function demo() {
   let fails = 0;
   const eq = (got, want, what) => {
     const g = JSON.stringify(got), w = JSON.stringify(want);
@@ -246,6 +266,30 @@ function demo() {
   eq(autonavPlan(undefined),
     { act: 'idle', want: null, remember: false, forget: false, state: 'idle' },
     'no state at all does nothing');
+
+  // --- the key, against the one the unit exports --------------------------
+  /**
+   * THE SECOND COPY, PINNED. `PREFS_KEY` above is a re-declaration of
+   * `shared/config.js`'s export, forced by this file being a classic content
+   * script; see the note on the declaration. The failure the pin exists for is
+   * mute: the deck writes `prefs`, this world reads something else, autoplay
+   * suppression never applies, and no other assertion in this repo moves —
+   * `autonavPlan` is pure and would go on being right about a setting nobody
+   * ever reads.
+   *
+   * A FILE THAT CANNOT BE IMPORTED IS A FAILED COMPARISON AND NEVER AN ABSENCE,
+   * the same shape `ui/embed-state.js` uses for its markup pins: the catch puts a
+   * string in that cannot equal `'prefs'`, so a missing or renamed `config.js`
+   * is red here rather than quietly skipped.
+   */
+  let exported;
+  try {
+    exported = (await import('./shared/config.js')).PREFS_KEY;
+  } catch (e) {
+    exported = `unreadable: ${(e && e.message) || e}`;
+  }
+  eq(PREFS_KEY, exported,
+    'THE PREFERENCES KEY IS ONE KEY: the literal this classic content script must re-declare is the one shared/config.js exports, so the deck cannot write a preference the content script never reads');
 
   process.exitCode = fails ? 1 : 0;
   console.log(fails ? `\n${fails} FAILED` : '\nautonav: all checks passed');

@@ -372,3 +372,27 @@ export const ARM_ERROR_KEY = 'armError';
  * of the two, because it trains the user to ignore the banner.
  */
 export const ARM_ERROR_TTL_MS = 60000;
+
+// ========================================== the deck's stored preferences
+/**
+ * `chrome.storage` key, in the `local` area, holding this build's user
+ * preferences: `{ autoplayNext?: boolean, instrument?: string }`.
+ *
+ * `local` AND NOT `sync`, because `sync` is a network write and P1 forbids the
+ * network after the model download. Not `session` either: a preference has to
+ * outlive the browser.
+ *
+ * IT IS EXPORTED FROM HERE BECAUSE IT HAS TWO READERS IN TWO WORLDS. The deck
+ * writes it and follows it; `content.js` reads it directly and follows it too,
+ * so that hiding the deck — which removes the iframe while the pipeline keeps
+ * running — cannot leave the content script holding a preference that went
+ * stale the moment the surface that would have forwarded it disappeared.
+ *
+ * `extension/autonav.js` CANNOT IMPORT THIS and re-declares the literal beside
+ * `resolveSuppress`, because it is a classic content script listed in
+ * `manifest.json`'s `content_scripts` and those are not modules. That copy is
+ * PINNED against this one by the check at the foot of that file, so the two
+ * cannot drift apart in silence — which is the only thing that made two copies
+ * acceptable.
+ */
+export const PREFS_KEY = 'prefs';
