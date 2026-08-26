@@ -5870,6 +5870,59 @@ if (group('host')) {
       storageSites.length === 0
         ? 'the deck reaches storage through no literal area at all — either the seam moved or this scan cannot see it'
         : `got ${storageSites.join(' | ')}${storageSites.join() === WANT_SITES.join() ? '' : ` — want ${WANT_SITES.join(' | ')}`}`);
+
+    /**
+     * THE CHORD IS READ FROM THE PLATFORM — CI'S HALF OF A CLAIM THE BROWSER
+     * OWNS.
+     *
+     * `tools/embed-smoke.mjs` proves this properly: it replaces the deck frame's
+     * command table with a chord no manifest here declares and watches the deck
+     * draw THAT. Nothing in `--quick` can do that, and `--quick` is all
+     * `.github/workflows/verify.yml` runs — so a deck that typed a chord, or
+     * that called `host.armShortcut()` and discarded the answer, would reach a
+     * green badge on every pull request and be caught only by a gate someone
+     * remembered to run locally. That is the same gap `e352b49` had to leave an
+     * `embed-state` assertion behind for, and the same one the `chrome.` control
+     * above exists to close.
+     *
+     * TWO SHAPES, BECAUSE THE TWO MUTATIONS REVIEW FOUND ARE DIFFERENT MISTAKES.
+     * One types the chord; the other calls the Host and throws the answer away.
+     * The first is caught by the literal ban below, the second by the thread
+     * here — and a third, `chordLabel(SOME_IMPORTED_DEFAULT, MAC)`, is caught by
+     * the thread alone, which is why the thread is not redundant.
+     *
+     * IT IS DELIBERATELY SHAPE-BOUND: it wants the resolved accelerator threaded
+     * straight into `chordLabel()` on one line. A refactor that spells the boot
+     * site differently should UPDATE this line rather than delete the claim; the
+     * browser gate is what says whether the claim still holds.
+     */
+    const armLine = (deckSrc.match(/^.*\bhost\.armShortcut\(\).*$/m) || [''])[0];
+    const armThread = /\(\s*(\w+)\s*\)\s*=>[\s\S]*?\bchordLabel\(\s*(\w+)\b/.exec(armLine);
+    ok('THE CHORD THE DECK SPELLS IS THE ONE armShortcut() RESOLVED, threaded and not re-derived  '
+      + '[entry point: extension/ui/embed.js boot, comments stripped — the browser half is in tools/embed-smoke.mjs]',
+      !!armThread && armThread[1] === armThread[2],
+      armLine === ''
+        ? 'the deck never calls host.armShortcut() at all — either the seam moved or this scan cannot see it'
+        : armThread
+          ? `armShortcut() resolves \`${armThread[1]}\` and chordLabel() is handed \`${armThread[2]}\``
+          : `no \`(accel) => … chordLabel(accel…)\` on the boot line: ${armLine.trim()}`);
+
+    /**
+     * AND NO ACCELERATOR IS TYPED INTO THE DECK AT ALL. A complete accelerator
+     * is a modifier token followed by `+`, or an Apple glyph — `'Ctrl+Shift+9'`,
+     * `'MacCtrl+Shift+9'`, `'⌃⇧9'`. The deck's own keyboard table lives in
+     * `embed.html` and is spelled with `data-mod` attributes rather than
+     * accelerators, so this scan is `embed.js`'s alone and reads ZERO today.
+     * FLOOR: `armLine` again, so this cannot pass on a file the scan could not
+     * read or on a deck that stopped asking for the chord.
+     */
+    const ACCEL_LITERAL = /(['"`])[^'"`\n]*(?:MacCtrl|Ctrl|Command|Alt|Shift)\s*\+[^'"`\n]*\1|(['"`])[^'"`\n]*[⌃⌘⌥⇧][^'"`\n]*\2/g;
+    const typedChords = (deckSrc.match(ACCEL_LITERAL) || []);
+    ok('...and no accelerator is TYPED into the deck, so the only chord it can draw is the one it was handed',
+      typedChords.length === 0 && armLine !== '',
+      typedChords.length
+        ? `${typedChords.length} accelerator literal(s) in embed.js: ${typedChords.join(', ')}`
+        : 'zero accelerator literals in embed.js');
   }
 
   delete globalThis.chrome;
