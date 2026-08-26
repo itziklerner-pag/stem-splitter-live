@@ -20,9 +20,10 @@ let model = { status: 'unknown', got: 0, total: MODEL.bytes, phase: null, error:
 
 /**
  * The phases that carry a byte count, and therefore the only ones a percentage
- * may be quoted for. `shared/modelcache.js` reports real `got`/`total` for
- * `cache` and `download`; it reports `got === total` for `verify` — which is a
- * SHA-256 over 109 MB that has not started, not a download that has finished —
+ * may be quoted for. The Host (`offscreen/host.js`) reports real `got`/`total`
+ * for `cache` and `download`; the unit's `shared/modelcache.js` reports
+ * `got === total` for `verify` — which is a SHA-256 over 109 MB that has not
+ * started, not a download that has finished —
  * and `session`/`warmup` (the ~8 s shader compile) carry no numbers at all.
  * Quoting 100 % through any of those three is the exact shape of a hang.
  */

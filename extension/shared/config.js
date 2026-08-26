@@ -291,8 +291,22 @@ export const DUAL_MASTER_TRIM_DB = -3;
 export const STEM_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 
 /**
- * Model — pinned host, pinned hash. The pin is the single source of truth every
- * script derives from; never re-type it into a second file.
+ * Model — the IDENTITY half of the pin: what the bytes must be, never where they
+ * come from.
+ *
+ * THE PIN IS SPLIT ACROSS THE HOST SEAM (S7). `extension/offscreen/host-pin.js`
+ * carries the URL and the Cache API bucket, because fetching and keeping the
+ * bytes is the Host's job; this file carries the SHA-256 and the byte count,
+ * because deciding whether the bytes are the model is the UNIT's, and it decides
+ * it on every load whatever the Host hands over (`shared/modelcache.js`). Each
+ * half is still a single source of truth every script derives from — neither is
+ * ever re-typed into a second file, and `tools/fetch-model.sh` and
+ * `tools/host.mjs` read both halves rather than carrying either.
+ *
+ * This replaces the settled decision as it was worded before S7 ("the pin — URL,
+ * SHA-256, byte count — lives in `extension/shared/config.js`"). It was moved
+ * for a reason CONTRIBUTING.md now records: `fetch` and the Cache API are not
+ * `chrome.*`, so a URL left here is a network path no gate on the unit can see.
  *
  * SIX STEMS, AND SMALLER. The 6-stem move was once blocked on the
  * claim that every public `htdemucs_6s.onnx` carries the STFT in-graph, which
@@ -300,20 +314,16 @@ export const STEM_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
  * the same hoisted-STFT, dual-input / dual-output design as the 4-stem pin did
  * (see engine/demucs.js's MODEL INPUT CONTRACT). This is the static-shape one.
  *
- * PINNED BY COMMIT SHA, NOT BY `main`. The 4-stem pin resolved through the
- * mutable `main` ref, so upstream could have moved the bytes under a hash we had
- * already written down — the SHA-256 would have caught it, but as a download
- * failure with no explanation. `resolve/<40-hex>` cannot move. Keep it that way.
- *
  * 114,559,139 B is **66 MB SMALLER** than the 4-stem file's 180,534,758, which
  * is counter-intuitive enough to be worth stating: `htdemucs_6s` is 27.4 M
  * parameters against `htdemucs`'s 41.9 M because it drops the 512-channel
  * transformer bottleneck. Six stems cost less to download than four, and the
  * download-size ceiling (was ~180 MB) moves DOWN to ~115 MB rather than up.
  *
- * opset 17, was 18. fp32, unchanged. Same `huggingface.co` origin, so
- * `extension/manifest.json`'s `host_permissions` and CSP `connect-src` need no
- * change — verified against the manifest, not assumed.
+ * opset 17, was 18. fp32, unchanged. The upstream origin did not change either,
+ * so `extension/manifest.json`'s `host_permissions` and CSP `connect-src` needed
+ * no change — verified against the manifest, not assumed. Both of those, and the
+ * URL they authorise, are now next to each other in `offscreen/host-pin.js`.
  *
  * ponytail: THE PIN IS NOT SETTLED. Two facts about this file are still being
  * measured against the real PyTorch `htdemucs_6s` and both are load-bearing:
@@ -331,19 +341,10 @@ export const STEM_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
  * becomes a recorded fixture and `STEMS` is asserted against it.
  */
 export const MODEL = {
-  url: 'https://huggingface.co/arjune123/demucs-onnx/resolve/0168b73c5fbf38462be79c051b003844a4820e7a/htdemucs_6s.onnx',
   sha256: 'b19cdf832edeb50274b36d6928a8bf83202237c71a4836c4cca45e843316ee17',
   bytes: 114559139,
   label: 'HT-Demucs v4 (htdemucs_6s)',
 };
-
-/**
- * NOT bumped for the 6-stem model, deliberately. `shared/stemcache.js`
- * `pipelineVersion()` already folds `MODEL.sha256.slice(0, 12)` into every cache
- * key, so the new hash invalidates every cached track on its own. A second
- * invalidation mechanism for the same event is one more thing to forget.
- */
-export const CACHE_NAME = 'model-cache-v1';
 
 /** OPFS filenames for finished stems. */
 export const OPFS_DIR = 'exports';

@@ -1,17 +1,27 @@
 /**
- * Model weights: fetched ONCE from the pinned upstream host as *data*, SHA-256
- * verified, and kept in the Cache API.
+ * THE MODEL'S IDENTITY, AND THE POLICY AROUND IT — the UNIT's half of the model
+ * pin. No `fetch`, no Cache API, no URL: the bytes arrive from the Host
+ * (`EngineHost.modelBytes`) and this file decides whether they are the model.
  *
- * M1 compliance: this is data, never script. Nothing is ever `import`ed or
- * evaluated from the network. P1 compliance: after the first successful fetch
- * this function makes zero network requests — `cache.match` short-circuits
- * before `fetch` is even referenced.
+ * WHY THE SPLIT IS THIS WAY ROUND (S7). P1 says exactly one network request is
+ * ever made and M1 says the weights are data, never script. Both are properties
+ * of the UNIT, and both used to be enforced by code that also owned the URL —
+ * so a second Host could have satisfied `assertHost`, handed over bytes from
+ * anywhere, and skipped the check entirely. VERIFICATION DOES NOT FOLLOW THE
+ * FETCH ACROSS THE SEAM: whatever a Host hands over is counted and hashed HERE,
+ * on EVERY load, and a Host has no way to opt out of it. Every load rather than
+ * only the first is the same rule as before S7 — a truncated or corrupted entry
+ * must never reach InferenceSession.create (SCOPE AC-2.5.d) — and the store it
+ * comes out of is now the Host's, which makes it matter more, not less.
  *
- * The hash is checked on EVERY load, not just the first: a truncated or
- * corrupted cache entry must never reach InferenceSession.create (SCOPE AC-2.5.d).
+ * THE FILE KEEPS ITS NAME on purpose even though it no longer caches anything:
+ * it is still the module the model's bytes go through, `offscreen/engine.js` is
+ * still its only importer, and renaming it in the same commit that moves its
+ * contents would make the diff unreadable for the one review that most needs
+ * reading. S11 owns the naming pass over the whole seam.
  */
 
-import { MODEL, CACHE_NAME } from './config.js';
+import { MODEL } from './config.js';
 
 function hex(buf) {
   const b = new Uint8Array(buf);
@@ -20,69 +30,89 @@ function hex(buf) {
   return s;
 }
 
-async function readAll(res, onProgress) {
-  const total = Number(res.headers.get('Content-Length')) || MODEL.bytes;
-  const reader = res.body.getReader();
-  const parts = [];
-  let got = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    parts.push(value);
-    got += value.length;
-    onProgress(got, total);
+/**
+ * Are these bytes the model? Resolves with them if so; rejects naming the
+ * property that failed AND both of its values if not.
+ *
+ * BYTE COUNT FIRST, THEN SHA-256 — and the byte count is NEW in S7. Before it,
+ * a truncated download reported an unexplained SHA-256 mismatch, which is the
+ * failure `tools/host.mjs::requireModelSeed` already refuses to inflict on
+ * anyone: a length is the one property that separates "this file was cut short"
+ * from "these are the wrong weights" without leaving the reader to guess which.
+ * It also costs nothing, which is why it goes first — there is no reason to hash
+ * 109 MB to discover that 109 MB did not arrive.
+ *
+ * THE PIN IS A PARAMETER so that a check of this function can drive it over
+ * bytes that can actually be constructed. The alternative — a test hard-coding
+ * the real SHA-256 beside a fabricated buffer — is a second copy of the pin,
+ * which is the exact thing `shared/config.js` exists to prevent. The DEFAULT is
+ * the shipped pin and every production caller takes it: nothing in `extension/`
+ * passes this argument.
+ *
+ * @param {Uint8Array} bytes
+ * @param {{sha256: string, bytes: number}} pin
+ * @returns {Promise<Uint8Array>} `bytes`, so a caller can check and use in one expression
+ */
+export async function verifyModel(bytes, pin = MODEL) {
+  if (bytes.length !== pin.bytes) {
+    throw new Error(`model integrity check failed: ${bytes.length} bytes != ${pin.bytes}`);
   }
-  const buf = new Uint8Array(got);
-  let o = 0;
-  for (const p of parts) { buf.set(p, o); o += p.length; }
-  return buf;
+  const got = hex(await crypto.subtle.digest('SHA-256', bytes));
+  if (got !== pin.sha256) {
+    throw new Error(`model integrity check failed: sha256 ${got} != ${pin.sha256}`);
+  }
+  return bytes;
 }
 
 /**
+ * A FRESH ArrayBuffer of VERIFIED weights, out of whatever the Host keeps them
+ * in.
+ *
+ * WHAT THE HOST OWES, AND WHAT IT DOES NOT. `host.modelBytes(onProgress)` is a
+ * byte source and nothing more — it may serve from a cache, from the network or
+ * from a file next to the binary, and it is never asked whether the bytes are
+ * good. `host.clearModel()` throws away whatever it kept. The two rules that
+ * follow from that live HERE rather than in any Host:
+ *
+ *   1. BYTES THAT FAIL THE CHECK ARE NEVER LEFT WHERE THE NEXT LOAD FINDS THEM.
+ *      A streaming Host stores what it fetched before this function has seen a
+ *      byte of it — it has to, that is what streaming is — so a corrupt download
+ *      would otherwise be served back for ever, failing identically every time,
+ *      with no way out but clearing browser storage by hand.
+ *   2. A BAD STORED COPY COSTS ONE RE-DOWNLOAD, NOT A DEAD DECK. If the Host
+ *      said the bytes came from its own store, that store is dropped and the
+ *      Host is asked once more — which can no longer hit it, so it is a real
+ *      fetch. If the bytes that just failed came off the wire, asking again
+ *      would spend another 109 MB to fail the same way, so it throws.
+ *
+ * Two calls to `modelBytes` in the worst case and never three, which is a COUNT
+ * the check on this function asserts rather than a timeout it waits out.
+ *
+ * The buffer is fresh per call by construction: `LOAD_MODEL` transfers it into
+ * the inference worker, so two decks physically cannot share one — the second
+ * would receive a detached buffer.
+ *
+ * @param {{modelBytes: Function, clearModel: Function}} host the EngineHost
  * @param {(phase:'cache'|'download'|'verify', got:number, total:number)=>void} onProgress
+ * @param {{sha256: string, bytes: number}} pin  see `verifyModel`
  * @returns {Promise<{buffer: ArrayBuffer, fromCache: boolean, ms: number}>}
  */
-export async function loadModel(onProgress = () => {}) {
+export async function loadModel(host, onProgress = () => {}, pin = MODEL) {
   const t0 = performance.now();
-  const cache = await caches.open(CACHE_NAME);
-
-  const hit = await cache.match(MODEL.url);
-  // Announce cache-vs-network BEFORE any bytes move. `fromCache` in the return
-  // value is a post-hoc record and arrives ~2 minutes too late to choose the
-  // wording on a progress card; `phase` is the authoritative signal and this is
-  // what makes it authoritative from the instant the answer is known, rather
-  // than from the first byte of a fetch whose headers may take a second.
-  onProgress(hit ? 'cache' : 'download', 0, MODEL.bytes);
-  if (hit) {
-    const bytes = await readAll(hit, (g, t) => onProgress('cache', g, t));
-    onProgress('verify', bytes.length, bytes.length);
-    const got = hex(await crypto.subtle.digest('SHA-256', bytes));
-    if (got === MODEL.sha256) {
-      return { buffer: bytes.buffer, fromCache: true, ms: performance.now() - t0 };
+  // TWO ATTEMPTS AT MOST, and that ceiling is structural rather than a comment:
+  // the loop cannot reach a third pass, so a Host that keeps handing over the
+  // same corrupt bytes fails rather than downloading them for ever.
+  for (let attempt = 1; ; attempt++) {
+    const got = await host.modelBytes(onProgress);
+    // `got.bytes.length` and not the pin's: a short buffer reports the length it
+    // actually has on its way to failing, rather than one it never had.
+    onProgress('verify', got.bytes.length, got.bytes.length);
+    try {
+      await verifyModel(got.bytes, pin);
+      return { buffer: got.bytes.buffer, fromCache: got.fromCache, ms: performance.now() - t0 };
+    } catch (bad) {
+      await host.clearModel();
+      if (attempt === 2 || !got.fromCache) throw bad;
     }
-    await cache.delete(MODEL.url);   // corrupt entry — never load it
   }
-
-  const res = await fetch(MODEL.url);
-  if (!res.ok) throw new Error(`model fetch failed: HTTP ${res.status}`);
-  const bytes = await readAll(res, (g, t) => onProgress('download', g, t));
-  onProgress('verify', bytes.length, bytes.length);
-  const got = hex(await crypto.subtle.digest('SHA-256', bytes));
-  if (got !== MODEL.sha256) {
-    throw new Error(`model integrity check failed: sha256 ${got} != ${MODEL.sha256}`);
-  }
-  await cache.put(MODEL.url, new Response(bytes, {
-    headers: { 'Content-Length': String(bytes.length), 'Content-Type': 'application/octet-stream' },
-  }));
-  return { buffer: bytes.buffer, fromCache: false, ms: performance.now() - t0 };
-}
-
-/** Is the model already on disk? Cheap — does not read the body. */
-export async function isModelCached() {
-  const cache = await caches.open(CACHE_NAME);
-  return !!(await cache.match(MODEL.url));
-}
-
-export async function clearModel() {
-  await caches.delete(CACHE_NAME);
 }

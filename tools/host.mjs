@@ -26,11 +26,10 @@ import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { MODEL } from '../extension/shared/config.js';
-
-export const MODEL_HOST = 'huggingface.co';
+import { MODEL_URL as PINNED_URL } from '../extension/offscreen/host-pin.js';
 
 /**
- * THE MODEL PIN, DERIVED — never re-typed.
+ * THE MODEL PIN, DERIVED — never re-typed, and now derived from BOTH HALVES.
  *
  * Every probe in tools/ and qa/ needs three things about the weights: the URL to
  * intercept, the path to route on, and how many bytes to expect. Each of them
@@ -40,12 +39,22 @@ export const MODEL_HOST = 'huggingface.co';
  * so the extension tried to reach the real Hugging Face, and the byte assertion
  * compared against a number no file on disk has.
  *
- * `shared/config.js` is the source of truth for all three. A second literal is
- * how this happens again, so there is not one here either.
+ * S7 SPLIT THAT SOURCE IN TWO, and this file follows the split rather than
+ * papering over it: the identity (SHA-256, byte count) comes from the unit's
+ * `extension/shared/config.js`, and the URL from the extension host's
+ * `extension/offscreen/host-pin.js`, because a Host is what decides where bytes
+ * come from. Both are still single sources of truth. A second literal is how the
+ * eleven-file breakage happens again, so there is not one here either — INCLUDING
+ * the origin, which used to be typed out separately on the line below and is now
+ * read off the URL it has to match. A host-side re-pin to a different origin now
+ * moves the resolver rule and the certificate's CN with it, instead of quietly
+ * routing the real host's name at a server holding the new host's file.
  */
-export const MODEL_URL = MODEL.url;
+export const MODEL_URL = PINNED_URL;
+/** The origin the extension's CSP `connect-src` authorises, and this host impersonates. */
+export const MODEL_HOST = new URL(MODEL_URL).hostname;
 /** The path component — what `startHost()` routes on. */
-export const MODEL_ROUTE = new URL(MODEL.url).pathname;
+export const MODEL_ROUTE = new URL(MODEL_URL).pathname;
 export const MODEL_BYTES = MODEL.bytes;
 
 /**

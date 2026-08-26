@@ -126,6 +126,56 @@
  *   lives in is going away. SYNCHRONOUS: `fn` will not be awaited, so it does
  *   the one thing that cannot wait — stopping the capture tracks, which is what
  *   holds the user's tab muted (R5).
+ *
+ * @property {(onProgress?: (phase:'cache'|'download', got:number, total:number)=>void)
+ *   => Promise<{bytes: Uint8Array, fromCache: boolean}>} modelBytes
+ *   Hand over the model weights, from wherever this Host keeps or gets them.
+ *   A BYTE SOURCE AND NOTHING MORE — see the three rules below.
+ *
+ * @property {() => Promise<boolean>} modelCached
+ *   Would `modelBytes()` cost a download? Answered WITHOUT reading the bytes:
+ *   the setup page and the deck both ask at boot, before any gesture, and an
+ *   answer that costs a 109 MB read is an answer nobody can afford to ask for.
+ *   `false` when unsure — the deck's question is "may I spend the user's data",
+ *   and a wrong `true` spends it without asking.
+ *
+ * @property {() => Promise<void>} clearModel
+ *   Throw away whatever `modelBytes` would serve from store, so the next call
+ *   goes back to source. The unit calls it for exactly one reason: the bytes it
+ *   was handed failed the identity check, and bytes that failed must not be
+ *   left where the next load finds them. MUST NOT be a no-op — a Host that
+ *   silently ignores it turns one corrupt download into a permanently dead
+ *   deck, failing identically for ever with no way out but clearing browser
+ *   storage by hand.
+ */
+
+/**
+ * THE THREE RULES A HOST'S MODEL BYTES HAVE TO HOLD (S7, issue #5). All three
+ * are here rather than in `offscreen/host.js` because they are what the UNIT
+ * needs, not what Chrome happens to do.
+ *
+ * 1. THE HOST DOES NOT VERIFY, AND IS NEVER ASKED TO. The SHA-256 and the byte
+ *    count live in `shared/config.js` and are checked by
+ *    `shared/modelcache.js::verifyModel` over whatever arrives, on EVERY load.
+ *    A Host that verified would be a Host that could decline to, and M1 is not
+ *    a property the unit can delegate: the whole point of moving `MODEL.url`
+ *    out of the unit is that WHERE the bytes come from stopped being the unit's
+ *    business at the same moment WHAT they must be stopped being the Host's.
+ *    `fetch` and the Cache API are not `chrome.*`, so no grep on the unit can
+ *    catch a Host that got this wrong — only this sentence and the checks that
+ *    encode it.
+ *
+ * 2. `bytes` OWNS ITS WHOLE BUFFER. The unit transfers `bytes.buffer` into the
+ *    inference worker, so a `Uint8Array` that is a VIEW into something larger
+ *    transfers the larger thing, and the worker binds a session over the wrong
+ *    offset. `byteOffset === 0 && byteLength === buffer.byteLength`.
+ *
+ * 3. `fromCache` IS LOAD-BEARING, NOT TELEMETRY. It is how the unit decides
+ *    whether a failed check is worth one retry: bytes from a store can be
+ *    dropped and re-fetched, bytes straight off the wire cannot be improved by
+ *    asking twice. A Host that always reports `true` turns every corrupt
+ *    download into a second corrupt download; one that always reports `false`
+ *    turns a corrupt stored copy into a permanent failure.
  */
 
 /**
@@ -140,6 +190,9 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
   captureStream: 'open the audio of the Source a token names, and hand the engine the stream',
   assetUrl: 'resolve a unit-relative asset path the audio graph can load',
   onTeardown: "run the engine's teardown when this context goes away",
+  modelBytes: 'hand over the model weights, from wherever this Host keeps or gets them',
+  modelCached: 'say whether the weights are already here, without reading them',
+  clearModel: 'throw away the stored weights, so the next load goes back to source',
 });
 
 /**

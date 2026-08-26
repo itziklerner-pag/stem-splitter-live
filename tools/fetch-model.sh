@@ -9,11 +9,13 @@
 # parity gate (`tools/model-parity.mjs`) can seed from disk instead of pulling
 # 109 MB on every run.
 #
-# THE PIN IS DERIVED, NEVER RE-TYPED. `extension/shared/config.js` is the single
-# source of truth for URL / SHA-256 / byte count, and `tools/host.mjs` owns the
-# local filename. A second literal in this file is how the copies scattered
-# through tools/ drifted last time, so there is not one here. If node cannot
-# read them, this script stops.
+# THE PIN IS DERIVED, NEVER RE-TYPED, AND IT NOW HAS TWO HALVES (S7).
+# `extension/shared/config.js` is the single source of truth for what the bytes
+# must BE — SHA-256 and byte count — and `extension/offscreen/host-pin.js` for
+# where they come FROM, because fetching is a Host's job and the extension is a
+# Host. `tools/host.mjs` re-exports the URL and owns the local filename. A second
+# literal in this file is how the copies scattered through tools/ drifted last
+# time, so there is not one here. If node cannot read them, this script stops.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
@@ -25,14 +27,15 @@ PIN=$(REPO_ROOT="$ROOT" node -e '
   Promise.all([mod("extension/shared/config.js"), mod("tools/host.mjs")])
     .then(([cfg, host]) => {
       const m = cfg.MODEL;
-      if (!m || !m.url) throw new Error("config.js exports no MODEL.url");
+      if (!m) throw new Error("config.js exports no MODEL");
       if (!/^[0-9a-f]{64}$/.test(String(m.sha256))) throw new Error("MODEL.sha256 is not a sha256");
       if (!(Number(m.bytes) > 0)) throw new Error("MODEL.bytes is not a positive integer");
+      if (!host.MODEL_URL) throw new Error("host.mjs exports no MODEL_URL (offscreen/host-pin.js owns it since S7)");
       if (!host.MODEL_SEED_REL) throw new Error("host.mjs exports no MODEL_SEED_REL");
-      process.stdout.write([m.url, m.sha256, m.bytes, host.MODEL_SEED_REL].join("\t"));
+      process.stdout.write([host.MODEL_URL, m.sha256, m.bytes, host.MODEL_SEED_REL].join("\t"));
     })
     .catch((e) => { console.error("cannot read the model pin: " + e.message); process.exit(1); });
-') || { echo "FATAL: could not derive the pin from extension/shared/config.js" >&2; exit 1; }
+') || { echo "FATAL: could not derive the pin from extension/shared/config.js + extension/offscreen/host-pin.js" >&2; exit 1; }
 
 IFS=$'\t' read -r M_URL M_SHA M_BYTES M_REL <<< "$PIN"
 [ -n "${M_URL:-}" ] && [ -n "${M_SHA:-}" ] && [ -n "${M_BYTES:-}" ] && [ -n "${M_REL:-}" ] \
@@ -68,7 +71,7 @@ GOT_B=$(size "$DEST.part")
 if [ "$GOT_B" != "$M_BYTES" ]; then
   rm -f "$DEST.part"
   echo "SIZE MISMATCH: got $GOT_B B, want $M_BYTES B" >&2
-  echo "  the pin in extension/shared/config.js and the bytes at $M_URL disagree." >&2
+  echo "  MODEL.bytes in extension/shared/config.js and the bytes at $M_URL disagree." >&2
   exit 1
 fi
 
