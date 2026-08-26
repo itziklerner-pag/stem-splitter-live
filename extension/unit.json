@@ -191,7 +191,11 @@
   "outside": [
     {
       "path": "unit.json",
-      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) decides whether it is hashed alongside what it names. SINCE S10 (#11) IT IS ALSO READ AT RUN TIME — tools/verify.mjs opens it at module scope to build the `--unit` plan — so it travels whether or not it is hashed, and a copy without it has no `--unit`. A TRAP FOR WHOEVER MOVES IT: the `why` strings in this file discuss chrome.* in prose, JSON has no comments to hide them in, and tools/unit-check.mjs classifies a .json file as js, where a string is executable by design. The moment this path leaves `outside`, the gate goes red on the declaration itself — a false red in the safe direction, but the first one to read looks like a real seam breach."
+      "why": "This file. It is the unit's manifest rather than code the unit runs: a vendoring product reads it to know what to copy, and S11 (#12) DECIDED THAT IT IS HASHED alongside what it names, in extension/unit.sha256: it is the first file a vendoring product opens and the one that says what everything else must be, so a copy that verified every file against a manifest it had taken on faith would have checked its own homework. SINCE S10 (#11) IT IS ALSO READ AT RUN TIME — tools/verify.mjs opens it at module scope to build the `--unit` plan — so it travels whether or not it is hashed, and a copy without it has no `--unit`. A TRAP FOR WHOEVER MOVES IT: the `why` strings in this file discuss chrome.* in prose, JSON has no comments to hide them in, and tools/unit-check.mjs classifies a .json file as js, where a string is executable by design. The moment this path leaves `outside`, the gate goes red on the declaration itself — a false red in the safe direction, but the first one to read looks like a real seam breach."
+    },
+    {
+      "path": "unit.sha256",
+      "why": "One SHA-256 per unit file, in `shasum -c` format, written by tools/unit-hash.mjs and gated by tools/unit-check.mjs. Outside for the same reason unit.json is: it is ABOUT the unit rather than part of it, and a copy verifies WITH it rather than running it. It hashes unit.json — see that entry — and it does not hash itself, which no sums file can; the tag is what authenticates it. S11 (#12) added it, answering the question the entry above asks."
     },
     {
       "path": "ui/dev/selftest.mjs",

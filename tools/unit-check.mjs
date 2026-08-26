@@ -129,6 +129,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -157,6 +158,21 @@ const MIN_CLOSURE = 25;
  * contains it, so the clauses no longer cover the closure and the gate says so.
  */
 const MIN_REQUIRED = 25;
+/**
+ * The interfaces `shared/host.js` declares. A parse that found none would wave
+ * every duty table through, which is the same green-on-nothing as a crawl that
+ * stopped after two files. Five today: EngineHost, Backend, DeckHost, DeckPage,
+ * DeckTransport.
+ */
+const MIN_TYPEDEFS = 5;
+
+/**
+ * The three addresses `BUS` declares — engine, deck, host — and the floor on how
+ * many modules the literal sweep below reads. Both are here so that a parse
+ * which found nothing fails instead of reporting a clean sweep of an empty set.
+ */
+const BUS_ADDRESSES = 3;
+const BUS_SPEAKERS_MIN = 20;
 
 /** ...and the negative control needs a subject. Today the closure carries 31. */
 const MIN_PROSE = 10;
@@ -522,6 +538,197 @@ for (const h of holes) {
   ok(bootsites.length > 0,
     `...and the unit checks a Host against it at boot  ${bootsites.map(([rel]) => rel).join(', ') || `NOBODY calls assertHost(…, '${h.duty}')`}`);
 }
+
+/* ------------------------------------------------- the frozen bus addresses
+ * THE ADDRESS SET IS DECLARED ONCE AND NOBODY SPELLS IT.
+ *
+ * `shared/host.js` exports `BUS` — the three addresses the unit's own protocol
+ * uses — and Host interface v1 (S11) made every context read its own out of it
+ * instead of writing a literal. That is not tidiness. Before it, the addresses
+ * lived as eleven string literals across five files on both sides of the seam,
+ * and there was no way to change one: edit the unit's and the service worker
+ * goes on broadcasting to an address nobody listens on, which is an arm gesture
+ * that silently stops arming — a broadcast nobody hears looks exactly like one
+ * that worked.
+ *
+ * THE ASSERTION IS THE ABSENCE, NOT THE PRESENCE, and that is what gives it
+ * teeth. "`BUS.engine` is `'off'`" is a fact about a constant that nothing can
+ * contradict; "no file addresses the bus with a literal" is a claim about every
+ * file that speaks it, and it goes red the moment somebody adds a sixth one back
+ * — which is precisely how the seam would rot.
+ *
+ * COMMENTS ARE STRIPPED, by the same scanner the `chrome.` sweep uses, because
+ * the freeze block in `shared/host.js` and the note in `sw/service-worker.js`
+ * both spell the old literals ON PURPOSE, to say what changed.
+ *
+ * `'tab'` IS NOT IN THE SET and is not looked for. It addresses `content.js` —
+ * Host to Host, a message the unit never sees — so `BUS` deliberately has no
+ * word for it and a literal there is correct.
+ * -------------------------------------------------------------------------- */
+const busMatch = ifaceSrc.match(/export const BUS = Object\.freeze\(\{([\s\S]*?)\}\);/);
+const busAddrs = busMatch ? [...busMatch[1].matchAll(/^\s{2}(\w+): '([^']+)'/gm)].map(([, k, v]) => ({ k, v })) : [];
+ok(busAddrs.length === BUS_ADDRESSES,
+  `shared/host.js declares the bus addresses the unit's protocol uses${busAddrs.length === BUS_ADDRESSES
+    ? `  ${busAddrs.map((a) => `${a.k}='${a.v}'`).join(', ')}`
+    : ` — EXPECTED ${BUS_ADDRESSES}, PARSED ${busAddrs.length}; without them the sweep below compares nothing`}`);
+
+/**
+ * Everything that speaks the bus: the unit, the two holes, and the Host files
+ * `unit.json` declares. Read from the declaration rather than from a list here,
+ * so a new Host context lands in this sweep by being classified at all.
+ */
+const busSpeakers = [
+  ...[...closureSrc.keys()],
+  ...holes.map((h) => h.path),
+  ...(decl.host || []).map((h) => h.path),
+].filter((rel) => /\.js$/.test(rel));
+/**
+ * BOTH FORMS AN ADDRESS TAKES IN CODE, and the second one is the half that was
+ * missing when this was first written: the STAMP (`to: 'off'`) and the GUARD
+ * (`m.to !== 'sw'`). A sweep that saw only stamps went green on a context whose
+ * inbound filter still compared against a literal — which is the side that goes
+ * DEAF rather than mute, and therefore the quieter of the two failures.
+ */
+const litAddr = new RegExp(
+  `(?:\\b(?:to|from):\\s*|\\.(?:to|from)\\s*[!=]==?\\s*)'(?:${busAddrs.map((a) => a.v).join('|')})'`, 'g');
+const spellers = [];
+for (const rel of busSpeakers) {
+  const abs = path.join(EXT, rel);
+  if (!fs.existsSync(abs)) continue;
+  const src = fs.readFileSync(abs, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const hits = [...src.matchAll(litAddr)].map((m) => m[0]);
+  if (hits.length) spellers.push(`${rel} (${[...new Set(hits)].join(', ')})`);
+}
+ok(busAddrs.length > 0 && busSpeakers.length >= BUS_SPEAKERS_MIN && spellers.length === 0,
+  `...and no context addresses the bus with a literal — every one reads BUS${
+    busAddrs.length === 0 ? ' — NO ADDRESSES PARSED, so this searched for nothing'
+      : busSpeakers.length < BUS_SPEAKERS_MIN ? `  — ONLY ${busSpeakers.length} files scanned, floor ${BUS_SPEAKERS_MIN}`
+        : spellers.length ? `  — SPELLED: ${spellers.join('; ')}`
+          : `  ${busSpeakers.length} unit, hole and Host modules scanned, comments stripped`}`);
+
+/* -------------------------------------------- the frozen surface, both halves
+ * THE TYPEDEF AND THE DUTY TABLE ARE ONE INTERFACE WRITTEN TWICE, and until Host
+ * interface v1 (S11) nothing held them together.
+ *
+ * `shared/host.js` declares each Host as a JSDoc `@typedef` — which is
+ * documentation and runs nowhere, because there is no type checker in this
+ * build — and again as a frozen `*_DUTIES` table, which is the half `assertHost`
+ * actually enforces. A duty added to the typedef and forgotten in the table is
+ * a duty the unit calls and no boot check asks for: exactly the late
+ * `host.x is not a function` at a user gesture that `assertHost` exists to move
+ * earlier, reintroduced by an edit that looks complete. A duty in the table and
+ * not in the typedef is the other half — a Host is refused at boot for a duty
+ * that is documented nowhere, and the error names a sentence rather than a
+ * contract.
+ *
+ * THE NAMESPACE EXCEPTION IS ENCODED, NOT LISTED. `DeckHost.page` and
+ * `DeckHost.transport` are genuinely absent from `DECK_HOST_DUTIES`, because
+ * `assertHost` requires `typeof host[k] === 'function'` and they are objects;
+ * each is gated by its OWN table at the deck's boot. So the rule below is not
+ * "except page and transport" — an allow-list would go stale the first time a
+ * third namespace appeared. It is: a property is in its interface's table, OR
+ * its declared type names another typedef IN THIS FILE that has a table of its
+ * own. Add a namespace with no table and this goes red without being edited.
+ * -------------------------------------------------------------------------- */
+const tableKeys = (name) => {
+  const m = ifaceSrc.match(new RegExp(`export const ${name} = Object\\.freeze\\(\\{([\\s\\S]*?)\\}\\);`));
+  return m ? [...m[1].matchAll(/^\s{2}(\w+):/gm)].map((x) => x[1]) : null;
+};
+const TABLE_OF = (typeName) => `${typeName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_DUTIES`;
+
+/**
+ * Every `@typedef {object} X` in the interface, with the `@property` names that
+ * follow it up to the end of its comment block. Text, because the typedefs are
+ * comments: there is nothing to import.
+ */
+const typedefs = [...ifaceSrc.matchAll(/@typedef \{object\} (\w+)([\s\S]*?)\*\//g)]
+  .map(([, name, body]) => ({
+    name,
+    props: [...body.matchAll(/@property \{([\s\S]*?)\}\s*(\w+)\s*$/gm)].map(([, type, prop]) => ({ prop, type })),
+  }));
+
+// FAILS WHEN IT CANNOT LOOK: a parse that found no typedefs would wave every
+// interface through, and a parse that found no properties would wave every duty
+// through. Both are the shape of a green that read nothing.
+ok(typedefs.length >= MIN_TYPEDEFS,
+  `shared/host.js declares the interfaces this gate compares  ${typedefs.length} typedefs, floor ${MIN_TYPEDEFS}: ${typedefs.map((t) => t.name).join(', ')}`);
+
+for (const t of typedefs) {
+  const table = tableKeys(TABLE_OF(t.name));
+  if (!table) { ok(false, `${t.name} has no ${TABLE_OF(t.name)} in shared/host.js — the typedef is documentation nothing enforces`); continue; }
+  const named = new Set(typedefs.map((x) => x.name));
+  // A namespace property: its declared type is another typedef here, and that
+  // typedef has a table. `{DeckTransport|null}` counts — `null` is the Host
+  // declaring it has none, which `assertHostOption` is what checks.
+  const isNamespace = (type) => type.split('|').map((x) => x.trim())
+    .filter((x) => x !== 'null' && x !== 'undefined')
+    .every((x) => named.has(x) && tableKeys(TABLE_OF(x)));
+  const undocumented = table.filter((k) => !t.props.some((p) => p.prop === k));
+  const unchecked = t.props.filter((p) => !table.includes(p.prop) && !isNamespace(p.type)).map((p) => p.prop);
+  ok(t.props.length > 0 && undocumented.length === 0 && unchecked.length === 0,
+    `${t.name} is one interface, not two: every duty ${TABLE_OF(t.name)} names is documented and every documented duty is checked${
+      t.props.length === 0 ? '  — NO @property PARSED, so this compared nothing'
+        : unchecked.length ? `  — DOCUMENTED BUT UNCHECKED: ${unchecked.join(', ')} (in the typedef, in no duty table, and not a declared namespace)`
+          : undocumented.length ? `  — CHECKED BUT UNDOCUMENTED: ${undocumented.join(', ')} (in ${TABLE_OF(t.name)}, in no @property)`
+            : `  ${t.props.length} properties, ${table.length} duties`}`);
+}
+
+/* ------------------------------------------------------- extension/unit.sha256
+ * ONE SHA-256 PER UNIT FILE, AND IT DESCRIBES THIS TREE.
+ *
+ * ADR 0001 decision 3 vendors the unit "by pinned tag plus SHA-256";
+ * `tools/unit-hash.mjs` writes the sums file and `docs/VENDORING.md` is what a
+ * copy follows. The failure this is here for is the quiet one: the sums file
+ * goes STALE. Somebody edits a unit file, the tree is green, the tag is cut, and
+ * a vendoring product's `shasum -c` fails on a file that is not corrupt at all —
+ * or, worse, a file is added to the unit, nobody re-runs the generator, and the
+ * copy verifies 34 of 35 files and calls it verified.
+ *
+ * THE PATH SET IS COMPARED AGAINST THE CRAWL, not against the generator.
+ * `tools/unit-hash.mjs` derives its list from `unit.json`'s `required` clauses;
+ * this compares against `closure`, which is what the crawl actually reached from
+ * the entries. The two agree only because the two assertions above make them —
+ * so importing the generator here would replace a cross-check with a tautology.
+ *
+ * WHAT AN ABSENT SUMS FILE DOES, measured rather than assumed: the run stops
+ * before it reaches here, on "every path the declaration names is on disk", and
+ * `unit.sha256` is declared in `unit.json`'s `outside` list. That is the right
+ * red in the right place, and it is why the first assertion below is worded for
+ * a file that is present and EMPTY — which is the case that does reach here, and
+ * which was watched go red on all three.
+ * -------------------------------------------------------------------------- */
+const SUMS = 'extension/unit.sha256';
+const sumsAbs = path.join(ROOT, SUMS);
+const sumsBody = fs.existsSync(sumsAbs) ? fs.readFileSync(sumsAbs, 'utf8') : '';
+const sumLines = sumsBody.split('\n').filter(Boolean);
+const parsed = sumLines.map((l) => /^([0-9a-f]{64})  (\S.*)$/.exec(l)).filter(Boolean)
+  .map(([, digest, rel]) => ({ digest, rel }));
+ok(sumLines.length > 0 && parsed.length === sumLines.length,
+  `${SUMS} is present and every line is \`shasum -c\` format${sumLines.length === 0
+    ? ' — EMPTY OR ABSENT, so a copy would verify nothing and report success'
+    : parsed.length !== sumLines.length ? `  — ${sumLines.length - parsed.length} unparseable line(s); shasum -c exits non-zero on one`
+      : `  ${parsed.length} lines`}`);
+
+const wantPaths = [...[...closure].map((p) => `extension/${p}`), 'extension/unit.json'].sort();
+const gotPaths = parsed.map((x) => x.rel).sort();
+const unhashed = wantPaths.filter((p) => !gotPaths.includes(p));
+const overhashed = gotPaths.filter((p) => !wantPaths.includes(p));
+ok(unhashed.length === 0 && overhashed.length === 0,
+  `...and it covers the unit exactly — every file the crawl reaches, plus unit.json itself${
+    unhashed.length ? `  — UNHASHED: ${unhashed.join(', ')} (run \`node tools/unit-hash.mjs\`)` : ''}${
+    overhashed.length ? `  — HASHED BUT NOT UNIT: ${overhashed.join(', ')}` : ''}${
+    unhashed.length || overhashed.length ? '' : `  ${gotPaths.length} files`}`);
+
+const staleSums = parsed.filter(({ digest, rel }) => {
+  const abs = path.join(ROOT, rel);
+  if (!fs.existsSync(abs)) return true;
+  return crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex') !== digest;
+});
+ok(parsed.length > 0 && staleSums.length === 0,
+  `...and every recorded digest is the file on disk${parsed.length === 0
+    ? ' — NOTHING TO COMPARE, which is not the same as nothing having changed'
+    : staleSums.length ? `  — STALE: ${staleSums.map((x) => x.rel).join(', ')} (run \`node tools/unit-hash.mjs\`)`
+      : `  ${parsed.length} digests recomputed`}`);
 
 const undeclaredExternal = externalUses.filter((u) => !externals.some((e) => e.entry === u.target));
 ok(undeclaredExternal.length === 0,
