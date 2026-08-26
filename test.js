@@ -676,8 +676,9 @@ if (group('live')) {
           return { mix, stems, prepMs: 0, inferMs: 0, postMs: 0 };
         },
         ensureModel: async () => {}, send: (m) => sent.push(m), log: () => {},
-        // See the CachedDeck stub above: the deps bundle `offscreen/deck.js`
-        // hands a LivePipeline now carries the Host's asset resolver.
+        // See the CachedDeck stub in the `cache` group below: the deps bundle
+        // `offscreen/deck.js` hands a LivePipeline now carries the Host's asset
+        // resolver too.
         assetUrl: (relPath) => `stub://unit/${relPath}`,
         // Mode 3: the master bus is SHARED, so the deck borrows it. The stub
         // returns whatever `lp.probeBuf`/`lp.probe` were mocked with, which is
@@ -5528,14 +5529,28 @@ if (group('host')) {
     const { LivePipeline } = await import('./extension/offscreen/live.js');
     const assetUrl = (relPath) => `stub://unit/${relPath}`;
     const drive = (p) => p.then(() => null, (e) => String((e && e.message) || e));
-    /** an AudioContext that registers a processor name exactly once, as Chrome does */
+    /**
+     * An AudioContext that registers a processor name exactly once, as Chrome
+     * does — and that counts ATTEMPTS as well as registrations.
+     *
+     * `tried` IS THE ESTIMATOR THE CLAIM NEEDS, and `added` is not. Review
+     * deleted the per-context dedup from `offscreen/worklets.js` outright — the
+     * mechanism this whole block exists to hold — and both direction claims
+     * below stayed GREEN, printing "1 registration" while the build had issued
+     * TWO addModule calls: the second one throws before it can push to `added`,
+     * so that count saturates at 1 before the range the claim needs (2) begins.
+     * AGENTS.md rule 3, in the file it was written about. Counting every attempt
+     * is what makes "once per context" refutable.
+     */
     const oneShotCtx = () => {
-      const added = [];
+      const added = [], tried = [];
       return {
         added,
+        tried,
         sampleRate: SR,
         audioWorklet: {
           addModule: async (url) => {
+            tried.push(url);
             if (added.includes(url)) throw new Error("A processor named 'stem-playback' is already registered");
             added.push(url);
           },
@@ -5554,21 +5569,30 @@ if (group('host')) {
     await probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js');
     const second = await drive(probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js'));
     ok('INSTRUMENT CHECK: the fake context refuses a second registration the way Chrome does  '
-      + '[control: against a permissive fake, both claims below pass on a build that registers twice]',
-      second != null && /already registered/i.test(second),
-      second == null ? 'the fake accepted a second addModule of the same processor — it cannot reproduce the defect' : second);
+      + '[control: the refusal is what lets the two claims below SEE a builder trip; the attempt count is what '
+      + 'lets them see a second registration at all]',
+      second != null && /already registered/i.test(second) && probe.tried.length === 2 && probe.added.length === 1,
+      second == null
+        ? 'the fake accepted a second addModule of the same processor — it cannot reproduce the defect the two claims below exist for'
+        : probe.tried.length !== 2 || probe.added.length !== 1
+          ? `the fake recorded ${probe.tried.length} attempts and ${probe.added.length} registrations for 2 addModule calls — `
+            + 'it cannot tell "registered once" from "tried twice and one throw was swallowed", which is the whole claim'
+          : `${probe.tried.length} attempts, ${probe.added.length} registration, second refused with ${JSON.stringify(second)}`);
 
     // ---- live first, then a cached deck on the same context
     const ctxLF = oneShotCtx();
     const lfLive = await drive(liveOn(ctxLF).build());
     const lfCached = await drive(cachedOn(ctxLF).ensureGraph());
-    ok('LIVE FIRST, THEN CACHED ON THE SAME CONTEXT: one registration, and neither builder trips over it  '
+    ok('LIVE FIRST, THEN CACHED ON THE SAME CONTEXT: addModule is CALLED ONCE, and neither builder trips over it  '
       + '[entry point: live.js LivePipeline.build() then cacheddeck.js CachedDeck.ensureGraph()]',
-      ctxLF.added.length === 1
+      ctxLF.tried.length === 1 && ctxLF.added.length === 1
       && !/already registered/i.test(String(lfLive)) && !/already registered/i.test(String(lfCached)),
-      ctxLF.added.length !== 1
-        ? `${ctxLF.added.length} registrations on one context, expected 1`
-        : `1 registration; live stopped at ${JSON.stringify(String(lfLive).slice(0, 48))}, cached at ${JSON.stringify(String(lfCached).slice(0, 48))}`);
+      ctxLF.tried.length !== 1
+        ? `${ctxLF.tried.length} addModule ATTEMPTS on one context, expected 1 — the second deck re-registered and only `
+          + "worklets.js's catch hid it"
+        : ctxLF.added.length !== 1
+          ? `${ctxLF.added.length} registrations on one context, expected 1`
+          : `1 attempt, 1 registration; live stopped at ${JSON.stringify(String(lfLive).slice(0, 48))}, cached at ${JSON.stringify(String(lfCached).slice(0, 48))}`);
 
     // ---- and the other way round, which is the order that used to fail
     const ctxCF = oneShotCtx();
@@ -5576,13 +5600,16 @@ if (group('host')) {
     const cfLive = await drive(liveOn(ctxCF).build());
     ok('...AND CACHED FIRST, THEN LIVE — the order that used to reject out of build() as START_FAILED  '
       + '[entry point: cacheddeck.js CachedDeck.ensureGraph() then live.js LivePipeline.build()]',
-      ctxCF.added.length === 1
+      ctxCF.tried.length === 1 && ctxCF.added.length === 1
       && !/already registered/i.test(String(cfCached)) && !/already registered/i.test(String(cfLive)),
-      ctxCF.added.length !== 1
-        ? `${ctxCF.added.length} registrations on one context, expected 1`
-        : /already registered/i.test(String(cfLive))
-          ? `the live deck rejected with ${JSON.stringify(String(cfLive))} — a live prime cannot start while a cached deck holds the context`
-          : `1 registration; cached stopped at ${JSON.stringify(String(cfCached).slice(0, 48))}, live at ${JSON.stringify(String(cfLive).slice(0, 48))}`);
+      ctxCF.tried.length !== 1
+        ? `${ctxCF.tried.length} addModule ATTEMPTS on one context, expected 1 — the second deck re-registered and only `
+          + "worklets.js's catch hid it"
+        : ctxCF.added.length !== 1
+          ? `${ctxCF.added.length} registrations on one context, expected 1`
+          : /already registered/i.test(String(cfLive))
+            ? `the live deck rejected with ${JSON.stringify(String(cfLive))} — a live prime cannot start while a cached deck holds the context`
+            : `1 attempt, 1 registration; cached stopped at ${JSON.stringify(String(cfCached).slice(0, 48))}, live at ${JSON.stringify(String(cfLive).slice(0, 48))}`);
 
     /**
      * THE TWO REJECTIONS THAT ARE NOT THE SAME KIND, driven directly because
