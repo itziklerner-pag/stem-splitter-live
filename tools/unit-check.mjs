@@ -29,10 +29,12 @@
  *      "no `chrome.` found" perfectly and means nothing; the count is asserted
  *      against a floor and printed.
  *   4. The closure contains every path ADR 0001 decision 3 lists — as a PRESENCE
- *      assertion against the declaration, because a crawl cannot reach four of
- *      those files at all (the three worklets and `engine/pitchbank.js`, which
- *      have no importer) and a gate derived from the crawl would silently drop
- *      them.
+ *      assertion against the declaration, because a crawl cannot reach five of
+ *      those files at all and a gate derived from the crawl would silently drop
+ *      them. Four have no importer (the three worklets and
+ *      `engine/pitchbank.js`); the fifth, `workers/workerbackend.js`, has
+ *      exactly one, and it is `offscreen/host.js` — a hole, which is the one
+ *      edge the crawl must not follow. All five are seeded as `roots`.
  *   5. Comments stripped, no unit file reaches for `chrome`.
  *   6. The only ways out of the closure are the declared holes and the one
  *      declared Host read. A REFERENCE here is an `import`, an `export … from`,
@@ -114,7 +116,7 @@ const EXT = path.join(ROOT, 'extension');
 
 /**
  * A closure smaller than this is a crawl that stopped, not a unit that shrank.
- * ADR 0001 decision 3 names 33 paths today and the closure is 33; the floor sits
+ * ADR 0001 decision 3 names 34 paths today and the closure is 34; the floor sits
  * well below that on purpose, because its job is to catch a broken crawl rather
  * than to pin a file count that legitimately moves.
  */
@@ -126,7 +128,7 @@ const MIN_CLOSURE = 25;
  * The floor is all it is. `docs/adr/0001-*.md` is never opened by this file —
  * decision 3 is TRANSCRIBED into `unit.json`, and the fidelity of that
  * transcription rests on review, not on this gate. Between the floor and
- * today's 33 there is room to drop up to eight paths from a clause and see
+ * today's 34 there is room to drop up to nine paths from a clause and see
  * nothing but a smaller number in the detail. What catches that instead is the
  * assertion below that every file the crawl reaches is a file some clause
  * names: delete `ui/embed-state.js` from the deck clause and the closure still

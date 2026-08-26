@@ -711,7 +711,7 @@ if (flag('self-check')) {
   // be read as assertions.
   shape('unit-check.mjs "unit-check: 67 passed, 0 failed" — suite-name prefix, and a note line in the middle', 'unit-check',
     'ok   scanner: a bare chrome.* is executable\n'
-    + 'ok   the crawl reached the unit, not a corner of it  33 files from 2 entries + 4 roots, floor 25\n'
+    + 'ok   the crawl reached the unit, not a corner of it  34 files from 2 entries + 5 roots, floor 25\n'
     + '   -  extension/vendor/ort/ is ABSENT (not in git by design) — run `bash tools/fetch-vendor.sh` before loading unpacked\n'
     + '\nunit-check: 67 passed, 0 failed\n', 'PASS', '67 passed, 0 failed');
   check('...and its un-counted note lines are not mistaken for assertions',
@@ -951,6 +951,14 @@ const steps = [
    *   - `fs.readFile(new URL('../sw/service-worker.js', import.meta.url))` in
    *     `engine/mixer.js` — 66 of 67. This is the one an import-only crawl reads
    *     as green; it is why `refsOf` follows `new URL(…, import.meta.url)` too.
+   *   - dropping `workers/workerbackend.js` from `roots` — 64 of 67, and the
+   *     crawl-floor detail falls from 34 files to 31. Added when S6 (#8) and S9
+   *     (#10) landed together: S6 made `offscreen/host.js` the only importer of
+   *     `workerbackend.js`, so the crawl now stops one edge short of the entire
+   *     inference implementation. Three fire — `engine/demucs.js` and both
+   *     worker files leave the closure, so two ADR clauses go unmet and the
+   *     partition has three files it cannot classify. This is the assertion
+   *     that would have caught the integration silently mis-declaring the unit.
    */
   { id: 'unit-check', title: 'node tools/unit-check.mjs — the engine and the deck still come out: the closure resolves, reaches for no chrome, and leaves only through a declared hole or a declared read', args: ['tools/unit-check.mjs'] },
   /**

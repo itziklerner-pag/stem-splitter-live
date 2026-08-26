@@ -10,12 +10,20 @@
     "boundary, and tools/unit-check.mjs is the gate that holds the tree to it.",
     "",
     "Every path here is relative to extension/, the directory Chrome loads. The",
-    "layout is part of the contract: deck.js reaches its worker with",
-    "new URL('../workers/inference.worker.js', import.meta.url), so a vendoring",
-    "copy that flattens or renames directories does not run. The gate follows",
-    "that form as a reference, which is why the worker is not listed as a root:",
-    "it is reachable, and a rename of it is an unresolved reference rather than",
-    "a hand-written path that quietly stopped matching.",
+    "layout is part of the contract: workers/workerbackend.js reaches the",
+    "inference worker with new URL('./inference.worker.js', import.meta.url), so",
+    "a vendoring copy that flattens or renames directories does not run. The",
+    "gate follows that form as a reference, which is why inference.worker.js is",
+    "not listed as a root: it is reachable, and a rename of it is an unresolved",
+    "reference rather than a hand-written path that quietly stopped matching.",
+    "",
+    "workerbackend.js IS a root, for the opposite reason: since S6 (#8) its only",
+    "importer in the tree is offscreen/host.js, a declared hole, so a crawl that",
+    "stops where a hole starts — which is what a hole means — misses it, and with",
+    "it the worker, engine/demucs.js and the whole tensor contract. It is the",
+    "Host's choice of backend and the unit's implementation of one at the same",
+    "time; its own header says a computed closure must seed it explicitly, and",
+    "this is where that is done.",
     "",
     "JSON has no comments, so every entry carries its own `why`. Read them: they",
     "are the argument for the classification, and the classification is what the",
@@ -49,6 +57,10 @@
     {
       "path": "engine/pitchbank.js",
       "why": "A DSP module with no importer at all: it is copied verbatim into offscreen/playback-processor.js and it is the copy that runs. The source is the one that can be checked (node extension/engine/pitchbank.js), so it travels with the unit."
+    },
+    {
+      "path": "workers/workerbackend.js",
+      "why": "Backend #1 — the unit's own implementation of the Backend the EngineHost hands over, and the only file in the unit whose sole importer is a hole (offscreen/host.js imports it; nothing else in the tree does). Seeded here because a crawl that stops at the hole misses it AND everything below it: workers/inference.worker.js, engine/demucs.js, the tensor names and the six-stem layout — the most unit-ish code in the repository, sitting behind the one edge a crawl must not follow. ADR 0001 decision 3 names it for the same reason, and workers/workerbackend.js's own header says a computed closure must seed it explicitly. It is a root, not an entry: an entry is a thing a Host loads, and no Host loads this — the Host CHOOSES it."
     }
   ],
 
@@ -170,9 +182,9 @@
       "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it."
     },
     {
-      "adr": "extension/workers/inference.worker.js",
-      "paths": ["workers/inference.worker.js"],
-      "why": "ADR 0001 decision 3, verbatim."
+      "adr": "extension/workers/ — inference.worker.js and, since S6 (#8), workerbackend.js",
+      "paths": ["workers/inference.worker.js", "workers/workerbackend.js"],
+      "why": "ADR 0001 decision 3, verbatim, including the sentence S6 added to it. Named rather than taken wholesale for the reason the ADR gives in the same breath: neither file is reachable by import from the unit's entry point, so an enumeration is the only thing that can carry them — inference.worker.js because new URL(..., import.meta.url) is not an import, workerbackend.js because its one importer is a hole."
     },
     {
       "adr": "the deck is extension/ui/embed*.js",
