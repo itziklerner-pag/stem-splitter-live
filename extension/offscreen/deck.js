@@ -210,7 +210,21 @@ export class Deck {
       onReady: (info) => {
         this.adapter = info.adapter;
         this.threads = info.threads;
-        this.s.log(`deck ${this.id} backend ready · wasm threads ${info.threads} · gpu ${info.adapter ? info.adapter.vendor + '/' + info.adapter.architecture : 'none'}`);
+        /**
+         * THE LINE DESCRIBES WHAT THE BACKEND ANSWERED, and says nothing when it
+         * answered nothing. Both fields are ORT-Web-shaped — a wasm thread count
+         * and a WebGPU adapter's `{vendor, architecture}` — because backend #1
+         * is ORT-Web. A native backend (CoreML, DirectML, CUDA) has neither and
+         * can only answer `{threads: null, adapter: null}`, and the pre-seam
+         * spelling of this line would then have told a user on an M-series GPU
+         * "wasm threads null · gpu none", which is not degrading — it is
+         * reporting someone else's hardware. S11 owns the field names when it
+         * freezes Host interface v1; this is the render not pretending.
+         */
+        const bits = [];
+        if (info.threads != null) bits.push(`wasm threads ${info.threads}`);
+        if (info.adapter) bits.push(`gpu ${info.adapter.vendor}/${info.adapter.architecture}`);
+        this.s.log(`deck ${this.id} backend ready${bits.length ? ` · ${bits.join(' · ')}` : ''}`);
         this.s.onWorkerState && this.s.onWorkerState(this);
       },
       /**
@@ -494,6 +508,19 @@ export class Deck {
      * THE SLOT IS CLEARED, so `requireBackend()` refuses the next call rather
      * than a disposed backend accepting one. `ensureBackend()` is what builds a
      * replacement, and only a caller that means to start again reaches it.
+     *
+     * THE AWAIT IS UNBOUNDED ON PURPOSE, AND R5 DOES NOT DEPEND ON IT. The
+     * typedef says `dispose()` MUST START ITS TEARDOWN SYNCHRONOUSLY, and
+     * `WorkerBackend`'s body is synchronous — but a Host whose backend answers
+     * over IPC could return a promise that never settles, and `.catch()` does
+     * nothing about a hang. What that costs is bounded by the ORDERING above:
+     * `this.detach()` — the track stop that unmutes the user's tab, which is
+     * what R5 is about — has already run two lines up, and `engine.js`'s
+     * `pagehide` teardown deliberately does not await this at all. So the worst
+     * case is a `stopDeck()` that never resolves, not a tab left muted.
+     * Deliberately not raced against a timer: the same "await it and hope" that
+     * `WorkerBackend.dispose()` refuses to do on the wire is not worth
+     * re-inventing here with a clock.
      */
     if (this.backend) { const b = this.backend; this.backend = null; await b.dispose().catch(() => {}); }
     this.session = 'unknown';

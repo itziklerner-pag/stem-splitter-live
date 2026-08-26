@@ -120,8 +120,24 @@ export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
  *
  * `assetUrl` is passed as the module's own function, unbound, exactly as
  * `engine.js` passes it to `MasterBus` and to the decks.
+ *
+ * THE HOOKS ARE FORWARDED WHOLE, and that is the one part of this duty
+ * `assertHost(backend, BACKEND_DUTIES)` structurally cannot check. `onReady` and
+ * `onFail` arrive OUTSIDE any call the unit made — the hardware the backend
+ * found, and a death with nothing in flight — so a Host that built the backend
+ * and dropped them answers with an object that owes every declared duty and
+ * still loses both: the deck's `state.boot.{ep,adapter,threads}` line goes
+ * blank, and an idle backend death is silent again until the next arm. Review
+ * measured exactly that: `new WorkerBackend({ assetUrl })` left `node test.js`
+ * at 602 passed and `embed-smoke` at 130/130. `test.js`'s `host` group now
+ * drives the hooks through THIS function rather than around it.
+ *
+ * `...hooks` FIRST, `assetUrl` LAST, so the unit cannot overwrite the resolver
+ * the Host chose. The declared hook type has no `assetUrl` in it, so nothing
+ * reaches this today; the order is what keeps "the Host decides where its files
+ * live" a property of the code rather than of the caller's good manners.
  */
-export const createBackend = (hooks) => new WorkerBackend({ assetUrl, ...hooks });
+export const createBackend = (hooks) => new WorkerBackend({ ...hooks, assetUrl });
 
 /**
  * @type {import('../shared/host.js').EngineHost['onTeardown']}

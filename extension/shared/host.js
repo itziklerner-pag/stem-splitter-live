@@ -202,6 +202,19 @@
  *   module that would not resolve. Without `onFail` that death is silent until
  *   the next arm, and the deck goes on reporting a session it no longer has.
  *   `name` is a human label used only in error messages ("deck A").
+ *   FORWARD THEM WHOLE. This is the one part of this duty `assertHost(backend,
+ *   BACKEND_DUTIES)` structurally cannot check: a backend built without them
+ *   owes every declared duty and answers to nobody, so a Host that drops the
+ *   hooks is refused by nothing and loses both behaviours above at once.
+ *   `test.js`'s `host` group drives them THROUGH `createBackend` for that reason.
+ *   `onReady`'s TWO FIELDS ARE ORT-WEB-SHAPED, and both are nullable because of
+ *   it: `threads` is a wasm thread count and `adapter` is a WebGPU adapter's
+ *   `{vendor, architecture}`. A native backend — CoreML, DirectML, CUDA — has
+ *   neither and answers `{threads: null, adapter: null}`, which is a legitimate
+ *   answer rather than a degraded one: `offscreen/deck.js` renders what it was
+ *   given and says nothing about wasm or a GPU when it was given neither. S11
+ *   owns whether v1 of this interface gains a neutral field to describe such a
+ *   backend in its own words; until then a Host must not invent numbers here.
  */
 
 /**
@@ -501,7 +514,30 @@ export function serialiseBackend(backend, what = 'Backend') {
    * `backend.separate is not a function`. That is the exact late failure this
    * file's boot check exists to move earlier, one level in.
    */
-  assertHost(backend, BACKEND_DUTIES, what);
+  try {
+    assertHost(backend, BACKEND_DUTIES, what);
+  } catch (e) {
+    /**
+     * A REFUSED BACKEND IS STILL GIVEN BACK. `createBackend` is documented as
+     * the place a Host that needs a process STARTS one — "a backend that needs
+     * to spawn a process starts it here and lets `load()` be where the waiting
+     * happens" — so by the time the shape is refused the machine may already
+     * exist, and the reference is about to be dropped. Under this Host that is
+     * invisible (the throw is fatal at `engine.js` module scope and the worker
+     * dies with the document); under the Electron Host this interface is being
+     * written for, an out-of-process backend would simply be leaked by a
+     * mistake in its own shape.
+     *
+     * The refusal is what propagates — `dispose()` may not replace it, and a
+     * `dispose()` that throws or rejects must not either.
+     */
+    if (backend && typeof backend.dispose === 'function') {
+      // The refusal is the error. A dispose() that throws or rejects must not
+      // replace it, and must not become an unhandled rejection either.
+      try { Promise.resolve(backend.dispose()).catch(() => {}); } catch { /* keep the refusal */ }
+    }
+    throw e;
+  }
 
   let chain = Promise.resolve();
   const queued = (fn) => {
