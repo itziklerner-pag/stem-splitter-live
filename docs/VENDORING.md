@@ -94,7 +94,13 @@ console.log([...new Set([...unit, ...host, ...harness,
   "extension/unit.sha256", ...d.external.map((e) => e.fetch)])].sort().join("\n"));
 ' > /tmp/vendor-list.txt
 wc -l < /tmp/vendor-list.txt      # 50
+while read -r p; do [ -e "$p" ] || echo "MISSING: $p"; done < /tmp/vendor-list.txt
 ```
+
+The second line prints nothing, and is worth the second line: `unit.json` is a
+hand-maintained declaration, and a path in it that is not in the archive
+produces a copy that fails LATE — an unresolved import at boot, or a suite that
+cannot open a file it never guarded — rather than here, where the list was made.
 
 Fifty paths: 35 unit, 5 reference Host, 14 harness (12 suites and 2 runners,
 seven of which are unit files that are their own suite and are therefore already
@@ -134,6 +140,34 @@ The same 35 `: OK` lines, now about the files you will actually run. Doing it
 twice is not superstition: step 2 proves the download, this proves the copy, and
 they fail for different reasons.
 
+**It verifies 35 of the 50 paths, and the fifteen it leaves are not the
+unimportant ones.** `unit.sha256` is a sums file for the UNIT, and the copy is
+the unit plus the reference Host plus the harness:
+
+```
+extension/content.js              qa/passthrough-gain.mjs   tools/fetch-vendor.sh
+extension/offscreen/host.js       qa/speed-pitch.mjs        tools/host.mjs
+extension/offscreen/host-pin.js   qa/test-edge.mjs          tools/seam-check.mjs
+extension/speed.js                test.js                   tools/verify.mjs
+extension/ui/host.js              extension/ui/dev/selftest.mjs
+extension/unit.sha256
+```
+
+`test.js` is 612 of the 1156 assertions and `tools/verify.mjs` is the runner
+that prints the verdict. A copy in which either had been altered passes §5 and
+then reports its own green. Two of the fifteen are holes you are about to
+replace and cannot be pinned to us, so the answer is not for us to hash them —
+it is for the copy to **record what it took**, once, in the commit that takes
+it, and gate that afterwards:
+
+```bash
+cd "$DEST" && sha256sum $(cat /tmp/vendor-list.txt) > ../upstream.sha256
+```
+
+Alongside the two holes, that is also the file that tells "somebody edited the
+unit" apart from "somebody edited our Host" — two questions with two different
+answers, and only the first one is a fork.
+
 ## 6. Fetch ONNX Runtime
 
 ```bash
@@ -148,8 +182,19 @@ are not, it is not this project's code, and the script is the pin.
 ## 7. Run the unit's own gate
 
 ```bash
-node tools/verify.mjs --unit
+node tools/verify.mjs --unit --no-reap
 ```
+
+**`--no-reap` is not a style choice, and it was missing here until the first
+real copy was taken.** Without it this runner opens by killing every Playwright
+Chromium on the machine — `reapOrphanBrowsers()`, `pkill -f
+ms-playwright/chromium`, at module scope, before the plan is built. The note on
+that function says what it costs when it guesses wrong: a colleague mid-run sees
+`Target page, context or browser has been closed` with nothing naming the cause.
+`--unit` launches no browser, so it has nothing to protect from contention and
+nothing to gain — the same sentence that function already uses to spare
+`--self-check`, which is why the honest fix is one token in its guard rather
+than a flag every copier has to remember. Until that lands, pass the flag.
 
 Expect, verbatim on the last line:
 
@@ -279,8 +324,17 @@ translate. It is cosmetic and it is on your first screenshot.
 be true there. Serving the unit from any other scheme means COOP/COEP, or the
 flag, before `offscreen/engine.js` loads.
 
-**The model weights are not in the copy.** 109 MB, not in git, fetched by
-`tools/fetch-model.sh` here. `modelBytes` / `modelCached` / `clearModel` are
+**The model weights are not in the copy — and neither is the script that
+fetches them.** `tools/fetch-model.sh` is not in `external` in `unit.json` (the
+weights are a Host's duty, not a dependency of the unit), so §3 never names it.
+Everything that script READS does travel — `shared/config.js` for what the bytes
+must be, `tools/host.mjs` and `offscreen/host-pin.js` for where they come from —
+so if you want the pinned weights for development before your own Host can
+supply them, run it **in the unpacked archive** from §1 and move the verified
+file into your tree. `unit.json`'s `otherSteps` entry for `model-parity` tells a
+copy to "fetch the weights and run the step by name", and this is the missing
+half of that sentence. 109 MB, not in git, fetched by `tools/fetch-model.sh`
+here. `modelBytes` / `modelCached` / `clearModel` are
 where your Host says where they come from; the SHA-256 and the byte count stay
 in `shared/config.js`, and the unit checks them over whatever you hand it, every
 load. A Host that verified would be a Host that could decline to.
@@ -309,3 +363,13 @@ verified `: OK` twice, ORT fetched and both hashes matched, and
 `node tools/verify.mjs --unit` printed
 `GREEN (partial — the vendored unit's suites only; 12 of 23 steps)` at exit 0
 with the 12 counts in §7. Nothing in the copy was edited to make that happen.
+
+**And once for real**, on 2026-08-26, by `stem-workbench` — the first product to
+vendor this unit — from the pushed `v0.2.0` tarball on a machine with no clone
+of this repository. Same 50 paths, same 35 `: OK` twice, same 12 rows summing to
+1156, 70 s, exit 0. The four corrections above are what that copy found: §7's
+command as printed reaped a sibling agent's browser, §3's list was taken on
+trust, §5 verified 70% of the copy without saying which 70%, and the weights had
+no path into a copy at all. None of them stopped the copy; all four were
+invisible from inside this repository, which is the only reason a document like
+this gets a second author.
