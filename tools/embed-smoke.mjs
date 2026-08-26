@@ -49,6 +49,16 @@ if (!fs.existsSync(path.join(EXT, 'vendor', 'ort'))) {
 }
 
 let fails = 0, checks = 0;
+/**
+ * THE ASSERTION NAME STOPS AT TWO SPACES. `assertionNames()` in
+ * `tools/verify.mjs` splits each printed line on the first double space and
+ * keeps the left half as the name, which is what `coverageDrift()` diffs run to
+ * run. So a measured value — a tab id, an elapsed millisecond count, a pixel
+ * height — goes AFTER two spaces or the name churns on every run, and the first
+ * change that also moves the assertion COUNT gets those churning names reported
+ * as gone/added beside its real one. Three assertions in this file carried a
+ * measured value in the name until S4 moved them.
+ */
 const ok = (c, what) => { checks++; console.log(`${c ? 'ok  ' : 'FAIL'} ${what}`); if (!c) fails++; };
 
 /**
@@ -313,7 +323,10 @@ try {
   ok(await page.locator('#stem-splitter-live-deck').count() === 1, 'the arm gesture injected the deck into the page');
 
   const a = await sw.evaluate(async () => (await chrome.storage.session.get('session')).session || {});
-  ok(!!a.tabId, `...and armed the tab it was pressed in (tabId ${a.tabId})`);
+  // The tab id goes AFTER two spaces: `assertionNames()` in tools/verify.mjs cuts
+  // a name at the first double space, so a per-run value inside the name makes
+  // this assertion read as gone-and-added in every drift report that fires.
+  ok(!!a.tabId, `...and armed the tab it was pressed in  tabId ${a.tabId}`);
   /**
    * ONE DECK, ASSERTED WHERE A REGRESSION WOULD ACTUALLY SHOW.
    *
@@ -389,7 +402,8 @@ try {
     await page.waitForTimeout(16);
   }
   ok(deckBooted,
-    `the deck page's module finished booting inside the frame (${deckBooted ? `__embed present after ${bootMs} ms` : `NOT BOOTED — no __embed after ${bootMs} ms, gave up at the ${BOOT_BUDGET_MS} ms cap`}) — every assertion below reads state this module defines`);
+    'the deck page\'s module finished booting inside the frame — every assertion below reads state this module defines'
+    + `  ${deckBooted ? `__embed present after ${bootMs} ms` : `NOT BOOTED — no __embed after ${bootMs} ms, gave up at the ${BOOT_BUDGET_MS} ms cap`}`);
   const nStrips = await frame.locator('.strip').count();
   ok(deckBooted && nStrips === 6,
     `...and built six stem strips (${nStrips}) — read after the marker above, so a wrong count here is the RACK and never the clock`);
@@ -1472,7 +1486,8 @@ try {
    * would otherwise call that a perfect fit.
    */
   ok(bodyH > 0 && Math.abs(hFinal - bodyH) <= 1,
-    `the frame is exactly as tall as the deck (${hFinal} px frame, ${bodyH} px content, settled in ${settleMs} ms of ${SETTLE_BUDGET_MS}) — the host clamps at 900 and never scrolls`);
+    'the frame is exactly as tall as the deck — the host clamps at 900 and never scrolls'
+    + `  ${hFinal} px frame, ${bodyH} px content, settled in ${settleMs} ms of ${SETTLE_BUDGET_MS}`);
   ok(hFinal < 900, `...and inside the clamp with room to spare (${hFinal} px)`);
 
   // ===================================================== the armed-state gate
