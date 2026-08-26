@@ -94,7 +94,13 @@ extension, first. The extension's identity does not change.
    `docs/ARCHITECTURE.md`'s: the whole offscreen audio pipeline — the DSP
    modules in `extension/engine/`, the audio graph in `extension/offscreen/`
    (`deck.js`, `live.js`, `master.js`, `cacheddeck.js`, the worklet
-   processors), `extension/shared/` and `extension/workers/inference.worker.js`.
+   processors), `extension/shared/` and `extension/workers/` —
+   `inference.worker.js` and, since S6 (#8), `workerbackend.js`, the unit's own
+   implementation of the inference backend the Host hands over. Both worker
+   files are named here rather than left to a crawl because neither is reachable
+   by import from the unit's entry point: `inference.worker.js` is reached by
+   `new URL(..., import.meta.url)`, and `workerbackend.js` only by
+   `offscreen/host.js`, which is a declared Host hole.
    The deck is `extension/ui/embed*.js`. Everything that is not bound to
    `chrome.*` goes. The unit stays in this repository, gets a declared entry
    point and version tags, and the desktop repository vendors it by pinned tag

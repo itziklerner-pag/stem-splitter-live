@@ -2,25 +2,35 @@
  * Runnable checks for the non-trivial DSP. No browser, no framework, no deps.
  *
  *   node test.js            # everything
- *   node test.js ola wav    # just those groups
+ *   node test.js fft ring   # just those groups
  *
  * What is covered and why (CONTRIBUTING.md: "non-trivial logic leaves one runnable
  * check behind"):
  *
+ * THE GROUP NAMES BELOW ARE THE ONES `group()` ACTUALLY TESTS. Three names that
+ * were listed here for months — `ola`, `sum`, `wav` — belonged to no group at
+ * all, so `node test.js ola wav` printed `0 passed, 0 failed` and exited 0:
+ * `tools/verify.mjs`'s VOID rule calls that a hard failure for a suite, and a
+ * header that lies about its filters is how a run ends up asserting nothing
+ * while reporting success. Keep this list and `if (group('…'))` in step.
+ *
  *   window   the export window is upstream Demucs' triangular transition weight
- *   ola      weighted-overlap-add: normalised gain is exactly 1 (the WOLA
- *            equivalent of a COLA assertion), the chunk plan mirrors
- *            TensorChunk.padded/center_trim, and identity reconstruction is exact
- *   sum      all six stems summed reconstruct the mix through the whole OLA path
- *   wav      RIFF writer round-trips and matches the byte map in AUDIO.md §5.4
  *   fft      rfft agrees with a naive DFT; STFT/iSTFT round-trips
  *   ring     the SAB capture ring is lossless across wrap
  *   live     Mode 1: the causal chunk plan emits every sample exactly once, the
  *            crossfade reconstructs an identity model exactly, all twelve stem
- *            planes are sample-aligned, and the stem ring accounts for under-
- *            and overruns under a simulated slow producer
+ *            planes are sample-aligned, the stem ring accounts for under- and
+ *            overruns under a simulated slow producer, and neither a stop
+ *            mid-inference nor an L3 demotion leaves a scratch buffer detached
+ *   cache    the prime-then-play stem cache: keys, eviction, refusals, resume
  *   mix      fader law round trip, mute/solo truth table, per-sample gain
  *            smoothing settle time, soft clipper transfer function
+ *   xf       the crossfader: curves, targets, and the per-stem assignment
+ *   sched    Mode 3's L3 policy: who gives up the GPU, and who never does
+ *   dual     two decks on one GPU, end to end against a simulated clock
+ *   backend  the inference seam (S6): the serialising wrapper lets one
+ *            load()/separate() reach a backend at a time, in call order, and
+ *            the deck builds its own backend through it
  *   verifyModel  the model pin the UNIT keeps (S7): a mismatching buffer is
  *            refused naming both hashes, a truncated one naming both byte
  *            counts, the load policy re-fetches a corrupt stored copy exactly
@@ -98,7 +108,18 @@ import {
 
 let pass = 0, fail = 0;
 const only = process.argv.slice(2);
-const group = (n) => !only.length || only.includes(n);
+/**
+ * EVERY NAME `group()` IS ASKED ABOUT, whether or not it ran. It is what makes
+ * the two checks at the foot of this file possible: a filter that matches no
+ * group, and a header list that has drifted from the groups it describes. Both
+ * are the mechanism that let `ola`, `sum` and `wav` sit in that list for months
+ * while `node test.js ola wav` printed `0 passed, 0 failed` and exited 0 —
+ * verify.mjs's VOID rule wearing a summary line. Every `if (group('…'))` at top
+ * level is evaluated on every run, filter or no filter, so this set is complete
+ * by the time the checks read it.
+ */
+const known = new Set();
+const group = (n) => { known.add(n); return !only.length || only.includes(n); };
 
 function ok(name, cond, detail = '') {
   if (cond) { pass++; console.log(`  \x1b[32mPASS\x1b[0m ${name}${detail ? '  ' + detail : ''}`); }
@@ -667,12 +688,22 @@ if (group('live')) {
     const capRing = new RingConsumer(capSab, CAP);
     const sent = [];
     let detachOnly = false;
+    let demoteNext = false;
 
     const mount = () => {
       let lp;
       lp = new LivePipeline({
         ctx: () => null, ring: () => capRing,
         infer: async (mixBuf, outBuf) => {
+          /**
+           * THE DEMOTION PATH RETURNS BEFORE ANY TRANSFER, and that ordering is
+           * the whole of the invariant `Deck.infer` states. `gpu.run()` decides
+           * before it ever calls `fn`, and `fn` is what holds the postMessage.
+           * A fake that transferred here and then returned `{demoted:true}`
+           * would be modelling a backend that broke the contract — which is
+           * exactly the mutation the assertions below are watched red with.
+           */
+          if (demoteNext) return { demoted: true, why: 'L3 said this chunk cannot land in time' };
           // exactly postMessage-with-transferables: the originals detach here
           const mix = structuredClone(mixBuf, { transfer: [mixBuf] });
           const stems = structuredClone(outBuf, { transfer: [outBuf] });
@@ -718,6 +749,16 @@ if (group('live')) {
       // stop lands while the chunk is in flight — the exact poisoning sequence
       const realInfer = lp.d.infer;
       lp.d.infer = async (a, b) => { const r = await realInfer(a, b); lp.stopped = true; return r; };
+      /**
+       * `inFlight` IS SET THE WAY `pump()` SETS IT, and the two assertions below
+       * that read it are why. `runChunk` never raises the flag — `pump()` does,
+       * one line before it calls in (`live.js:863`) — so a suite that calls
+       * `runChunk` directly and then asserts `inFlight === false` is reading a
+       * field that was never true: it would pass on a build that had stopped
+       * clearing it at all, which is AGENTS.md's "passes because a value was
+       * never recorded". Raised here, the claim has something to observe.
+       */
+      lp.inFlight = true;
       await lp.runChunk(chunkPlan(0, lp.plan));
       quiesce(lp);
       // The model output buffer is STEMS.length x 2ch x SEGMENT floats: 16 511 040 B
@@ -752,6 +793,78 @@ if (group('live')) {
       try { await lp.runChunk(chunkPlan(0, lp.plan)); } catch (e) { threw2 = e; }
       quiesce(lp);
       ok('and the pipeline recovers on the next chunk', threw2 === null, threw2 ? String(threw2.message) : 'ok');
+    }
+
+    {
+      /**
+       * A DEMOTED CHUNK TRANSFERS NOTHING — the other half of the zero-copy
+       * contract, and until S6 it had no direct assertion anywhere.
+       *
+       * `deck.js`: "When demoted, mixBuf/outBuf are NEVER transferred, so the
+       * caller still owns them. That invariant is load-bearing — see
+       * LivePipeline.runChunk."  `live.js`, at the other end of the same fact:
+       * "NOTHING WAS TRANSFERRED — the scheduler returns before postMessage — so
+       * mixBuf/outBuf are still attached and must NOT be reallocated or
+       * reclaimed."
+       *
+       * WHAT USED TO COVER IT AND WHY THAT WAS NOT ENOUGH. The `sched` group
+       * asserts `ran === false` on the SCHEDULER, which is the mechanism — that
+       * a demoted call never reaches `fn`. Nothing drove `runChunk` through a
+       * demotion and then looked at the buffers, so the consequence — a deck
+       * that goes permanently silent, once per capture tick, for ever — rested
+       * on reading two comments and believing them. S6 moved the transfer into
+       * `workers/workerbackend.js`, which is precisely the edit that could have
+       * broken it silently.
+       *
+       * The assertions are byteLengths and a count. A detached ArrayBuffer reads
+       * 0, so this cannot be satisfied by a pipeline that reallocated: the
+       * REALLOCATED pair reads the same lengths, which is why the third
+       * assertion (the next chunk runs) is here as well — a reallocation is only
+       * distinguishable from a survival by what happens next.
+       */
+      const lp = mount();
+      demoteNext = true;
+      const mixBefore = lp.mixBuf;
+      const outBefore = lp.outBuf;
+      // Raised the way `pump()` raises it — see the note in the first block.
+      // Without this the `inFlight` half of the third assertion below inspects a
+      // field that was never set, and passes on a demotion that wedges the deck.
+      lp.inFlight = true;
+      let threw = null;
+      try { await lp.runChunk(chunkPlan(0, lp.plan)); } catch (e) { threw = e; }
+      demoteNext = false;
+      quiesce(lp);
+      ok('a DEMOTED chunk leaves both scratch buffers attached — nothing was transferred, so nothing may be reclaimed',
+        threw === null && lp.mixBuf.byteLength === 2 * SEGMENT * 4
+        && lp.outBuf.byteLength === STEMS.length * 2 * SEGMENT * 4,
+        threw
+          ? `runChunk threw on a demotion: ${threw.message} — a demotion is not an error and must not reach the CHUNK_FAILED ladder`
+          : `mixBuf ${lp.mixBuf.byteLength} B, outBuf ${lp.outBuf.byteLength} B of ${STEMS.length * 2 * SEGMENT * 4} (0 = detached)`);
+      ok('...and they are THE SAME buffers, not a fresh pair — the once-per-session allocation is what a demotion must not cost',
+        lp.mixBuf === mixBefore && lp.outBuf === outBefore,
+        lp.mixBuf === mixBefore && lp.outBuf === outBefore
+          ? '19.4 MB kept, 0 B allocated'
+          : 'the pipeline reallocated on a path where nothing was transferred — 19.4 MB of garbage per demoted hop');
+      /**
+       * `inFlight` IS IN THE CONDITION, not only in the detail. `pump()` returns
+       * early on `if (this.inFlight) return;`, and a demotion throws nothing —
+       * so a demotion that left the flag set stops the deck for the rest of the
+       * session with no CHUNK_FAILED, no ladder and no log: the same silent
+       * stall this block exists to cover, one line above the counter. It was
+       * printed here and not asserted, and deleting `this.inFlight = false` from
+       * live.js's demotion branch left `node test.js live` at 186 passed.
+       */
+      ok('...and the demotion is counted rather than thrown, and clears inFlight, so the ladder never sees it and pump() is not wedged',
+        lp.demotions === 1 && lp.inFlight === false,
+        `${lp.demotions} demotion(s), inFlight ${lp.inFlight}`);
+      // A demotion does not advance `k` — the chunk was never separated — so the
+      // realistic next call is the SAME chunk, which is also the one that reads
+      // `new Float32Array(this.mixBuf)` on its first line.
+      let threw2 = null;
+      try { await lp.runChunk(chunkPlan(0, lp.plan)); } catch (e) { threw2 = e; }
+      quiesce(lp);
+      ok('...and the NEXT chunk still runs — this is what a transfer on the demotion path costs, once per capture tick for ever',
+        threw2 === null, threw2 ? String(threw2.message) : 'ok');
     }
 
     head('live — a silenced passthrough span is still COUNTED (QA-15 requirement 2)');
@@ -4488,7 +4601,7 @@ if (group('host')) {
    */
   const {
     assertHost, assertHostOption,
-    ENGINE_HOST_DUTIES, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+    ENGINE_HOST_DUTIES, BACKEND_DUTIES, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
   } = await import('./extension/shared/host.js');
   const engineHost = await import('./extension/offscreen/host.js');
   const duties = Object.keys(ENGINE_HOST_DUTIES);
@@ -4645,12 +4758,25 @@ if (group('host')) {
    * declared but never used is one more thing a second Host must implement for
    * nothing.
    *
-   * Matched as CALLS (`host.x(`) rather than as any `host.x`, because
-   * `import * as host from './host.js'` would otherwise contribute a duty named
-   * `js`.
+   * TWO SHAPES, because a duty can be reached for in two ways and S6 added the
+   * second. A CALL is `host.x(`. A HAND-OFF is `host.x` passed by reference —
+   * `assetUrl: host.assetUrl` and `createBackend: host.createBackend` on the
+   * `shared` bundle, `new MasterBus(null, host.assetUrl)`.
+   *
+   * WHAT THE SECOND SHAPE ACTUALLY ADDED, measured rather than described:
+   * exactly one name, `createBackend`. `assetUrl` was already in the calls-only
+   * set — `engine.js` both hands it off AND calls it, at
+   * `host.assetUrl('offscreen/capture-processor.js')` — so it is `createBackend`
+   * alone that the engine never calls through the namespace, and a calls-only
+   * scan reports it, and only it, as dead code.
+   *
+   * The hand-off pattern requires a `,`/`)`/`]`/`}` after the identifier rather
+   * than matching any `host.x`, because `import * as host from './host.js'`
+   * would otherwise contribute a duty named `js`.
    */
   const dutyCalls = (src) => [...src.matchAll(/\bhost\.(\w+)\s*\(/g)].map((m) => m[1]);
-  const reached = [...new Set(unitSrcs.flatMap(dutyCalls))].sort();
+  const dutyRefs = (src) => [...src.matchAll(/\bhost\.(\w+)(?=\s*[,)\]}])/g)].map((m) => m[1]);
+  const reached = [...new Set(unitSrcs.flatMap((src) => [...dutyCalls(src), ...dutyRefs(src)]))].sort();
   const undeclared = reached.filter((k) => !duties.includes(k));
   // FAILS IF IT CANNOT LOOK: a walk that returned nothing, or one that lost the
   // two files known to reach for a duty, would otherwise report a clean seam
@@ -5040,7 +5166,7 @@ if (group('host')) {
     const dirCall = probe(engineHost.assetUrl, 'vendor/ort/');
     const dirUrl = dirCall.v;
     ok('...AND A PATH ENDING IN `/` COMES BACK AS A DIRECTORY URL, trailing slash intact  '
-      + '[entry point: extension/offscreen/host.js assetUrl(), reached from deck.js ensureWorker() as the '
+      + '[entry point: extension/offscreen/host.js assetUrl(), reached from workerbackend.js spawn() as the '
       + "worker's INIT wasmDirUrl]",
       dirCall.ok && typeof dirUrl === 'string' && dirUrl.endsWith('/vendor/ort/'),
       !dirCall.ok
@@ -5202,7 +5328,7 @@ if (group('host')) {
     /**
      * THE ONE DUTY OF THE THREE THAT MAY NOT REJECT. Storage can be unavailable
      * — blocked, partitioned, or a context that never had it — and `modelCached`
-     * is awaited by `engine.js`'s STATUS case BEFORE `ensureWorker()`,
+     * is awaited by `engine.js`'s STATUS case BEFORE `ensureBackend()`,
      * `echoXf()` and `push()`. A rejection there does not paint a model error:
      * it abandons the rest of the case and lands in `handle()`'s catch, which
      * writes `state.job.error`, a field nothing reads. The deck stays blank.
@@ -5219,7 +5345,179 @@ if (group('host')) {
       unsure.ok === true && unsure.v === false,
       unsure.ok
         ? `storage that throws -> ${unsure.v}, so the user is offered a download rather than shown nothing`
-        : `it rejected instead: ${unsure.e} — engine.js awaits this before ensureWorker/echoXf/push`);
+        : `it rejected instead: ${unsure.e} — engine.js awaits this before ensureBackend/echoXf/push`);
+
+    /**
+     * ---------------------------------------------------------------------
+     * createBackend() — S6, and the one duty whose RETURN VALUE the unit calls
+     * ---------------------------------------------------------------------
+     *
+     * The seam here is the AUDIO level (seed §16, option S2): the Host decides
+     * WHICH engine separates a segment, and under this Host there is one to
+     * decide between. So what is worth an assertion is not the choice — it is
+     * the two properties a plausible second Host gets wrong for free.
+     *
+     * DRIVEN, NOT IMITATED, like every duty in this block: the shipped
+     * `offscreen/host.js` builds the shipped `workers/workerbackend.js` over a
+     * stubbed `Worker` and `fetch`, so the INIT that comes out carries the
+     * shipped `chrome.runtime.getURL`. The `assetUrl` assertions above hold that
+     * resolver to the trailing-slash rule; this one holds the HAND-OFF, which is
+     * a separate step with a separate way to be lost — `new WorkerBackend({
+     * ...hooks })` without it is a Host that satisfies every check above and a
+     * backend that cannot find ORT.
+     *
+     * The platform stubs are LOCAL and restored immediately, because the model
+     * duties above count `fetch` calls and the backend's ORT probe is one.
+     */
+    const spawnedByHost = [];
+    const readies = [];
+    const fails = [];
+    const stubbedFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    let backends = null;
+    let backendWhy = null;
+    try {
+      globalThis.Worker = class {
+        constructor(url) { this.url = String(url); this.onmessage = null; this.onerror = null; spawnedByHost.push(this); }
+        postMessage(m) { (this.posts || (this.posts = [])).push(m); }
+        terminate() { this.terminated = true; }
+      };
+      Object.defineProperty(globalThis, 'fetch', {
+        value: async () => ({ ok: true }), configurable: true, writable: true,
+      });
+      /**
+       * THE HOOKS GO THROUGH THE HOST, NOT AROUND IT. This block used to call
+       * `createBackend({})`, and the `backend` group builds `new WorkerBackend`
+       * itself — so the `...hooks` spread in `offscreen/host.js`, the one line
+       * that carries them across, was covered by nothing. Review measured it:
+       * `new WorkerBackend({ assetUrl })` left `node test.js` at 602 passed and
+       * `embed-smoke` at 130/130.
+       *
+       * It is the one part of this duty `assertHost(backend, BACKEND_DUTIES)`
+       * cannot reach — a backend short a hook owes every declared duty — and
+       * losing it costs both things that arrive OUTSIDE a call the unit made:
+       * `state.boot.{adapter,threads}` never populates, and an idle backend
+       * death is silent until the next arm.
+       */
+      const first = probe(engineHost.createBackend, {
+        name: 'deck A',
+        onReady: (info) => readies.push(info),
+        onFail: (e) => fails.push(e.message),
+      });
+      /**
+       * AND A CALLER DOES NOT GET TO NAME THE HOST'S RESOLVER. `assetUrl` is
+       * applied AFTER the spread for this reason: it is the Host's one
+       * non-negotiable input, and a `hooks` object carrying that key would
+       * otherwise take over where the unit's files live. Unreachable through the
+       * declared hook type today, which is why it is asserted rather than
+       * assumed to stay that way.
+       */
+      const second = probe(engineHost.createBackend, { assetUrl: () => 'stolen://elsewhere/' });
+      if (first.ok && second.ok) backends = [first.v, second.v];
+      else backendWhy = first.ok ? second.e : first.e;
+      /**
+       * Then drive the two things the WORKER originates. Both are one-way: the
+       * backend is the only thing listening, and the deck is the only thing
+       * behind it.
+       */
+      if (spawnedByHost.length && spawnedByHost[0].onmessage) {
+        spawnedByHost[0].onmessage({ data: { type: 'READY', numThreads: 4, adapter: { vendor: 'nvidia', architecture: 'turing' } } });
+      }
+      // The EMPTY message is the shape a module worker that cannot resolve its
+      // static import actually fires, and `name` is what turns it into a
+      // sentence — so this half asserts the `name` hook crossed as well.
+      if (spawnedByHost.length && spawnedByHost[0].onerror) spawnedByHost[0].onerror({ message: '' });
+    } finally {
+      delete globalThis.Worker;
+      if (stubbedFetch) Object.defineProperty(globalThis, 'fetch', stubbedFetch);
+    }
+
+    const initFromHost = spawnedByHost.length ? (spawnedByHost[0].posts || []).find((m) => m && m.type === 'INIT') : null;
+    const shortDuty = backends
+      ? Object.keys(BACKEND_DUTIES).filter((k) => typeof backends[0][k] !== 'function')
+      : Object.keys(BACKEND_DUTIES);
+    ok('createBackend() HANDS BACK A BACKEND THAT OWES EVERY DECLARED DUTY, WITH THIS HOST’S RESOLVER ALREADY IN IT  '
+      + '[entry point: extension/offscreen/host.js createBackend(), reached from deck.js Deck.ensureBackend()]',
+      backends != null && shortDuty.length === 0
+      && spawnedByHost.length === 2 && initFromHost != null
+      && initFromHost.wasmDirUrl.endsWith('/vendor/ort/'),
+      backends == null
+        ? `createBackend() could not be called at all: ${backendWhy}`
+        : shortDuty.length
+          ? `the backend is short ${shortDuty.join(', ')} — Deck.ensureBackend() refuses it, but only at the first arm`
+          : spawnedByHost.length !== 2
+            ? `${spawnedByHost.length} worker(s) were spawned by two createBackend() calls`
+            : initFromHost == null
+              ? 'the backend posted no INIT, so nothing was told where the ORT runtime lives'
+              : `${Object.keys(BACKEND_DUTIES).length} duties, INIT wasmDirUrl ${initFromHost.wasmDirUrl}`);
+
+    /**
+     * A FRESH INSTANCE PER CALL, AND THE WORKER COUNT IS WHAT SAYS SO.
+     *
+     * Memoising is the obvious optimisation and it is the one shape this duty
+     * must never take: two decks sharing one worker is two ORT sessions on one
+     * wasm instance, and a concurrent `run()` there PERMANENTLY WEDGES both
+     * (`offscreen/deck.js` header, `engine/scheduler.js:19-23`,
+     * `workers/inference.worker.js:10-12`). Nothing else in this tree would
+     * notice: one deck ships, so a memoised backend is correct in every gate and
+     * a grenade the moment deck B is armed.
+     *
+     * BOTH HALVES, because either alone can be satisfied by the wrong thing: two
+     * distinct wrappers over one worker still share the wasm instance, and two
+     * workers reached through one object is not a shape anything here builds.
+     */
+    ok('...and a FRESH one every call — two decks must never share a wasm instance  '
+      + '[entry point: extension/offscreen/host.js createBackend()]',
+      backends != null && backends[0] !== backends[1]
+      && spawnedByHost.length === 2 && spawnedByHost[0] !== spawnedByHost[1],
+      backends == null
+        ? `createBackend() could not be called at all: ${backendWhy}`
+        : backends[0] === backends[1]
+          ? 'two calls returned THE SAME backend — deck B would drive deck A’s ORT session and wedge both'
+          : `2 calls, 2 backends, ${spawnedByHost.length} worker(s)`);
+
+    /**
+     * ...AND THE UNIT'S HOOKS REACH THE BACKEND THE HOST BUILT.
+     *
+     * Both halves in one assertion because they are one line's worth of
+     * behaviour — the spread either happened or it did not — and because each
+     * alone is satisfiable by the wrong thing: a Host that forwarded `onReady`
+     * and dropped `onFail` still loses the death, and one that forwarded the
+     * callbacks and dropped `name` reports the death without saying whose.
+     */
+    const readyInfo = readies.length === 1 ? readies[0] : null;
+    ok('...and the UNIT\u2019S HOOKS REACH IT — a backend that owes every duty and answers to nobody is the one shape assertHost cannot refuse  '
+      + '[entry point: extension/offscreen/host.js createBackend(), the hooks deck.js Deck.ensureBackend() hands it]',
+      readyInfo != null && readyInfo.threads === 4
+      && readyInfo.adapter != null && readyInfo.adapter.vendor === 'nvidia'
+      && fails.length === 1 && fails[0].includes('deck A'),
+      readies.length !== 1
+        ? `the worker announced READY and the unit heard it ${readies.length} time(s) — state.boot.{adapter,threads} `
+          + 'never populates, so the deck reports no hardware at all'
+        : readyInfo.threads !== 4 || !readyInfo.adapter
+          ? `onReady arrived carrying ${JSON.stringify(readyInfo)}`
+          : fails.length !== 1
+            ? 'the worker DIED and the unit was never told — the deck goes on reporting a session it no longer has '
+              + 'until the next arm, which is the whole reason onFail exists'
+            : !fails[0].includes('deck A')
+              ? `onFail arrived without the name it was given: ${fails[0]}`
+              : `onReady{threads 4, gpu nvidia/turing} and onFail "${fails[0]}"`);
+
+    /**
+     * ...AND THE HOST'S OWN RESOLVER SURVIVED A CALLER THAT TRIED TO SUPPLY ONE.
+     * Read off the SECOND worker, which is the one built from the hostile hooks
+     * object; the first one's INIT is asserted above and would not move.
+     */
+    const initSecond = spawnedByHost.length > 1 ? (spawnedByHost[1].posts || []).find((m) => m && m.type === 'INIT') : null;
+    ok('...and a hooks object CANNOT REPLACE THE HOST\u2019S RESOLVER — where the unit\u2019s files live is the Host\u2019s answer  '
+      + '[entry point: extension/offscreen/host.js createBackend()]',
+      initSecond != null && initSecond.wasmDirUrl.endsWith('/vendor/ort/')
+      && !String(initSecond.wasmDirUrl).startsWith('stolen://'),
+      initSecond == null
+        ? 'the second backend posted no INIT, so this inspected nothing'
+        : String(initSecond.wasmDirUrl).startsWith('stolen://')
+          ? `the caller\u2019s assetUrl won: INIT wasmDirUrl ${initSecond.wasmDirUrl} — the unit now decides where the Host `
+            + 'keeps the ORT runtime'
+          : `INIT wasmDirUrl ${initSecond.wasmDirUrl}`);
   } finally {
     delete globalThis.chrome;
     delete globalThis.addEventListener;
@@ -6075,42 +6373,75 @@ if (group('host')) {
 
     // ------------------------------------------------------- the ORT runtime
     /**
-     * THE INFERENCE WORKER'S TWO URLS, WHICH ARE NOT THE SAME KIND OF THING.
+     * THE INFERENCE BACKEND'S TWO URLS, WHICH ARE NOT THE SAME KIND OF THING.
      *
      * `vendor/ort/` and the probe that names it are FILES ON DISK, so they go
      * through the Host. The worker module itself is reached by
      * `new URL(..., import.meta.url)` and must not — see the note in
-     * `ensureWorker()`. Both halves are asserted, because "thread everything
-     * through the Host" and "thread the RIGHT things through the Host" fail
-     * differently: the second is a Host handed authority over the unit's own
-     * directory layout, and it would go unnoticed under this Host, where the two
-     * answers happen to agree.
+     * `workers/workerbackend.js`. Both halves are asserted, because "thread
+     * everything through the Host" and "thread the RIGHT things through the
+     * Host" fail differently: the second is a Host handed authority over the
+     * unit's own directory layout, and it would go unnoticed under this Host,
+     * where the two answers happen to agree.
+     *
+     * S6 MOVED BOTH URLS ONE MODULE DOWN, from `offscreen/deck.js` into the
+     * backend, and this block follows them rather than being rewritten around
+     * the seam: the deck is still the entry point, the drive is still
+     * `Deck.ensureSession()`, and the only difference is that `createBackend` on
+     * the `shared` bundle is now what decides which backend gets built.
      */
     const { Deck } = await import('./extension/offscreen/deck.js');
+    const { WorkerBackend } = await import('./extension/workers/workerbackend.js');
     const posts = [];
     const spawned = [];
     const fetched = [];
+    const deckLog = [];
+    const mirrored = [];
     const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
     let deckWhy = null;
+    let deck = null;
     try {
       globalThis.Worker = class {
-        constructor(url, opts) { this.url = String(url); this.opts = opts; spawned.push(this); }
-        postMessage(m) { posts.push(m); }
+        constructor(url, opts) {
+          this.url = String(url); this.opts = opts; this.onmessage = null; this.onerror = null;
+          spawned.push(this);
+        }
+        // The TRANSFER LIST is recorded, not just the message: it is the whole
+        // of the difference between moving 109 MB and copying it, and nothing
+        // else in the tree looks at it.
+        postMessage(m, transfer) { posts.push({ m, transfer: transfer || [] }); }
         terminate() {}
       };
       globalThis.fetch = (url, init) => {
         fetched.push({ url: String(url), method: init && init.method });
         return Promise.resolve({ ok: true });
       };
-      const d = new Deck('A', {
+      deck = new Deck('A', {
         ctx: () => null, master: () => null, gpu: null,
         modelBytes: async () => new ArrayBuffer(8),
-        send: () => {}, log: () => {}, armRefMs: () => 0, assetUrl,
+        // The REAL backend over the stub resolver, hooks-first exactly as the
+        // shipped `offscreen/host.js` builds it. This block's subject is where
+        // the two URLs come from, and a fake backend would be answering that
+        // question about itself.
+        createBackend: (hooks) => new WorkerBackend({ ...hooks, assetUrl }),
+        send: () => {}, log: (line) => deckLog.push(line), armRefMs: () => 0, assetUrl,
+        // The engine's mirror to the UI, recorded rather than stubbed away: it
+        // is the only route from the deck's session state to `state.model`, so
+        // a hook that updates the deck and tells nobody is still a welcome page
+        // stuck on "preparing the GPU".
+        onWorkerState: (d) => mirrored.push({ session: d.session, threads: d.threads, adapter: d.adapter, error: d.sessionError }),
       });
-      const session = d.ensureSession();
-      // LOAD_MODEL is posted after two awaits; nothing here may assume how many.
-      for (let i = 0; i < 200 && !d.sessionReady; i++) await new Promise((r) => setTimeout(r, 0));
-      if (d.sessionReady) d.onWorker({ type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 });
+      const session = deck.ensureSession();
+      // LOAD_MODEL is posted after three awaits — the model bytes, the ORT
+      // probe, and the queue the backend is wrapped in — and nothing here may
+      // assume how many. Drive the loop until the message appears.
+      const sentTypes = () => posts.map((p) => p.m && p.m.type);
+      for (let i = 0; i < 200 && !sentTypes().includes('LOAD_MODEL'); i++) {
+        await new Promise((r) => setTimeout(r, 0));
+      }
+      if (spawned.length === 1 && spawned[0].onmessage) {
+        spawned[0].onmessage({ data: { type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 } });
+      }
       deckWhy = await drive(session);
     } finally {
       delete globalThis.Worker;
@@ -6119,19 +6450,19 @@ if (group('host')) {
     }
 
     ok('THE ORT PRESENCE PROBE IS RESOLVED THROUGH THE HOST, and it is still a HEAD  '
-      + '[entry point: extension/offscreen/deck.js Deck.ensureSession(), reached from LIVE_START and DECK_PREPARE]',
+      + '[entry point: extension/workers/workerbackend.js constructor, reached from Deck.ensureBackend()]',
       fetched.length === 1 && fetched[0].url === 'stub://unit/vendor/ort/ort.all.bundle.min.mjs'
       && fetched[0].method === 'HEAD',
       fetched.length === 0
-        ? `ensureSession() never reached the probe, so this inspected nothing: ${deckWhy}`
+        ? `the backend never reached the probe, so this inspected nothing: ${deckWhy}`
         : JSON.stringify(fetched));
 
-    const init = posts.find((m) => m && m.type === 'INIT');
+    const init = posts.map((p) => p.m).find((m) => m && m.type === 'INIT');
     ok('...and the worker is told where the ORT runtime lives as a DIRECTORY url from the Host  '
-      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker(), reached from ensureSession()]',
+      + '[entry point: extension/workers/workerbackend.js constructor, reached from Deck.ensureBackend()]',
       init != null && init.wasmDirUrl === 'stub://unit/vendor/ort/' && init.wasmDirUrl.endsWith('/'),
       init == null
-        ? `no INIT was posted, so this inspected nothing: ${deckWhy}. Posted: ${posts.map((m) => m && m.type).join(', ')}`
+        ? `no INIT was posted, so this inspected nothing: ${deckWhy}. Posted: ${posts.map((p) => p.m && p.m.type).join(', ')}`
         : String(init.wasmDirUrl));
 
     /**
@@ -6143,7 +6474,7 @@ if (group('host')) {
      */
     const workerUrl = spawned.length === 1 ? spawned[0].url : null;
     ok("THE INFERENCE WORKER'S OWN URL STAYS RELATIVE — the unit's directory layout is the unit's contract, not the Host's  "
-      + '[entry point: extension/offscreen/deck.js Deck.ensureWorker()]',
+      + '[entry point: extension/workers/workerbackend.js constructor]',
       workerUrl != null && workerUrl.endsWith('/extension/workers/inference.worker.js')
       && !asked.some((p) => /worker/i.test(p)),
       spawned.length !== 1
@@ -6152,6 +6483,133 @@ if (group('host')) {
           ? `the Host was asked to resolve ${JSON.stringify(asked.filter((p) => /worker/i.test(p)))} — `
             + 'a Host that answers that owns where the unit keeps its own files'
           : workerUrl);
+
+    /**
+     * AND THE WEIGHTS ARE MOVED, NOT COPIED — the half of the zero-copy contract
+     * that is paid once per deck rather than once per hop, and the only one that
+     * `LOAD_MODEL` carries.
+     *
+     * 114,559,139 B copied instead of transferred is 109 MB duplicated across a
+     * thread boundary at the exact peak-memory moment: FINDINGS §3 measured
+     * 1761 MB renderer RSS with the duplicate resident, and review finding M4 is
+     * the same buffer being held one reference too long inside the worker. The
+     * TRANSFER LIST is the only thing that decides it, and a `postMessage` that
+     * dropped it is invisible to every other assertion in this tree — the
+     * message arrives, the session loads, and the deck goes green.
+     */
+    const loadPost = posts.find((p) => p.m && p.m.type === 'LOAD_MODEL');
+    ok('THE MODEL BUFFER IS TRANSFERRED INTO THE BACKEND, NOT COPIED  '
+      + '[entry point: extension/workers/workerbackend.js load(), reached from Deck.ensureSession()]',
+      loadPost != null && loadPost.m.buffer instanceof ArrayBuffer
+      && loadPost.transfer.length === 1 && loadPost.transfer[0] === loadPost.m.buffer,
+      loadPost == null
+        ? `no LOAD_MODEL was posted, so this inspected nothing: ${deckWhy}`
+        : loadPost.transfer.length !== 1
+          ? `LOAD_MODEL was posted with a transfer list of ${loadPost.transfer.length} — 109 MB is copied, not moved`
+          : loadPost.transfer[0] !== loadPost.m.buffer
+            ? 'LOAD_MODEL transfers something other than the buffer it carries'
+            : 'the weights buffer is the transfer list');
+
+    ok('...and the deck ends `ready` on MODEL_READY, carrying the EP the backend reported  '
+      + '[entry point: extension/offscreen/deck.js Deck.ensureSession()]',
+      deckWhy === null && deck != null && deck.session === 'ready' && deck.ep === 'stub',
+      deckWhy !== null
+        ? `ensureSession() rejected: ${deckWhy}`
+        : `session ${deck && deck.session}, ep ${JSON.stringify(deck && deck.ep)}`);
+
+    /* ------------------------------------ what the deck DOES with the hooks */
+    /**
+     * THE PUSH CHANNEL, DRIVEN FROM THE WORKER END.
+     *
+     * `onReady` and `onFail` are the two things that arrive OUTSIDE any call the
+     * unit made, and the bodies the deck hands `createBackend()` are where they
+     * become deck state. They were the newest non-trivial logic in this slice
+     * and nothing looked at them: review deleted the whole `onFail` body — the
+     * `session = 'error'` latch, `sessionError`, the log line and the
+     * `onWorkerState` mirror — and `node test.js` stayed at 602 passed, 0
+     * failed. Same for `onReady` writing `null` to both fields.
+     *
+     * The same `Deck` from the block above is used, and the same worker: the
+     * stub's handlers are still attached after the platform globals are gone,
+     * because the backend set them and nothing else did. That is what makes
+     * this the DECK'S side of the seam rather than a second harness — the
+     * `backend` group already asserts that `WorkerBackend` CALLS the hooks.
+     *
+     * WHAT GOES RED IF IT REGRESSES: `engine.js`'s `onWorkerState` turns
+     * `d.session === 'error'` into `state.model.status = 'error'`, and the
+     * comment there records what the missing half cost — the welcome page "sat
+     * on 'preparing the GPU' with a live progress bar and no way to find out
+     * that it had already failed".
+     */
+    const readyAt = mirrored.length;
+    if (spawned.length === 1 && spawned[0].onmessage) {
+      spawned[0].onmessage({ data: { type: 'READY', numThreads: 4, adapter: { vendor: 'nvidia', architecture: 'turing' } } });
+    }
+    const readyMirror = mirrored.length > readyAt ? mirrored[mirrored.length - 1] : null;
+    const readyLine = deckLog.find((l) => l.includes('backend ready')) || null;
+    ok('THE BACKEND\u2019S READY REACHES THE DECK: the hardware it found is recorded AND mirrored to the UI  '
+      + '[entry point: the createBackend() `onReady` hook in extension/offscreen/deck.js ensureBackend()]',
+      deck != null && deck.threads === 4
+      && deck.adapter != null && deck.adapter.vendor === 'nvidia' && deck.adapter.architecture === 'turing'
+      && readyMirror != null && readyMirror.threads === 4
+      && readyLine === 'deck A backend ready \u00b7 wasm threads 4 \u00b7 gpu nvidia/turing',
+      deck == null
+        ? 'there is no deck to look at'
+        : deck.threads !== 4 || deck.adapter == null
+          ? `the deck recorded threads ${JSON.stringify(deck.threads)} and adapter ${JSON.stringify(deck.adapter)} — `
+            + 'state.boot.{adapter,threads} is fed from these, so the deck reports no hardware at all'
+          : readyMirror == null
+            ? 'the deck recorded it and told nobody: onWorkerState never fired, so state.boot never learns'
+            : `${JSON.stringify(readyLine)}`);
+
+    /**
+     * ...AND A BACKEND WITH NEITHER TO REPORT IS NOT DESCRIBED IN ORT'S WORDS.
+     * `{threads: null, adapter: null}` is the only honest answer a native
+     * backend (CoreML, DirectML, CUDA) can give, and the pre-seam spelling of
+     * this line rendered it as "wasm threads null \u00b7 gpu none" — someone
+     * else's hardware, reported to a user who has better. The fields stay as
+     * they are (S11 freezes the interface); the render stops claiming.
+     */
+    const linesBefore = deckLog.length;
+    if (spawned.length === 1 && spawned[0].onmessage) {
+      spawned[0].onmessage({ data: { type: 'READY', numThreads: null, adapter: null } });
+    }
+    const bareLine = deckLog.length > linesBefore ? deckLog[deckLog.length - 1] : null;
+    ok('...and a backend that reports NEITHER threads nor an adapter is not described in ORT\u2019s vocabulary  '
+      + '[entry point: the createBackend() `onReady` hook in extension/offscreen/deck.js ensureBackend()]',
+      bareLine === 'deck A backend ready' && deck != null && deck.threads === null && deck.adapter === null,
+      bareLine == null
+        ? 'the second READY was not logged at all, so this inspected nothing'
+        : bareLine !== 'deck A backend ready'
+          ? `a backend with no wasm and no WebGPU adapter is announced as ${JSON.stringify(bareLine)}`
+          : `deck threads ${JSON.stringify(deck.threads)}, adapter ${JSON.stringify(deck.adapter)}, line ${JSON.stringify(bareLine)}`);
+
+    /**
+     * AND THE DEATH WITH NOTHING IN FLIGHT LATCHES THE SESSION. This is the
+     * regression the hook exists to prevent, stated by the PR as the reason it
+     * is there at all: without it the deck goes on reporting a session it no
+     * longer has until the next arm. An EMPTY `onerror` message is the exact
+     * shape a module worker that cannot resolve its static import fires.
+     */
+    const failAt = mirrored.length;
+    if (spawned.length === 1 && spawned[0].onerror) spawned[0].onerror({ message: '' });
+    const failMirror = mirrored.length > failAt ? mirrored[mirrored.length - 1] : null;
+    const errLine = deckLog.find((l) => l.startsWith('ERROR [deck A backend]')) || null;
+    ok('...and A BACKEND THAT DIES IDLE LATCHES THE SESSION AS `error`, WITH THE REASON, AND SAYS SO  '
+      + '[entry point: the createBackend() `onFail` hook in extension/offscreen/deck.js ensureBackend()]',
+      deck != null && deck.session === 'error'
+      && typeof deck.sessionError === 'string' && deck.sessionError.includes('deck A')
+      && failMirror != null && failMirror.session === 'error' && errLine != null,
+      deck == null
+        ? 'there is no deck to look at'
+        : deck.session !== 'error'
+          ? `the deck still reports session ${JSON.stringify(deck.session)} after its backend died — engine.js turns `
+            + "d.session === 'error' into state.model.status, so the welcome page sits on \"preparing the GPU\" for ever"
+          : !deck.sessionError || !deck.sessionError.includes('deck A')
+            ? `the session failed with no usable reason: ${JSON.stringify(deck.sessionError)}`
+            : failMirror == null
+              ? 'the deck latched the error and told nobody: onWorkerState never fired, so state.model.status never moves'
+              : `session ${deck.session}, sessionError ${JSON.stringify(deck.sessionError)}, logged ${JSON.stringify(errLine)}`);
 
     // ------------------------------------------- and nothing reaches past it
     /**
@@ -6248,7 +6706,7 @@ if (group('host')) {
      * hole exactly: delete the single line `assetUrl: host.assetUrl` from the
      * `shared` bundle and `--quick` stays GREEN at 18 of 20 steps and
      * `embed-smoke` stays at 122/122, while the shipped extension dies at
-     * module evaluation — `engine.js` calls `decks.A.ensureWorker()` at module
+     * module evaluation — `engine.js` calls `decks.A.ensureBackend()` at module
      * scope and it throws `this.s.assetUrl is not a function`. No INIT, no
      * HELLO, no engine, and nothing red anywhere. That is the exact shape
      * AGENTS.md names as the source of five defects here: a value right at four
@@ -6287,7 +6745,7 @@ if (group('host')) {
         ? 'cannot look: no `const shared = {` in extension/offscreen/engine.js, so there is no bundle to inspect'
         : !onBundle
           ? 'the `shared` bundle does NOT carry `assetUrl: host.assetUrl`. Every deck then reads undefined: '
-            + 'engine.js calls decks.A.ensureWorker() at module scope, so the engine does not boot at all — no INIT '
+            + 'engine.js calls decks.A.ensureBackend() at module scope, so the engine does not boot at all — no INIT '
             + 'to the inference worker and no HELLO to the deck'
           : takers.length !== constructions
             ? `cannot look: ${constructions} deck constructions in engine.js but only ${takers.length} could be read, `
@@ -6334,9 +6792,29 @@ if (group('host')) {
       shortLive != null && shortLive.includes('assetUrl'),
       shortLive == null
         ? 'new Deck(id, {…no assetUrl}) was ACCEPTED. The deck then reads undefined and throws `this.s.assetUrl is not '
-          + 'a function` inside ensureWorker(), three layers from the mistake — and because that construction is at '
+          + 'a function` inside ensureBackend(), three layers from the mistake — and because that construction is at '
           + 'engine.js module scope, the browser gate is the only thing that could have seen it'
         : shortLive);
+
+    /**
+     * AND THE SAME HOLE ONE DUTY OVER. S6 threads `createBackend` onto the same
+     * bundle by the same one line, so it has the same way to be lost and the
+     * same silence when it is: `assertHost` is satisfied, every check in this
+     * file is green, and `decks.A.ensureBackend()` — at engine.js module scope —
+     * dies with `this.s.createBackend is not a function`. A deck with no way to
+     * build a backend has no second path to inference, so this is a refusal
+     * rather than a degradation.
+     */
+    const noBackend = threw(() => new Deck('A', {
+      ctx: () => null, master: () => null, send: () => {}, log: () => {}, assetUrl,
+    }));
+    ok('...AND ONE THAT IS SHORT THE HOST\'S BACKEND FACTORY, which has no fallback at all  '
+      + "[entry point: extension/offscreen/deck.js constructor — `new Deck('A', shared)` runs at engine.js module scope]",
+      noBackend != null && noBackend.includes('createBackend'),
+      noBackend == null
+        ? 'new Deck(id, {…assetUrl but no createBackend}) was ACCEPTED. ensureBackend() then calls undefined() at '
+          + 'engine.js module scope: no INIT, no HELLO, no engine, and nothing red in --quick'
+        : noBackend);
 
     const shortCached = threw(() => new CachedDeck('A', { ctx: () => null, master: () => null, send: () => {}, log: () => {} }));
     ok('...AND SO DOES THE CACHED DECK, which is built lazily and would otherwise find out at the first cache hit  '
@@ -7208,5 +7686,605 @@ if (group('verifyModel')) {
 }
 
 // ===========================================================================
+if (group('backend')) {
+  head('backend — the seam serialises: one call in flight per backend, FIFO, and no caller can wedge a session');
+  /**
+   * WHAT THIS COVERS AND WHY IT IS WORTH A GATE.
+   *
+   * `workers/inference.worker.js:10-12`: "one session, one in-flight run().
+   * ORT-Web serialises run() across all sessions on a wasm instance, and a
+   * rejected concurrent call permanently wedges the session." Not slow — DEAD,
+   * for the life of the worker. Seed §16 made that the SEAM'S contract rather
+   * than one backend's private rule ("the seam serialises calls; no caller can
+   * wedge a session"), and `shared/host.js` is that sentence.
+   *
+   * WHICH KIND OF TEST THIS IS — the RENDERING vs REACHABILITY rule at the head
+   * of this file. Reachable by construction on the mechanism, rendering-only on
+   * the consequence, and the split is deliberate:
+   *   - the SHIPPED `serialiseBackend` is driven. Nothing below reimplements the
+   *     queue, so deleting it turns this group red.
+   *   - the BACKEND is fake, because the thing being asserted is that the
+   *     wrapper never lets a second call reach it, and a real ORT session cannot
+   *     be asked to report that: its answer to being re-entered is to wedge and
+   *     stop answering anything. The fake COUNTS instead.
+   *   - reached by: `offscreen/deck.js` `ensureBackend()` is the only caller of
+   *     `serialiseBackend` in the tree, asserted below by reading it, and S8
+   *     (#9) drives the same wrapper over a fake worker port that throws on
+   *     INFER-while-busy the way the real one does.
+   *
+   * NOT ONE ASSERTION HERE READS A CLOCK. Every claim is a count: how many calls
+   * were inside the backend at once, in what order they arrived, how many
+   * results came back. A stopwatch would be measuring the machine's load.
+   */
+  const { serialiseBackend } = await import('./extension/shared/host.js');
+
+  /**
+   * A backend that RECORDS rather than separates.
+   *
+   * `yields` is how many microtask turns each call spends inside. It is what
+   * makes overlap observable without a clock: every unserialised call increments
+   * `inFlight` before any of them yields, so eight concurrent calls read eight,
+   * deterministically, on any machine. One is the only other answer available.
+   */
+  const fakeBackend = (yields = 3) => {
+    const st = { inFlight: 0, maxInFlight: 0, entered: [], loads: 0, disposed: 0 };
+    const enter = async (tag) => {
+      st.inFlight++;
+      if (st.inFlight > st.maxInFlight) st.maxInFlight = st.inFlight;
+      st.entered.push(tag);
+      for (let i = 0; i < yields; i++) await Promise.resolve();
+      st.inFlight--;
+    };
+    return {
+      st,
+      backend: {
+        load: async (bytes) => { st.loads++; await enter('load'); return { ep: 'fake', createMs: 0, warmupMs: 0, bytes }; },
+        separate: async (mix, out) => {
+          await enter(`separate:${mix.byteLength}`);
+          return { mix, stems: out, prepMs: 0, inferMs: 0, postMs: 0 };
+        },
+        dispose: async () => { st.disposed++; },
+      },
+    };
+  };
+
+  // ---------------------------------------------------- 8 concurrent separate()
+  {
+    const f = fakeBackend();
+    const b = serialiseBackend(f.backend, 'fake');
+    // Each call carries a DIFFERENT buffer size, so the order the backend saw
+    // and the results the callers got are both identifiable without a clock and
+    // without an index the wrapper could have preserved by accident.
+    const mixes = Array.from({ length: 8 }, (_, i) => new ArrayBuffer(8 + i));
+    const outs = Array.from({ length: 8 }, (_, i) => new ArrayBuffer(64 + i));
+    const results = await Promise.all(mixes.map((m, i) => b.separate(m, outs[i])));
+
+    ok('AT MOST ONE separate() IS INSIDE THE BACKEND, ACROSS 8 CONCURRENT CALLS  '
+      + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
+      f.st.maxInFlight === 1,
+      f.st.maxInFlight === 1
+        ? '8 calls, max 1 in flight'
+        : `${f.st.maxInFlight} were in flight at once — with a real ORT session that is a permanently wedged worker, `
+          + 'not a slow one');
+
+    const order = f.st.entered.join(',');
+    const expected = mixes.map((m) => `separate:${m.byteLength}`).join(',');
+    ok('...AND THEY REACH IT IN CALL ORDER — FIFO, because LivePipeline submits chunk k before k+1 and LiveEmitter refuses a non-contiguous chunk',
+      order === expected, order === expected ? `8 in order: ${order}` : `${order}  (expected ${expected})`);
+
+    const backAsGiven = results.every((r, i) => r.mix === mixes[i] && r.stems === outs[i]);
+    ok('...AND ALL 8 RESOLVE, each with the buffers ITS OWN call lent  '
+      + '[entry point: extension/shared/host.js serialiseBackend()]',
+      results.length === 8 && backAsGiven,
+      results.length !== 8
+        ? `${results.length} results came back, not 8`
+        : backAsGiven
+          ? '8 results, each carrying its own mix and out'
+          : 'a caller was handed another call’s buffers — the queue crossed two segments over');
+  }
+
+  // ------------------------------------------- load() is in the SAME queue
+  /**
+   * THE GAP THE WORKER'S OWN GUARD DOES NOT COVER, and the reason this queue
+   * spans two methods rather than one.
+   *
+   * `inference.worker.js:99` guards INFER with `busy`, and nothing else touches
+   * it — so the warm-up inference LOAD_MODEL runs at `:67-71` is OUTSIDE it, and
+   * `self.onmessage` is `async` with no queueing behind an outstanding `await`.
+   * An INFER arriving during the warm-up wedges the session. It is unreachable
+   * today only because `Deck.ensureSession()` is awaited before `infer()` ever
+   * runs, which is an ordering the DECK enforces and the worker does not.
+   */
+  {
+    const f = fakeBackend();
+    const b = serialiseBackend(f.backend, 'fake');
+    const both = await Promise.all([
+      b.load(new ArrayBuffer(4)),
+      b.separate(new ArrayBuffer(9), new ArrayBuffer(99)),
+    ]);
+    ok('load() AND separate() SHARE ONE QUEUE — an inference during the model warm-up is the one overlap the worker’s own `busy` guard cannot see  '
+      + '[entry point: extension/shared/host.js serialiseBackend()]',
+      f.st.maxInFlight === 1 && f.st.entered.join(',') === 'load,separate:9' && both.length === 2,
+      f.st.maxInFlight === 1
+        ? `entered ${f.st.entered.join(',')}`
+        : `${f.st.maxInFlight} in flight at once: ${f.st.entered.join(',')}`);
+  }
+
+  // -------------------------------------------------- dispose() is NOT queued
+  /**
+   * THE ONE DELIBERATE HOLE IN THE QUEUE, asserted so nobody closes it as a
+   * tidy-up. Teardown is exactly when a backend that has stopped answering has
+   * to be stopped anyway: queueing `dispose()` behind a hung `separate()` makes
+   * the hang permanent, and under this Host that leaves the user's tab muted for
+   * as long as the document lives (R5). `WorkerBackend.dispose()` terminates
+   * unconditionally, so there is no ordering for a queue to protect either.
+   */
+  {
+    const f = fakeBackend();
+    let hung = null;
+    f.backend.separate = () => new Promise((res) => { hung = res; });
+    const b = serialiseBackend(f.backend, 'fake');
+    const never = b.separate(new ArrayBuffer(8), new ArrayBuffer(8));
+    // NOT awaited: a queued `dispose()` would never settle behind a `separate()`
+    // that never lands, and this suite would HANG rather than report. A hang is
+    // the same defect wearing a worse costume — verify.mjs would kill the step
+    // with no assertion name attached to it. Counting after a few turns of the
+    // microtask queue makes the same mutation a FAIL that says what it is.
+    const disposing = b.dispose();
+    for (let i = 0; i < 8; i++) await Promise.resolve();
+    ok('dispose() IS NOT QUEUED — a backend that has stopped answering must still be stoppable  '
+      + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.dispose() and engine.js onTeardown]',
+      f.st.disposed === 1 && hung !== null,
+      f.st.disposed === 1
+        ? 'disposed while a separate() was still outstanding'
+        : 'dispose() waited behind an inference that never lands — teardown hangs and the tab stays muted');
+    hung({ mix: new ArrayBuffer(8), stems: new ArrayBuffer(8), prepMs: 0, inferMs: 0, postMs: 0 });
+    await never;
+    await disposing;
+  }
+
+  // ------------------------------------------------ a worker that died under it
+  /**
+   * THE THREE THINGS A DEAD WORKER MUST DO, all of which used to live in
+   * `offscreen/deck.js` and moved into `workers/workerbackend.js` with the seam.
+   * A port is exactly where behaviour goes missing quietly, and none of the
+   * three had an assertion on either side of the move.
+   *
+   *   1. EVERY PENDING CALL REJECTS. Review finding M1: a failure that does not
+   *      arrive as `{type:'ERROR'}` — a module load failure, an uncaught
+   *      rejection, an OOM that kills the worker — leaves entries nothing will
+   *      ever settle, and `await separate(...)` then hangs for ever with no
+   *      cancel path. Nothing times it out; nothing else would notice.
+   *   2. THE NEXT `separate()` REFUSES WITH THE RECORDED REASON, and does not
+   *      spawn a replacement. A worker that cannot resolve its imports dies
+   *      identically every time, so one per chunk is what re-spawning here
+   *      buys — and the failure ladder never sees a stable error to halt on.
+   *   3. `load()` DOES REPLACE IT. That is the pre-seam asymmetry:
+   *      `ensureSession()` called `ensureWorker()` (which spawned) and `infer()`
+   *      called `requireWorker()` (which refused), so a worker killed for memory
+   *      cost the user one gesture rather than a reload. `load()` is once per
+   *      gesture; `separate()` is once per 1.95 s.
+   *
+   * The SHIPPED `WorkerBackend` is driven over a stubbed `Worker` and `fetch`.
+   * The stub is the only thing a browser would have supplied — there is no fake
+   * backend here, which is the point: this block is about the real one.
+   */
+  {
+    const { WorkerBackend } = await import('./extension/workers/workerbackend.js');
+    const spawnedHere = [];
+    const failures = [];
+    const realWorker = Object.getOwnPropertyDescriptor(globalThis, 'Worker');
+    const realFetch = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+    let pendingRejected = null;
+    let lentMix = null;
+    let lentOut = null;
+    let refused = null;
+    let reloaded = null;
+    let spawnedByRefusal = null;
+    try {
+      globalThis.Worker = class {
+        constructor(url) {
+          this.url = String(url); this.onmessage = null; this.onerror = null;
+          this.posts = [];
+          // THE TRANSFER LIST, recorded beside the message. It is the whole of
+          // the difference between LENDING 19.3 MB per hop and COPYING it, and
+          // a postMessage that dropped it is invisible to everything else here:
+          // the message arrives, the worker answers, the deck goes green.
+          this.xfers = [];
+          spawnedHere.push(this);
+        }
+        postMessage(m, transfer) { this.posts.push(m); this.xfers.push(transfer || []); }
+        terminate() {}
+      };
+      Object.defineProperty(globalThis, 'fetch', {
+        value: async () => ({ ok: true }), configurable: true, writable: true,
+      });
+      const wb = new WorkerBackend({
+        assetUrl: (rel) => `stub://unit/${rel}`,
+        name: 'deck A',
+        onFail: (e) => failures.push(e.message),
+      });
+      // In flight when the worker goes: nothing on the wire will ever answer it.
+      //
+      // RECORDED, NOT AWAITED. The mutation this assertion exists to catch — a
+      // `die()` that does not reject the pending map — leaves this promise
+      // pending for ever, and `await` on it would HANG the suite instead of
+      // failing one line. A hang is the same defect wearing a worse costume:
+      // verify.mjs kills the step with no assertion name attached to it.
+      //
+      // The two buffers are NAMED because the INFER assertion below identifies
+      // them in the transfer list rather than counting entries: a list of two
+      // that carries something else is the same bug with a passing count.
+      lentMix = new ArrayBuffer(8);
+      lentOut = new ArrayBuffer(64);
+      let settled = null;
+      wb.separate(lentMix, lentOut).then(() => { settled = '(it RESOLVED)'; }, (e) => { settled = e.message; });
+      // A module worker that cannot resolve its static import fires `onerror`
+      // with an EMPTY message — the exact shape that used to reach the deck.
+      spawnedHere[0].onerror({ message: '' });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      pendingRejected = settled;
+      // Recorded rather than awaited, for the reason above: the mutation here is
+      // a `separate()` that spawns a replacement, and THAT call would sit
+      // unanswered for ever because nothing ever posts it a RESULT.
+      let refusedMsg = null;
+      wb.separate(new ArrayBuffer(8), new ArrayBuffer(8)).then(() => { refusedMsg = '(it was ACCEPTED)'; }, (e) => { refusedMsg = e.message; });
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+      refused = refusedMsg;
+      // The count AT THIS INSTANT is the half that says "and did not spawn one":
+      // by the end of the block `load()` has legitimately made a second worker,
+      // so a total taken later cannot tell the two apart.
+      spawnedByRefusal = spawnedHere.length;
+      const loading = wb.load(new ArrayBuffer(4)).then(() => 'ok', (e) => e.message);
+      // Wait for LOAD_MODEL to be ON the replacement rather than for the
+      // replacement to exist: `spawn()` is synchronous and the post is three
+      // awaits later, so counting workers would answer MODEL_READY into a gate
+      // that is not open yet and the load would hang.
+      const loadPosted = () => spawnedHere.length === 2 && spawnedHere[1].posts.some((m) => m && m.type === 'LOAD_MODEL');
+      for (let i = 0; i < 200 && !loadPosted(); i++) await new Promise((r) => setTimeout(r, 0));
+      if (loadPosted() && spawnedHere[1].onmessage) {
+        spawnedHere[1].onmessage({ data: { type: 'MODEL_READY', ep: 'stub', createMs: 0, warmupMs: 0 } });
+      }
+      reloaded = await loading;
+    } finally {
+      if (realWorker) Object.defineProperty(globalThis, 'Worker', realWorker); else delete globalThis.Worker;
+      if (realFetch) Object.defineProperty(globalThis, 'fetch', realFetch); else delete globalThis.fetch;
+    }
+
+    ok('A WORKER THAT DIES REJECTS EVERY CALL IN FLIGHT — nothing on the wire would ever answer them  '
+      + "[entry point: extension/workers/workerbackend.js die(), reached from the worker's onerror]",
+      pendingRejected != null && pendingRejected.includes('deck A'),
+      pendingRejected == null
+        ? 'the in-flight separate() is still pending after the worker died — with no timeout anywhere, '
+          + 'LivePipeline.runChunk awaits it for ever and the deck stops without saying anything'
+        : pendingRejected);
+
+    ok('...and it is ANNOUNCED, because at that moment nothing else is listening  '
+      + '[entry point: the createBackend() `onFail` hook, reached from deck.js Deck.ensureBackend()]',
+      failures.length === 1 && failures[0].includes('deck A'),
+      failures.length === 0
+        ? 'the death was silent — the deck goes on reporting a session it no longer has until the next arm'
+        : failures.join(' | '));
+
+    ok('...and the NEXT separate() refuses with the recorded reason rather than spawning a replacement per chunk  '
+      + '[entry point: extension/workers/workerbackend.js require(), reached from Deck.infer() inside gpu.run()]',
+      refused != null && refused.includes('deck A') && spawnedByRefusal === 1,
+      refused == null
+        ? 'separate() neither resolved nor rejected — a backend with no worker swallowed the call'
+        : spawnedByRefusal !== 1
+          ? `separate() spawned a replacement (${spawnedByRefusal} workers by then) — a worker that cannot resolve `
+            + 'its imports dies identically every time, so that is one per capture tick and a ladder that never '
+            + 'sees a stable error to halt on'
+          : refused);
+
+    ok('...while load() DOES replace it — a worker killed for memory costs one gesture, not a reload  '
+      + '[entry point: extension/workers/workerbackend.js spawn(), reached from Deck.ensureSession()]',
+      spawnedHere.length === 2 && reloaded === 'ok',
+      spawnedHere.length !== 2
+        ? `${spawnedHere.length} worker(s) were spawned in all — load() did not replace the dead one, so an OOM `
+          + 'is terminal until the offscreen document is reloaded'
+        : reloaded !== 'ok'
+          ? `the replacement never loaded: ${reloaded}`
+          : '2 workers in all: one dead, one replacement, and none spawned by separate()');
+
+    /**
+     * AND THE PER-HOP BUFFERS ARE LENT, NOT COPIED — the half of the zero-copy
+     * contract that is paid once per 1.95 s, and the one the unit suite could
+     * not see until now.
+     *
+     * The `host` group asserts the same thing for `LOAD_MODEL`: 109 MB, once per
+     * deck. `INFER` is 2.75 MB + 16.51 MB, once per hop, and dropping ITS
+     * transfer list left `node test.js` at 602 passed, 0 failed — the only gate
+     * that caught it was `tools/backend-audio.mjs`, which is `slow` + `heavy` +
+     * `needsSeed`, so `--quick` drops it and CI has never run it. That is the
+     * asymmetry backwards: the cheap-and-rare transfer was gated in the suite CI
+     * runs, the expensive-and-constant one only in the suite it does not.
+     *
+     * IDENTITY, NOT LENGTH: `[mix, out]` and not "a list of two", because a
+     * transfer list carrying the wrong two objects is the same defect with a
+     * passing count.
+     */
+    const inferPost = spawnedHere.length ? spawnedHere[0].posts.findIndex((m) => m && m.type === 'INFER') : -1;
+    const inferXfer = inferPost >= 0 ? spawnedHere[0].xfers[inferPost] : null;
+    ok('THE SEGMENT BUFFERS ARE TRANSFERRED INTO THE BACKEND, NOT COPIED — 19.3 MB per hop, on the thread that must not pause  '
+      + '[entry point: extension/workers/workerbackend.js separate(), reached from Deck.infer() inside gpu.run()]',
+      inferXfer != null && inferXfer.length === 2
+      && inferXfer[0] === lentMix && inferXfer[1] === lentOut,
+      inferPost < 0
+        ? 'no INFER was posted at all, so this inspected nothing'
+        : inferXfer.length !== 2
+          ? `INFER was posted with a transfer list of ${inferXfer.length} — both buffers are COPIED across the thread `
+            + 'boundary instead, every hop, and LivePipeline re-adopts a copy it did not lend'
+          : (inferXfer[0] !== lentMix || inferXfer[1] !== lentOut)
+            ? 'INFER transfers something other than the mix and out it carries — the caller re-adopts what comes '
+              + 'back, so it would be re-adopting a buffer it never lent'
+            : `the mix and the out buffer ARE the transfer list (${lentMix.byteLength} + ${lentOut.byteLength} B here, `
+              + '2.75 MB + 16.51 MB in the deck)');
+  }
+
+  // ------------------------------- the demotion path never reaches the backend
+  /**
+   * THE ZERO-COPY ORDERING, ASSERTED WHERE S6 MOVED IT.
+   *
+   * The plan's one explicit instruction for this slice is "do not change which
+   * buffers are transferred and which are not", and the transfer moved two
+   * modules down: out of `offscreen/deck.js` and into
+   * `workers/workerbackend.js`, with `Deck.infer()` left holding the ORDERING
+   * that makes a demotion cost nothing —
+   *
+   *     "`separate()` — and therefore the `postMessage` that transfers both
+   *      buffers — is INSIDE `fn`, and every demotion path returns before `fn`
+   *      is ever called."
+   *
+   * WHAT USED TO COVER IT AND DID NOT. The `live` group demotes a chunk and
+   * checks that `LivePipeline` does not reallocate — but its `infer` is a FAKE
+   * standing in for exactly the two layers the transfer moved into, so it
+   * carries the pipeline's half and nothing about the deck's. Review hoisted the
+   * call out of `fn`:
+   *
+   *     const pre = this.requireBackend().separate(mixBuf, outBuf);
+   *     const r = await gpu.run(this.id, budgetMs, () => pre);
+   *
+   * — verbatim the edit `deck.js` warns about — and `node test.js` (602 passed),
+   * `--quick` (GREEN) and `backend-audio` (11 passed) all stayed green. The cost
+   * of that regression is the one `deck.js` names: "Cannot perform Construct on
+   * a detached ArrayBuffer" at `runChunk`'s first line, once per capture tick,
+   * for ever.
+   *
+   * DRIVEN, NOT READ: the shipped `Deck.infer()` over the shipped
+   * `GpuScheduler`, with a backend that detaches its arguments the way
+   * `postMessage` with a transfer list does. A detached ArrayBuffer reads
+   * `byteLength` 0, so "still attached" is a count rather than a promise.
+   *
+   * BOTH DEMOTION GATES ARE DRIVEN, because they are two different returns:
+   * `Deck.infer`'s own pre-emptive L3 (another deck is compiling a session) and
+   * the scheduler's (`scheduler.js:185`, `:194`). A hoist above either one is
+   * the same defect.
+   */
+  {
+    const { Deck } = await import('./extension/offscreen/deck.js');
+    const seen = [];
+    /**
+     * A BACKEND THAT DETACHES, which is the whole instrument. `structuredClone`
+     * with a transfer list is what `postMessage(m, [mix, out])` does to the
+     * caller's buffers, minus the thread. The sizes are small and DISTINCT so
+     * that "these four buffers, not some other four" needs no identity check to
+     * be readable in the failure.
+     */
+    const detaching = {
+      load: async () => ({ ep: 'fake', createMs: 0, warmupMs: 0 }),
+      separate: async (mix, out) => {
+        seen.push(mix.byteLength);
+        const m = structuredClone(mix, { transfer: [mix] });
+        const o = structuredClone(out, { transfer: [out] });
+        return { mix: m, stems: o, prepMs: 0, inferMs: 1, postMs: 0 };
+      },
+      dispose: async () => {},
+    };
+    let loading = false;
+    const gpu = new GpuScheduler({ priority: 'A', armed: true });
+    const deck = new Deck('B', {
+      ctx: () => null, master: () => null, gpu,
+      modelBytes: async () => new ArrayBuffer(8),
+      createBackend: () => detaching,
+      send: () => {}, log: () => {}, armRefMs: () => 0,
+      assetUrl: (rel) => `stub://unit/${rel}`,
+      othersLoading: () => loading,
+      anyLoading: () => loading,
+    });
+    deck.ensureBackend();
+
+    // 1. GRANTED — the control, and it has to be able to LOSE: if this fake did
+    //    not really detach, every "still attached" below would be vacuous.
+    const okMix = new ArrayBuffer(8);
+    const okOut = new ArrayBuffer(64);
+    const granted = await deck.infer(okMix, okOut, Infinity);
+    ok('A GRANTED CHUNK REACHES THE BACKEND AND ITS BUFFERS REALLY GO — the control for the demotion assertion below  '
+      + '[entry point: extension/offscreen/deck.js Deck.infer(), through the real GpuScheduler]',
+      seen.length === 1 && granted != null && !granted.demoted
+      && okMix.byteLength === 0 && okOut.byteLength === 0
+      && granted.mix.byteLength === 8 && granted.stems.byteLength === 64,
+      seen.length !== 1
+        ? `the backend was entered ${seen.length} time(s) for one granted chunk`
+        : okMix.byteLength !== 0 || okOut.byteLength !== 0
+          ? `the caller's buffers are still attached (${okMix.byteLength} B / ${okOut.byteLength} B) after a granted `
+            + 'chunk — this fake does not transfer, so nothing below could observe one that does'
+          : `lent 8 + 64 B (both detached here), came back ${granted.mix.byteLength} + ${granted.stems.byteLength} B`);
+
+    // L3 may not refuse anyone without evidence — the anti-lockout invariant in
+    // scheduler.js: eight samples, and a deck that has run. Eight observations
+    // of a 900 ms machine against a 100 ms budget is the demotion the live path
+    // actually takes.
+    for (let i = 0; i < 8; i++) gpu.observe(900);
+
+    const schedMix = new ArrayBuffer(16);
+    const schedOut = new ArrayBuffer(128);
+    const schedDemoted = await deck.infer(schedMix, schedOut, 100);
+    loading = true;
+    const preMix = new ArrayBuffer(32);
+    const preOut = new ArrayBuffer(256);
+    const preDemoted = await deck.infer(preMix, preOut, 100);
+    loading = false;
+    const attached = schedMix.byteLength === 16 && schedOut.byteLength === 128
+      && preMix.byteLength === 32 && preOut.byteLength === 256;
+    ok('A DEMOTED CHUNK NEVER REACHES THE BACKEND, SO NOTHING IS TRANSFERRED — both gates, and all four buffers are still the caller’s  '
+      + '[entry point: extension/offscreen/deck.js Deck.infer(), its pre-emptive L3 and GpuScheduler.run()]',
+      schedDemoted != null && schedDemoted.demoted === true
+      && preDemoted != null && preDemoted.demoted === true
+      && seen.length === 1 && attached,
+      schedDemoted == null || !schedDemoted.demoted
+        ? `the scheduler granted a 900 ms chunk into a 100 ms budget, so this inspected nothing: ${JSON.stringify(schedDemoted)}`
+        : preDemoted == null || !preDemoted.demoted
+          ? `the pre-emptive L3 did not fire while another deck was creating its session: ${JSON.stringify(preDemoted)}`
+          : seen.length !== 1
+            ? `the backend was entered ${seen.length} times for one granted chunk and two demoted ones — separate() is `
+              + 'no longer inside gpu.run()’s fn, so a demotion transfers the buffers and the NEXT runChunk throws '
+              + '"Cannot perform Construct on a detached ArrayBuffer" at its first line, once per capture tick, for ever'
+            : !attached
+              ? `a demotion moved the caller's buffers: ${schedMix.byteLength}/${schedOut.byteLength} B and `
+                + `${preMix.byteLength}/${preOut.byteLength} B, of 16/128 and 32/256 (0 = detached)`
+              : `2 demotions, 0 further entries into the backend, all four buffers still ${schedMix.byteLength}/`
+                + `${schedOut.byteLength}/${preMix.byteLength}/${preOut.byteLength} B (scheduler: ${schedDemoted.why}; `
+                + `pre-emptive: ${preDemoted.why})`);
+    await deck.backend.dispose();
+  }
+
+  // ------------------------------------- a Host that answered with the wrong shape
+  /**
+   * `assertHost` at engine boot checks that `createBackend` is CALLABLE; it
+   * cannot check what it returns. Without the check inside `serialiseBackend`, a
+   * Host that answers with an object one level too deep — the Electron preload
+   * shape `shared/host.js` already names — passes every boot check and fails at
+   * the first arm, inside `gpu.run()`, as `backend.separate is not a function`.
+   */
+  const shortBackend = (() => {
+    try { serialiseBackend({ load: () => {}, separate: () => {} }, 'Backend for deck A'); return null; }
+    catch (e) { return String((e && e.message) || e); }
+  })();
+  ok('A BACKEND THE HOST ANSWERED WITH IS REFUSED WHERE IT ARRIVES, not at the first arm  '
+    + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
+    shortBackend != null && shortBackend.includes('dispose') && shortBackend.includes('Backend for deck A'),
+    shortBackend == null
+      ? 'a backend with no dispose() was ACCEPTED — Deck.dispose() and the pagehide teardown both call it, so the '
+        + '~1.7 GB wasm heap outlives the deck and nothing says why'
+      : shortBackend);
+
+  /**
+   * ...AND THE REFUSED BACKEND IS GIVEN BACK, because by then it may already
+   * exist. `createBackend` is documented as the place a Host that needs a
+   * process STARTS one — "a backend that needs to spawn a process starts it
+   * here and lets `load()` be where the waiting happens" — so a refusal that
+   * simply drops the reference leaks whatever was started.
+   *
+   * Invisible under THIS Host, which is why it is asserted rather than
+   * observed: the throw is fatal at `engine.js` module scope and the orphaned
+   * worker dies with the document. Under the Electron Host this interface is
+   * being written for, an out-of-process backend would outlive it — and the
+   * mistake that gets you there is a shape mistake in the Host's own answer,
+   * i.e. exactly the population this refusal is aimed at.
+   *
+   * A backend short `separate` but holding a `dispose` is the shape that can be
+   * given back at all; the one above (no `dispose`) is the one that cannot, and
+   * both must still REFUSE.
+   */
+  const refusedTeardown = (() => {
+    let disposed = 0;
+    let why = null;
+    const half = { load: () => {}, dispose: () => { disposed++; } };
+    try { serialiseBackend(half, 'Backend for deck B'); } catch (e) { why = String((e && e.message) || e); }
+    return { disposed, why };
+  })();
+  ok('...AND IT IS GIVEN BACK ON THE WAY OUT — a Host that already spawned a process does not leak it to a shape refusal  '
+    + '[entry point: extension/shared/host.js serialiseBackend(), reached from deck.js Deck.ensureBackend()]',
+    refusedTeardown.why != null && refusedTeardown.why.includes('separate')
+    && refusedTeardown.disposed === 1,
+    refusedTeardown.why == null
+      ? 'a backend with no separate() was ACCEPTED, so nothing was refused and nothing was disposed'
+      : refusedTeardown.disposed !== 1
+        ? `the refusal is right and the teardown is missing: dispose() was called ${refusedTeardown.disposed} time(s), `
+          + 'so a backend that had already started a process is dropped without being stopped'
+        : `refused ("${refusedTeardown.why.slice(0, 60)}…") and disposed once`);
+
+  /**
+   * AND THE UNIT REALLY WRAPS. Everything above proves the wrapper works; none
+   * of it proves `Deck` uses it. Review has measured that exact hole twice on
+   * this seam — a value right at four call sites and absent at the one that
+   * feeds them — so the call site is read out of the build.
+   *
+   * READ AS TEXT with comments stripped, the same shape the `host` group uses on
+   * `engine.js`: `deck.js` cannot be imported and inspected for this, because
+   * the wrapping happens inside a method that spawns a Worker.
+   */
+  const { readFileSync: readDeckSrc } = await import('node:fs');
+  const deckSrc = readDeckSrc(new URL('./extension/offscreen/deck.js', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const creates = (deckSrc.match(/this\.s\.createBackend\(/g) || []).length;
+  const wrapped = /serialiseBackend\(this\.s\.createBackend\(/.test(deckSrc);
+  ok('THE DECK BUILDS ITS BACKEND THROUGH THE QUEUE, AND ONLY THERE — one createBackend() call in the file, and it is inside serialiseBackend()  '
+    + '[entry point: extension/offscreen/deck.js, comments stripped]',
+    creates === 1 && wrapped,
+    creates === 0
+      ? 'cannot look: extension/offscreen/deck.js never calls this.s.createBackend() — the deck no longer builds a backend at all'
+      : creates !== 1
+        ? `${creates} createBackend() calls in deck.js — one deck must own exactly one backend`
+        : wrapped
+          ? '1 createBackend(), wrapped'
+          : 'the deck holds the Host’s backend UNWRAPPED: nothing then serialises it, and the wedge is one concurrent '
+            + 'chunk away');
+}
+
+// ===========================================================================
+/**
+ * THE FILTER HAS TO MATCH SOMETHING. `node test.js nosuchgroup` used to print
+ * `0 passed, 0 failed` and exit 0 — a suite that asserted nothing while
+ * reporting success, which is exactly what `tools/verify.mjs`'s VOID rule calls
+ * a hard failure one level up. A typo'd or renamed group is the same event as a
+ * suite that could not look.
+ *
+ * NOT an `ok()`, because it must not exist as an assertion on a normal run: on
+ * an unfiltered run `only` is empty and there is nothing to check.
+ */
+const unmatched = only.filter((n) => !known.has(n));
+if (unmatched.length) {
+  fail += unmatched.length;
+  console.log(`\n  \x1b[31mFAIL\x1b[0m no group is called ${unmatched.map((n) => `\`${n}\``).join(', ')} — `
+    + `this run would otherwise assert nothing and exit 0. Groups: ${[...known].sort().join(', ')}`);
+}
+
+/**
+ * AND THE HEADER LIST IS COMPUTED AGAINST THEM RATHER THAN MAINTAINED BESIDE
+ * THEM. Three names — `ola`, `sum`, `wav` — described groups that had not
+ * existed for months, and nothing could have noticed: the list is a comment.
+ * The same file argues this for HOST_MODULES 4 000 lines up ("a list that is
+ * COMPUTED cannot be forgotten"), and the argument does not stop at the top of
+ * the file.
+ *
+ * Read out of this file's own header, from the sentence that says the list is
+ * load-bearing to the end of that comment. FAILS IF IT CANNOT LOOK: a header
+ * whose shape this no longer recognises reports zero names, which is a red.
+ */
+{
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('./test.js', import.meta.url), 'utf8');
+  const from = src.indexOf('THE GROUP NAMES BELOW');
+  const to = from < 0 ? -1 : src.indexOf('*/', from);
+  const listed = from < 0 || to < 0
+    ? []
+    : [...src.slice(from, to).matchAll(/^ \* {3}(\w+) {2,}\S/gm)].map((m) => m[1]);
+  const groups = [...known].sort();
+  const missing = groups.filter((n) => !listed.includes(n));
+  const stale = listed.filter((n) => !known.has(n));
+  ok('THE HEADER’S GROUP LIST IS THE GROUPS THIS FILE ACTUALLY HAS  '
+    + '[entry point: test.js’s own header, against every name group() was asked about]',
+    listed.length > 0 && missing.length === 0 && stale.length === 0,
+    listed.length === 0
+      ? 'the header list could not be read at all, so this inspected nothing — the block it parses has moved or changed shape'
+      : missing.length || stale.length
+        ? `${stale.length ? `listed but no such group: ${stale.join(', ')}. ` : ''}`
+          + `${missing.length ? `a group nobody documented: ${missing.join(', ')}. ` : ''}`
+          + '`node test.js <a stale name>` asserts nothing and exits 0'
+        : `${groups.length} groups, all described: ${groups.join(', ')}`);
+}
+
 console.log(`\n${fail ? '\x1b[31m' : '\x1b[32m'}${pass} passed, ${fail} failed\x1b[0m`);
 process.exit(fail ? 1 : 0);

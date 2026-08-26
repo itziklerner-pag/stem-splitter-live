@@ -93,9 +93,11 @@
  *   THREE OBLIGATIONS THAT THE TYPE DOES NOT SHOW, each broken by accident by a
  *   plausible second Host, and none of them inferable from `=> string`:
  *   1. A PATH ENDING IN `/` RESOLVES TO A DIRECTORY URL AND KEEPS THE TRAILING
- *      SLASH. `offscreen/deck.js` hands `assetUrl('vendor/ort/')` to the
+ *      SLASH. `workers/workerbackend.js` hands `assetUrl('vendor/ort/')` to the
  *      inference worker's `INIT` and ONNX Runtime appends its own file names to
- *      it. `path.join()` and `url.pathToFileURL()` — the first two things a
+ *      it. (It was `offscreen/deck.js` until S6 put the worker behind
+ *      `createBackend`; the obligation did not move, the caller did.)
+ *      `path.join()` and `url.pathToFileURL()` — the first two things a
  *      Node or Electron Host reaches for — both drop a trailing slash, and R0
  *      measured what that costs: ORT throws "w is not a function" several
  *      layers from the mistake. Review measured the gate's blind spot as well:
@@ -103,11 +105,14 @@
  *      green, because each one resolves through a stub of its own. `test.js`'s
  *      `host` group therefore holds the shipped implementation to this rule
  *      directly, not only through the graph.
- *   2. THE RESULT MUST BE FETCHABLE, with a readable `.ok`. `deck.js` probes the
- *      ORT bundle with `fetch(url, { method: 'HEAD' })` before it spawns a
- *      worker, because a module worker that cannot resolve its static import
- *      fires `onerror` with an EMPTY message. A scheme `fetch` refuses turns
- *      that probe into a false report about a file that is present: `file://`
+ *   2. THE RESULT MUST BE FETCHABLE, with a readable `.ok`.
+ *      `workers/workerbackend.js` probes the ORT bundle with
+ *      `fetch(url, { method: 'HEAD' })` — started in `spawn()` alongside the
+ *      worker and awaited in `load()`, so the diagnosis overlaps the worker's
+ *      own module load instead of serialising in front of it — because a module
+ *      worker that cannot resolve its static import fires `onerror` with an
+ *      EMPTY message. A scheme `fetch` refuses turns that probe into a false
+ *      report about a file that is present: `file://`
  *      is refused outright in Chromium, and an Electron custom scheme needs
  *      `registerSchemesAsPrivileged({ privileges: { supportFetchAPI: true } })`.
  *   3. THE URL MUST BE LOCAL TO THE UNIT'S OWN BUNDLE. M1 — no remote code — is
@@ -147,7 +152,7 @@
  *   `false` when unsure — the deck's question is "may I spend the user's data",
  *   and a wrong `true` spends it without asking. RESOLVES, NEVER REJECTS, and
  *   that is this duty's alone among the three: `engine.js`'s `STATUS` case
- *   awaits it before `ensureWorker()`, `echoXf()` and `push()`, so a rejection
+ *   awaits it before `ensureBackend()`, `echoXf()` and `push()`, so a rejection
  *   there is not a model error — it is a deck that paints nothing at all, with
  *   the reason written to a field nothing reads. A Host whose storage can be
  *   unavailable answers `false` and lets the download offer stand.
@@ -169,6 +174,52 @@
  *   MAY REJECT (a locked file, an IPC round trip): the unit does not let a
  *   failed clear replace the integrity error that caused it, and the two-ask
  *   ceiling holds regardless.
+ *
+ * @property {(hooks?: {name?: string,
+ *                      onReady?: (info: {threads: number|null, adapter: object|null}) => void,
+ *                      onFail?: (err: Error) => void}) => Backend} createBackend
+ *   Build ONE inference backend — the thing that turns 7.8 s of stereo mix into
+ *   six stereo stems. This is seed §16's option S2, the AUDIO-LEVEL seam: what
+ *   crosses it is waveforms, so the STFT/iSTFT and the model graph are both
+ *   INSIDE the backend and neither is on this interface. Today's only
+ *   implementation is `workers/workerbackend.js`, which drives
+ *   `workers/inference.worker.js` — ONNX Runtime on WebGPU, falling back to
+ *   threaded wasm.
+ *   A FRESH INSTANCE PER CALL, AND ONE PER DECK. `offscreen/deck.js:18-25` is
+ *   the reason and it is not negotiable in either direction: ORT-Web serialises
+ *   `run()` across every session sharing a wasm instance and a concurrent call
+ *   PERMANENTLY WEDGES the session, so two decks must not share one backend —
+ *   and two sessions must not share one worker. A Host that memoises this and
+ *   hands both decks the same object re-opens exactly that grenade.
+ *   CALLED LAZILY, and the laziness is the unit's: deck A's backend is built at
+ *   boot so the deck can report the GPU it found, deck B's on its first
+ *   `LIVE_START`, because each ORT session peaks at ~1.7 GB of wasm heap. So a
+ *   Host must not do anything at `createBackend()` time that a user who never
+ *   arms a second deck should not pay for.
+ *   SYNCHRONOUS, and it returns the Backend rather than a promise to one: it is
+ *   called from `Deck.ensureBackend()`, which runs at engine module scope. A
+ *   backend that needs to spawn a process starts it here and lets `load()` be
+ *   where the waiting happens.
+ *   `hooks` ARE THE UNIT'S, NOT THE HOST'S, and they carry the two things that
+ *   arrive outside any call the unit made: `onReady` once the backend knows what
+ *   hardware it got (the deck mirrors it into `STATE.boot`), and `onFail` when
+ *   the backend dies with nothing in flight — a worker killed for memory, a
+ *   module that would not resolve. Without `onFail` that death is silent until
+ *   the next arm, and the deck goes on reporting a session it no longer has.
+ *   `name` is a human label used only in error messages ("deck A").
+ *   FORWARD THEM WHOLE. This is the one part of this duty `assertHost(backend,
+ *   BACKEND_DUTIES)` structurally cannot check: a backend built without them
+ *   owes every declared duty and answers to nobody, so a Host that drops the
+ *   hooks is refused by nothing and loses both behaviours above at once.
+ *   `test.js`'s `host` group drives them THROUGH `createBackend` for that reason.
+ *   `onReady`'s TWO FIELDS ARE ORT-WEB-SHAPED, and both are nullable because of
+ *   it: `threads` is a wasm thread count and `adapter` is a WebGPU adapter's
+ *   `{vendor, architecture}`. A native backend — CoreML, DirectML, CUDA — has
+ *   neither and answers `{threads: null, adapter: null}`, which is a legitimate
+ *   answer rather than a degraded one: `offscreen/deck.js` renders what it was
+ *   given and says nothing about wasm or a GPU when it was given neither. S11
+ *   owns whether v1 of this interface gains a neutral field to describe such a
+ *   backend in its own words; until then a Host must not invent numbers here.
  */
 
 /**
@@ -229,6 +280,93 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
   modelBytes: 'hand over the model weights, from wherever this Host keeps or gets them',
   modelCached: 'say whether the weights are already here, without reading them',
   clearModel: 'throw away the stored weights, so the next load goes back to source',
+  createBackend: 'build one inference backend — the thing that turns a mix into six stems',
+});
+
+/**
+ * @typedef {object} Backend
+ *
+ * THE AUDIO-LEVEL SEAM (seed §16, option S2). Waveforms in, waveforms out: the
+ * STFT/iSTFT and the model graph live INSIDE an implementation, which is what
+ * makes a native backend able to replace the slowest stage rather than inherit
+ * it. `workers/workerbackend.js` is backend #1 and today the only one.
+ *
+ * THE SIGNATURE THE PLAN DECLARED, AND WHY THIS IS NOT IT. The plan wrote
+ * `separate(mix Float32Array[2·SEGMENT]) -> six stereo stems`, and eleven lines
+ * later required that today's zero-copy transfers not change. Both cannot hold.
+ * The shape below is the second reading, because the first loses four things
+ * that are load-bearing rather than incidental:
+ *   1. THE CALLER-SUPPLIED OUTPUT BUFFER. `LivePipeline` allocates `mixBuf` and
+ *      `outBuf` ONCE PER SESSION (19.4 MB at six stems) and lends them for one
+ *      segment. Returning fresh arrays instead costs 16.5 MB of garbage per hop
+ *      — about 8.5 MB/s at hop 1.95 — on the one thread that must not pause.
+ *   2. THE MIX ROUND TRIP, for the same reason: 2.75 MB per hop.
+ *   3. ONE FLAT BUFFER, NOT SIX ARRAYS. `engine/demucs.js` writes a single flat
+ *      `Float32Array` laid out `(k*2 + ch)*SEGMENT + i` and `offscreen/live.js`
+ *      builds twelve `subarray` VIEWS over it with no copy. Six objects would be
+ *      six copies.
+ *   4. A `Float32Array` CANNOT GO IN A TRANSFER LIST. Only its buffer can.
+ * So "six stereo stems in `STEMS` order" survives as a documented property of
+ * `stems` — `STEMS.length * 2` planes of `SEGMENT` floats, stem-major, left
+ * before right — rather than as six objects. `tools/model-parity.mjs` is what
+ * holds the ORDER; this interface holds the LAYOUT.
+ *
+ * DEMOTION IS NOT ON THIS INTERFACE. `GpuScheduler` decides whether a chunk runs
+ * at all and returns `{demoted:true}` BEFORE the backend is ever called; that is
+ * cross-deck policy and it stays in `Deck.infer`. A backend either separates or
+ * throws.
+ *
+ * @property {(bytes: ArrayBuffer,
+ *             onProgress?: (phase: string, note?: string) => void)
+ *   => Promise<{ep: string, createMs: number, warmupMs: number}>} load
+ *   Take the weights and become able to `separate`. IT TAKES OWNERSHIP OF
+ *   `bytes` and may transfer it — `WorkerBackend` does, because the alternative
+ *   is 109 MB duplicated across a thread boundary at the peak-memory moment —
+ *   so the caller must treat the buffer as detached the instant it calls this,
+ *   and the Host that supplied the bytes must hand over a fresh buffer per call
+ *   (`modelBytes`, rule 2 above).
+ *   `onProgress(phase, note)` reports the stages a 109 MB model load has and a
+ *   caller cannot infer: `'session'` while the graph is being compiled (with a
+ *   `note` when the EP falls back), `'warmup'` for the first inference, which is
+ *   843-2584 ms of shader compile against ~450 ms steady. The resolution carries
+ *   which EP actually took the model, so the deck can say `webgpu` or `wasm`.
+ *
+ * @property {(mix: ArrayBuffer, out: ArrayBuffer)
+ *   => Promise<{mix: ArrayBuffer, stems: ArrayBuffer,
+ *               prepMs: number, inferMs: number, postMs: number}>} separate
+ *   Separate ONE segment. `mix` is `2 * SEGMENT` floats, left channel then
+ *   right; `out` is `STEMS.length * 2 * SEGMENT` floats and is where the stems
+ *   are written.
+ *   BORROW AND RETURN, WHICH IS THE WHOLE OF THE ZERO-COPY CONTRACT. Both
+ *   buffers may be transferred away and BOTH MUST COME BACK in the resolution —
+ *   `mix` as the same buffer, `stems` as the buffer `out` became. The caller
+ *   re-adopts them for the next segment. A backend that keeps either, or that
+ *   returns a copy, turns a per-session allocation into a per-hop one.
+ *   AND IF IT THROWS, IT MAY KEEP THEM: the caller reallocates on the failure
+ *   path rather than assuming. What it must NOT do is transfer them and then
+ *   return something that is not them.
+ *   ONE CALL IN FLIGHT AT A TIME is guaranteed by the UNIT, not asked of the
+ *   backend — see `serialiseBackend` below.
+ *
+ * @property {() => Promise<void>} dispose
+ *   Give the machine back. MUST START ITS TEARDOWN SYNCHRONOUSLY: the last
+ *   caller is the engine's `onTeardown`, which does not await (R5), so whatever
+ *   is not done before this returns is not done at all. `WorkerBackend`
+ *   terminates the worker on the spot, which is what releases the ~1.7 GB wasm
+ *   heap.
+ */
+
+/**
+ * The duties a `Backend` owes. Checked with `assertHost` — the same function,
+ * for the same reason one level in: `host.createBackend()` is the one duty
+ * whose RETURN VALUE the unit then calls, so a Host that answers it with the
+ * wrong shape is a Host that passes every boot check and fails at the first
+ * arm, which is the failure `assertHost` exists to move earlier.
+ */
+export const BACKEND_DUTIES = Object.freeze({
+  load: 'take the model weights and become able to separate',
+  separate: 'separate one segment of mix into six stereo stems',
+  dispose: 'give the machine back',
 });
 
 /**
@@ -295,6 +433,129 @@ export function assertHost(host, duties, what = 'Host') {
       + missing.map((k) => `${k}() — ${duties[k]}`).join('; '));
   }
   return host;
+}
+
+/* ------------------------------------------------------------------ the queue
+ * THE SEAM'S SERIALISATION — one call in flight per backend, and the UNIT is
+ * what guarantees it.
+ *
+ * `workers/inference.worker.js:10-12`: "one session, one in-flight run().
+ * ORT-Web serialises run() across all sessions on a wasm instance, and a
+ * rejected concurrent call permanently wedges the session (FINDINGS §6/§11)."
+ * Not slow — DEAD, for the life of the worker, with no error the user can act on
+ * and no recovery short of a reload.
+ *
+ * Seed §16 made that the SEAM'S contract rather than one backend's private rule:
+ * "the seam serialises calls; no caller can wedge a session." This function is
+ * that sentence, and it lives HERE rather than inside `WorkerBackend` because
+ * the property belongs to every backend a Host can hand over — including a
+ * native one with its own reasons not to be re-entered — and because a guarantee
+ * the unit makes is one a Host cannot forget to make. It is next to
+ * `assertHost` for the same reason `assertHost` is here at all: both are what
+ * the unit does to whatever the Host answered with.
+ *
+ * THREE LAYERS, AND THIS IS THE MIDDLE ONE. They are not redundant:
+ *
+ *   1. ONE BACKEND PER DECK (`offscreen/deck.js:18-25`) — one wasm instance per
+ *      deck, so the cross-SESSION form of the trap cannot fire at all.
+ *   2. THIS QUEUE — per backend, and the only layer that is a property of the
+ *      seam rather than of a policy or of an implementation.
+ *   3. `GpuScheduler` (`engine/scheduler.js`) — CROSS-DECK, and a scheduling
+ *      policy rather than a safety rule: it decides who gets the one GPU next
+ *      and who gives up its turn (L3). It happens to admit one inference at a
+ *      time process-wide today, which is why the wedge has never fired; that is
+ *      a consequence of the current policy, not a promise it makes. Change the
+ *      policy — two GPUs, a priority pre-empt — and layer 3 stops serialising
+ *      while layer 2 does not. Both, therefore, and not either.
+ *
+ * Underneath all three sits the worker's own `busy` guard
+ * (`inference.worker.js:99`), which turns the wedge into a named throw. It is a
+ * backstop, and S8's suite is what proves it unreachable through this queue.
+ *
+ * WHY `load()` IS IN THE SAME QUEUE AS `separate()`. Because the gap the
+ * worker's own guard does not cover is exactly there.
+ * `inference.worker.js:67-71` runs the warm-up inference OUTSIDE the `busy`
+ * guard (`busy` is touched only by the INFER case) and `self.onmessage` is
+ * `async` with no queueing behind an outstanding `await` — so an INFER arriving
+ * during LOAD_MODEL's warm-up wedges the session. It is unreachable today only
+ * because the DECK happens to await `ensureSession()` before it ever calls
+ * `infer()`. That is an ordering the deck enforces, not one the worker does, and
+ * "the caller happens to be careful" is precisely the guarantee a seam exists to
+ * replace.
+ *
+ * `dispose()` IS NOT QUEUED, and that is the one deliberate hole. Teardown is
+ * the moment you most need to stop a backend that is not answering; queueing it
+ * behind a hung `separate()` would make the hang permanent and take the user's
+ * tab audio with it (R5). It is also unconditional — `WorkerBackend.dispose()`
+ * terminates the worker outright — so there is no ordering for a queue to
+ * protect.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * Wrap a `Backend` so at most one `load()`/`separate()` is ever in flight.
+ *
+ * FIFO, and that is asserted rather than assumed: `LivePipeline` submits chunk
+ * `k` before chunk `k+1` and `LiveEmitter` refuses a non-contiguous chunk, so a
+ * queue that reordered two calls would surface as an emitter error several
+ * layers away from the reorder.
+ *
+ * A REJECTED CALL DOES NOT POISON THE QUEUE. The chain is advanced with
+ * `p.then(noop, noop)` — the same shape `offscreen/engine.js`'s `modelChain`
+ * uses — because one failed inference must not stop the next: the live path's
+ * `CHUNK_FAILED` ladder is what decides when to stop, after three, and a queue
+ * that latched would take that decision away from it.
+ *
+ * @param {Backend} backend  what the Host handed over
+ * @param {string} what  the name to use in the refusal if it is short a duty
+ * @returns {Backend}
+ */
+export function serialiseBackend(backend, what = 'Backend') {
+  /**
+   * CHECKED HERE, WHERE THE HOST'S ANSWER FIRST ARRIVES. `assertHost` at engine
+   * boot checks that `createBackend` is callable; it cannot check what it
+   * RETURNS. A Host that answers with the wrong shape — an object one level too
+   * deep, a promise to a backend, a half-built stub — otherwise passes every
+   * boot check and fails at the first arm, inside `gpu.run()`, as
+   * `backend.separate is not a function`. That is the exact late failure this
+   * file's boot check exists to move earlier, one level in.
+   */
+  try {
+    assertHost(backend, BACKEND_DUTIES, what);
+  } catch (e) {
+    /**
+     * A REFUSED BACKEND IS STILL GIVEN BACK. `createBackend` is documented as
+     * the place a Host that needs a process STARTS one — "a backend that needs
+     * to spawn a process starts it here and lets `load()` be where the waiting
+     * happens" — so by the time the shape is refused the machine may already
+     * exist, and the reference is about to be dropped. Under this Host that is
+     * invisible (the throw is fatal at `engine.js` module scope and the worker
+     * dies with the document); under the Electron Host this interface is being
+     * written for, an out-of-process backend would simply be leaked by a
+     * mistake in its own shape.
+     *
+     * The refusal is what propagates — `dispose()` may not replace it, and a
+     * `dispose()` that throws or rejects must not either.
+     */
+    if (backend && typeof backend.dispose === 'function') {
+      // The refusal is the error. A dispose() that throws or rejects must not
+      // replace it, and must not become an unhandled rejection either.
+      try { Promise.resolve(backend.dispose()).catch(() => {}); } catch { /* keep the refusal */ }
+    }
+    throw e;
+  }
+
+  let chain = Promise.resolve();
+  const queued = (fn) => {
+    const p = chain.then(fn);
+    chain = p.then(() => {}, () => {});
+    return p;
+  };
+
+  return {
+    load: (bytes, onProgress) => queued(() => backend.load(bytes, onProgress)),
+    separate: (mix, out) => queued(() => backend.separate(mix, out)),
+    dispose: () => backend.dispose(),
+  };
 }
 
 /* ========================================================================= */

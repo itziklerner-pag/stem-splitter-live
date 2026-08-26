@@ -647,6 +647,12 @@ if (flag('self-check')) {
     + '[entry point: every .js under extension/]  \x1b[2m33 files scanned, none\x1b[0m\n'
     + '\n\x1b[32m10 passed, 0 failed\x1b[0m\n',
     'PASS', '10 passed, 0 failed');
+  // Added 2026-08-25 with the S6 step. The ACTUAL summary line, pasted from a
+  // run: `backend-audio: 11 passed, 0 failed`. Same suite-name-prefixed shape
+  // `model-parity` prints, pinned here for the same reason.
+  shape('backend-audio.mjs "backend-audio: 11 passed, 0 failed"', 'backend-audio',
+    '  PASS 12 STEM PLANES CAME BACK  drums 0.0590/0.0582\n\nbackend-audio: 11 passed, 0 failed\n',
+    'PASS', '11 passed, 0 failed');
   /**
    * ...AND ITS ASSERTION NAME STOPS AT THE ENTRY POINT, which is the half that
    * matters for `coverageDrift`. Every name in that file carries a
@@ -940,6 +946,37 @@ const steps = [
   {
     id: 'model-parity', title: 'node tools/model-parity.mjs — the pinned weights really carry six sources, in STEMS order',
     args: ['tools/model-parity.mjs'], heavy: true, needsSeed: true,
+  },
+  /**
+   * Beside `model-parity` because it is the other half of the same question and
+   * a red in either is read next to the other: that one asks whether the pinned
+   * .onnx still says what `engine/demucs.js` believes about it, reading the
+   * protobuf and never running it; this one RUNS it, through the Host seam, and
+   * asks whether six stems come back in `STEMS` order that add up to the mix.
+   *
+   * `slow` AND `heavy`, which is a first: it launches a browser (there is no
+   * `onnxruntime-node` in this repo, and ORT Web wants `fetch`, a module
+   * `Worker` and wasm from a URL) and it reads the 114 MB weights. `--quick`
+   * drops it for both reasons, and CI never sees it — which is the same blind
+   * spot `embed-smoke` has and the reason the note at the top of this file says
+   * a green badge is necessary rather than sufficient.
+   *
+   * HEADLESS, unlike `embed-smoke`: no extension, so no MV3 service worker, so
+   * no need for a display. ~35 s, of which ~7 s is the session and ~5.5 s is
+   * each segment on the wasm EP.
+   *
+   * WHAT IT IS FOR. `CONTRIBUTING.md:190` asks for a manual listen after a
+   * change to the audio path, and S6 moved the inference worker behind an
+   * interface — about as central to that path as an edit gets. This is the
+   * strongest substitute available to something that cannot listen: the real
+   * weights, the real worker, the real runtime, driven through `Deck.infer()`
+   * and the real `GpuScheduler`, with the per-stem RMS printed so a human can
+   * sanity-check what the numbers say.
+   */
+  {
+    id: 'backend-audio',
+    title: 'node tools/backend-audio.mjs — the real weights through the Host seam: six stems in STEMS order that add back up to the mix',
+    args: ['tools/backend-audio.mjs'], slow: true, heavy: true, needsSeed: true,
   },
   /**
    * THE ONE END-TO-END GATE. Real Chromium, the real unpacked extension, the

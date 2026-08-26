@@ -7,9 +7,10 @@
  * `live.js` and `master.js` — bypassing the seam entirely, so a second Host
  * could implement all five duties and still be blindsided by four sibling files
  * reaching for Chrome on their own — all resolve through `assetUrl` below
- * (S2, #4). The one URL that deliberately does NOT is `deck.js`'s inference
- * worker, built with `new URL(..., import.meta.url)`: that one is about the
- * unit's own directory layout, which is the unit's contract and not the Host's.
+ * (S2, #4). The one URL that deliberately does NOT is the inference worker
+ * itself, built with `new URL(..., import.meta.url)` inside
+ * `../workers/workerbackend.js`: that one is about the unit's own directory
+ * layout, which is the unit's contract and not the Host's.
  *
  * AND HALF OF WHAT IS HERE IS NOT `chrome.` AT ALL. `captureStream` is
  * `getUserMedia` with Chrome-proprietary constraints; `onTeardown` is a
@@ -39,6 +40,7 @@
  */
 
 import { MODEL } from '../shared/config.js';
+import { WorkerBackend } from '../workers/workerbackend.js';
 import { MODEL_URL, MODEL_CACHE_NAME } from './host-pin.js';
 
 /** This context's address on the extension message bus. */
@@ -94,10 +96,48 @@ export const captureStream = (sourceToken) => navigator.mediaDevices.getUserMedi
  *
  * Extension-root-relative, no leading slash: `assetUrl('offscreen/capture-processor.js')`.
  * A path that ends in `/` resolves to a directory URL and keeps its trailing
- * slash — `deck.js` hands `assetUrl('vendor/ort/')` to the inference worker's
- * `INIT`, and ORT appends its own file names to it.
+ * slash — `../workers/workerbackend.js` hands `assetUrl('vendor/ort/')` to
+ * the inference worker's `INIT`, and ORT appends its own file names to it.
  */
 export const assetUrl = (relPath) => chrome.runtime.getURL(relPath);
+
+/**
+ * @type {import('../shared/host.js').EngineHost['createBackend']}
+ *
+ * THE HOST PICKS THE BACKEND — that is the whole of what this duty is for, and
+ * under this Host there is exactly one to pick. `WorkerBackend` is unit code
+ * (`../workers/workerbackend.js`), not Chrome code: it needs a `Worker`, a
+ * `fetch` and somewhere to resolve `vendor/ort/`, and none of those is
+ * `chrome.*`. What makes it THIS Host's choice is the line below and nothing
+ * else, which is what a desktop Host replaces when a native backend exists —
+ * one line, against an interface, rather than a fork of the engine.
+ *
+ * A FRESH INSTANCE EVERY CALL. Memoising is the obvious optimisation and it is
+ * the one shape this duty must never take: two decks sharing one worker means
+ * two ORT sessions on one wasm instance, and a concurrent `run()` there
+ * PERMANENTLY WEDGES both (`offscreen/deck.js:18-25`). `new` on every call is
+ * how that stays structurally impossible rather than merely unlikely.
+ *
+ * `assetUrl` is passed as the module's own function, unbound, exactly as
+ * `engine.js` passes it to `MasterBus` and to the decks.
+ *
+ * THE HOOKS ARE FORWARDED WHOLE, and that is the one part of this duty
+ * `assertHost(backend, BACKEND_DUTIES)` structurally cannot check. `onReady` and
+ * `onFail` arrive OUTSIDE any call the unit made — the hardware the backend
+ * found, and a death with nothing in flight — so a Host that built the backend
+ * and dropped them answers with an object that owes every declared duty and
+ * still loses both: the deck's `state.boot.{ep,adapter,threads}` line goes
+ * blank, and an idle backend death is silent again until the next arm. Review
+ * measured exactly that: `new WorkerBackend({ assetUrl })` left `node test.js`
+ * at 602 passed and `embed-smoke` at 130/130. `test.js`'s `host` group now
+ * drives the hooks through THIS function rather than around it.
+ *
+ * `...hooks` FIRST, `assetUrl` LAST, so the unit cannot overwrite the resolver
+ * the Host chose. The declared hook type has no `assetUrl` in it, so nothing
+ * reaches this today; the order is what keeps "the Host decides where its files
+ * live" a property of the code rather than of the caller's good manners.
+ */
+export const createBackend = (hooks) => new WorkerBackend({ ...hooks, assetUrl });
 
 /**
  * @type {import('../shared/host.js').EngineHost['onTeardown']}
@@ -190,7 +230,7 @@ export const modelBytes = async (onProgress = () => {}) => {
  * `false` WHEN IT CANNOT LOOK, which is the duty's own wording and is why the
  * `catch` is here rather than at the call site. Both awaits below can reject —
  * the Cache API is unavailable when storage is blocked or partitioned away —
- * and `engine.js`'s `STATUS` case awaits this BEFORE `ensureWorker()`,
+ * and `engine.js`'s `STATUS` case awaits this BEFORE `ensureBackend()`,
  * `echoXf()` and `push()`, so a rejection does not become a model error: it
  * abandons the rest of the case, and `handle()`'s catch writes the reason to
  * `state.job.error`, which nothing paints. The deck simply stays blank. `false`
