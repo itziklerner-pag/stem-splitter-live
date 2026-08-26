@@ -156,7 +156,7 @@ file here if you write tests for a living.
 ## Develop
 
 ```bash
-node tools/verify.mjs --quick     # 17 gates, no browser, no weights (~1 min)
+node tools/verify.mjs --quick     # 20 gates, no browser, no weights (~1 min)
 bash tools/fetch-model.sh         # seeds the weights so the browser gate doesn't refetch 109 MB
 node tools/verify.mjs             # ...plus model parity and the real-browser smoke
 ```
@@ -172,6 +172,7 @@ nothing** — silence is not a pass.
 | `extension/ui/dev/selftest.mjs` | the deck's display laws — fader, meter scale, buffer health, error families |
 | `tools/tree-check.mjs` | `extension/` really loads: every manifest path, every transitive import |
 | `tools/unit-check.mjs` | the engine and the deck still come *out*: the vendored unit `extension/unit.json` declares resolves, names no `chrome`, and leaves only through a declared Host hole |
+| `tools/seam-check.mjs` | the seam's own contract: one backend call in flight at a time, no caller can wedge a session, and `dispose()` settles every call it takes away |
 | `tools/name-check.mjs` | no former product name survives, and both halves of each renamed IPC pair are present |
 | `tools/model-parity.mjs` | the pinned weights really carry six sources, in the contract's order |
 | `tools/embed-smoke.mjs` | real Chromium, the real extension, the deck injected into a real page |

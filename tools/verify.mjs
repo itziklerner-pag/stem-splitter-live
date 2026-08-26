@@ -719,10 +719,10 @@ if (flag('self-check')) {
   // tools/seam-check.mjs` printed when it was run from here, not a guess at them.
   // Same suite-name-prefixed passed/failed shape `unit-check` puts up, with `ok`
   // at three spaces and the detail after the two-space separator.
-  shape('seam-check.mjs "seam-check: 12 passed, 0 failed" — suite-name prefix, ok at three spaces', 'seam',
+  shape('seam-check.mjs "seam-check: 17 passed, 0 failed" — suite-name prefix, ok at three spaces', 'seam',
     'ok   THE FAKE PORT REFUSES IN THE SHIPPED WORKER\u2019S OWN WORDS  '
     + '[entry point: extension/workers/inference.worker.js, the INFER case, comments stripped]  verbatim, 75 chars\n'
-    + '\nseam-check: 12 passed, 0 failed\n', 'PASS', '12 passed, 0 failed');
+    + '\nseam-check: 17 passed, 0 failed\n', 'PASS', '17 passed, 0 failed');
   check('...and its un-counted note lines are not mistaken for assertions',
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')) === JSON.stringify(['a name']),
     JSON.stringify(assertionNames('ok   a name  a detail\n   -  a note about the vendor drop\n')));
@@ -888,41 +888,86 @@ const steps = [
    * could see: ORT-Web serialises `run()` per wasm instance, and a rejected
    * concurrent call leaves the session permanently unusable — not slow, DEAD,
    * for the life of the worker. It is unreachable today, so nothing observable
-   * changes when the queue is deleted; `--quick` stayed green through every
-   * mutation below except this step.
+   * changes when the queue is deleted.
+   *
+   * WHICH MUTATIONS ONLY THIS STEP SEES, measured rather than assumed — the
+   * first draft of this comment claimed all of them and one reviewer measured
+   * otherwise, which is the AGENTS.md failure this file is meant to be immune
+   * to. Running each mutation below against `node test.js` as well: mutation 1
+   * also reds `unit`, because S6's own `backend` group drives the same wrapper
+   * over a fake BACKEND and its two queue claims go with it. Mutations 2, 3, 4,
+   * 5, 6, 7, 8, 12 and 13 leave `unit` at 612/0, so those are the ones nothing
+   * else in the tree can see. Mutation 2 is the sharpest of them.
    *
    * NOT ONE OF ITS ASSERTIONS READS A CLOCK. The fake port's work is a fixed
    * number of MICROTASK TURNS, so every number it prints is a count and three
    * consecutive runs were byte-identical. ~0.1 s, no browser, no weights.
    *
-   * Watched going red before it was gated. EIGHT mutations, each applied ALONE
-   * against a green 12, and between them every one of the twelve assertions has
-   * been seen to fail:
+   * Watched going red. THIRTEEN mutations, each applied ALONE against a green
+   * 17 and reverted before the next, and between them every one of the
+   * seventeen assertions has been seen to fail:
    *
-   *   - `serialiseBackend`'s queue removed (`const queued = (fn) => fn()`) —
-   *     7 of 12. All four wrapped-stack claims and the queued half of the
-   *     teardown claim; the three controls and the two mirror assertions stay
-   *     green, which is the whole point of having them.
-   *   - the chain advanced with `chain = p` instead of `p.then(noop, noop)` —
-   *     11 of 12: one refused segment latches the chain and the eight calls
-   *     behind it never settle. This is the mutation nothing else in the tree
-   *     catches.
-   *   - `dispose()` back to `this.pending.clear()` with no rejection — 9 of 12:
-   *     the call on the wire, the queued ones and an open `load()`.
-   *   - `dispose()` rejecting but recording no `deadReason` — 11 of 12: the
-   *     queued calls are told the backend "reported no reason" about a teardown
-   *     that had just happened.
-   *   - the FAKE PORT's guard disabled (`if (false)`) — 10 of 12, and both reds
-   *     are CONTROLS. A fake that waves a concurrent INFER through makes every
-   *     "0 guard trips" below it a statement about nothing, so the suite has to
-   *     fail rather than pass quietly, and it does.
-   *   - the FAKE PORT holding `busy` across its warm-up — 11 of 12: the warm-up
-   *     control, which exists to show the gap the shipped guard does not cover.
-   *   - `inference.worker.js` rewording its refusal — 11 of 12: the fake's copy
-   *     of that sentence has drifted off the original.
-   *   - `inference.worker.js` setting `busy` in `loadModel()` — 11 of 12: the
-   *     warm-up gap would be closed, and the control that models it would be
-   *     modelling a worker that no longer exists.
+   *   1. `serialiseBackend`'s queue removed (`const queued = (fn) => fn()`) —
+   *      10 of 17. All four wrapped-stack claims and both seam-teardown claims;
+   *      the three controls, the two mirror assertions and everything about
+   *      backend #1's own teardown stay green, which is the point of having
+   *      them. (`unit` 610/2 as well — see above.)
+   *   2. the chain advanced with `chain = p` instead of `p.then(noop, noop)` —
+   *      16 of 17, red on ONE REJECTED CALL DOES NOT WEDGE THE QUEUE, and the
+   *      branch it prints is `7 of the other 15 resolved — the rejection reached
+   *      calls it does not belong to`. NOT the "never settle" branch: the calls
+   *      do settle, with the WRONG segment's error, and the chain stays rejected
+   *      for the life of the backend so every later `separate()` on that deck
+   *      fails with a stale error from a chunk it has nothing to do with. (The
+   *      first draft of this comment said eight calls hang. Measured false.)
+   *   3. `WorkerBackend.dispose()` back to `this.pending.clear()` with no
+   *      rejection — 15 of 17: the call on the wire and an open `load()`. Both
+   *      of those assertions drive the UNWRAPPED backend on purpose; through the
+   *      wrapper the seam would settle the callers and this mutation would pass.
+   *   4. `dispose()` rejecting but recording no `deadReason` — 15 of 17: a call
+   *      arriving afterwards is told the backend "reported no reason" about a
+   *      teardown that had just happened.
+   *   5. the FAKE PORT's guard disabled (`if (false)`) — 15 of 17, and both reds
+   *      are CONTROLS. A fake that waves a concurrent INFER through makes every
+   *      "0 guard trips" below it a statement about nothing, so the suite has to
+   *      fail rather than pass quietly, and it does.
+   *   6. the FAKE PORT holding `busy` across its warm-up — 16 of 17: the warm-up
+   *      control, which exists to show the gap the shipped guard does not cover.
+   *   7. `inference.worker.js` rewording its refusal — 16 of 17: the fake's copy
+   *      of that sentence has drifted off the original.
+   *   8. `inference.worker.js` setting `busy` in `loadModel()` — 16 of 17: the
+   *      warm-up gap would be closed, and the control that models it would be
+   *      modelling a worker that no longer exists.
+   *   9. a queue that SERIALISES PERFECTLY BUT DISPATCHES LIFO — 12 of 17. This
+   *      is the mutation that found the defect in the FIFO assertion itself: it
+   *      used to read the session's run order off `m.id`, which
+   *      `WorkerBackend.separate()` mints at DISPATCH time, so the ids read
+   *      1..N for any order and a strictly-backwards queue PASSED. It now reads
+   *      the mix byteLength each run was handed — the caller's own stamp — and
+   *      prints `23,22,…,8` here. (`unit` 610/2.)
+   *  10. a queue that runs the FIRST call and quietly resolves the other 15 —
+   *      11 of 17, including AT MOST ONE CALL IS ON THE WIRE, which `maxOnWire`
+   *      alone could not see (a maximum is not a count) and `ran.length === N`
+   *      now does. (`unit` 609/3.)
+   *  11. `serialiseBackend.dispose()` not settling the calls it is holding —
+   *      16 of 17: a Host backend that settles nothing leaves four callers
+   *      waiting for ever. This is the seam half of the teardown contract, and
+   *      it is what makes the obligation structural instead of prose on a
+   *      typedef.
+   *  12. the chain-front `if (disposed) throw` removed — 16 of 17: the queue
+   *      drains a segment into a backend that was already given back.
+   *  13. the on-the-spot refusal at the top of `queued()` removed — 16 of 17: a
+   *      call made after `dispose()` queues behind an inference that will never
+   *      land, which is the hang this whole section is about with a tidier
+   *      cause.
+   *
+   * TWO MORE, WATCHED IN NEIGHBOURING FILES because that is where the assertion
+   * lives: `WorkerBackend.dispose()` no longer nulling `this.probe` reds ...AND
+   * A DISPOSED ONE ANSWERS WITH THE TEARDOWN (16 of 17), and the fake's
+   * `ortPresent` fixture wired to a constant `true` reds its own CONTROL — the
+   * control can lose. `serialiseBackend.dispose()` queued behind the chain reds
+   * `unit`'s `dispose() IS NOT QUEUED` (611/1) and this step's seam-teardown
+   * claim (16 of 17).
    */
   { id: 'seam', title: 'node tools/seam-check.mjs — the seam serialises: one call in flight per backend, no caller can wedge a session, and dispose() settles what it takes away', args: ['tools/seam-check.mjs'] },
   { id: 'ui', title: 'node extension/ui/dev/selftest.mjs — the deck\'s display laws, no browser', args: ['extension/ui/dev/selftest.mjs'] },
