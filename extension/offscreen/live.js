@@ -73,6 +73,7 @@ import {
   KEY_ACCUM_HZ, KEY_ESTIMATE_HZ,
 } from '../shared/config.js';
 import { StemRingWriter, stemRingByteLength } from '../shared/stemring.js';
+import { ensurePlaybackWorklet } from './worklets.js';
 import { makeLivePlan, chunkPlan, LiveEmitter, readWindow, primedPct, skipFrames, STEM_PLANES } from '../engine/live.js';
 import { resolveDeckGains, dbToGain } from '../engine/mixer.js';
 // Imported, not duplicated. This one number is the transpose's whole latency
@@ -95,9 +96,6 @@ import { BpmTap } from '../engine/bpmtap.js';
  * wrong channel and nothing would report it.
  */
 const G_PASS = STEMS.length, G_MASTER = STEMS.length + 1;
-
-/** AudioContexts that already have the playback processor registered (Mode 3) */
-const MODULE_LOADED = new WeakSet();
 
 /** consecutive chunk failures before live mode halts instead of limping */
 const MAX_CHUNK_FAILS = 3;
@@ -587,14 +585,11 @@ export class LivePipeline {
   async build() {
     if (this.node) return;
     const ctx = this.d.ctx();
-    // Mode 3 puts BOTH decks on one AudioContext (ARCHITECTURE.md §8.1), and a
-    // second addModule() of the same processor name on the same context rejects
-    // with "A processor named 'stem-playback' is already registered". Register
-    // once per context, and never swallow a genuine load failure.
-    if (!MODULE_LOADED.has(ctx)) {
-      await ctx.audioWorklet.addModule(this.d.assetUrl('offscreen/playback-processor.js'));
-      MODULE_LOADED.add(ctx);
-    }
+    // Mode 3 puts BOTH decks on one AudioContext and both play through the same
+    // processor, so whether it is already registered is a fact about the CONTEXT
+    // rather than about this pipeline. offscreen/worklets.js owns it — including
+    // why only a name collision is survivable.
+    await ensurePlaybackWorklet(ctx, this.d.assetUrl);
 
     this.sab = new SharedArrayBuffer(stemRingByteLength(STEM_RING_FRAMES));
     this.out = new StemRingWriter(this.sab, STEM_RING_FRAMES);

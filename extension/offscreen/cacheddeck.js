@@ -40,6 +40,7 @@
 
 import { SR, STEMS, STEM_RING_FRAMES, RING_PLANES, TAU, KEY_ACCUM_HZ, KEY_ESTIMATE_HZ } from '../shared/config.js';
 import { StemRingWriter, stemRingByteLength } from '../shared/stemring.js';
+import { ensurePlaybackWorklet } from './worklets.js';
 import { resolveDeckGains, dbToGain } from '../engine/mixer.js';
 // Same worklet, so the same group delay and the same transpose surface. See
 // LivePipeline for why this is imported rather than duplicated.
@@ -98,9 +99,6 @@ const FILL_HZ = 10;
  * deck count or a seek.
  */
 const BPM_ACCUM_HZ = 10, BPM_ESTIMATE_HZ = 2;
-
-/** AudioContexts that already have `stem-playback` registered. */
-const MODULE_LOADED = new WeakSet();
 
 /**
  * WHERE A CACHED DECK MUST SEEK TO before playing, or null to play from where it
@@ -215,18 +213,11 @@ export class CachedDeck {
   async ensureGraph() {
     if (this.node) return;
     const ctx = this.s.ctx();
-    if (!MODULE_LOADED.has(ctx)) {
-      // The live deck may already have registered this processor on this very
-      // context, in which case addModule rejects with "already registered" and
-      // the processor is nonetheless available. Only that rejection is safe to
-      // swallow, and the node construction below is what proves it.
-      try {
-        await ctx.audioWorklet.addModule(this.s.assetUrl('offscreen/playback-processor.js'));
-      } catch (e) {
-        if (!/already registered/i.test(String(e && e.message))) throw e;
-      }
-      MODULE_LOADED.add(ctx);
-    }
+    // The live deck may already have registered this processor on this very
+    // context, or be about to. offscreen/worklets.js owns that decision for both
+    // kinds of deck; the node construction below is what proves the processor is
+    // really there.
+    await ensurePlaybackWorklet(ctx, this.s.assetUrl);
     this.sab = new SharedArrayBuffer(stemRingByteLength(STEM_RING_FRAMES));
     this.out = new StemRingWriter(this.sab, STEM_RING_FRAMES);
     this.node = new AudioWorkletNode(ctx, 'stem-playback', {

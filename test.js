@@ -5382,6 +5382,119 @@ if (group('host')) {
           ? `${importers.join(', ')} import ./host.js directly`
           : `${GRAPH.length} files, resolver passed in from engine.js`);
   }
+
+  head('host — one playback worklet per AudioContext, whichever deck gets there first');
+  /**
+   * THE DEFECT THIS CLOSES. Mode 3 puts both decks on ONE AudioContext and both
+   * kinds of deck play through the same `stem-playback` processor, so the second
+   * registration on a context rejects with "A processor named 'stem-playback' is
+   * already registered". That fact was tracked in TWO module-scoped WeakSets
+   * that did not share state — one in `live.js`, one in `cacheddeck.js` — and
+   * only one of the two files swallowed the rejection. So whether the collision
+   * was survivable depended on WHICH DECK GOT THERE FIRST: live-then-cached was
+   * fine, and cached-then-live rejected out of `LivePipeline.build()` and
+   * surfaced as `START_FAILED`. A live deck that refuses to start because a
+   * cached deck is already playing is the flagship dual-deck gesture failing.
+   *
+   * S2 is the slice that edits both of those lines, so it is the slice that
+   * either fixes this or entrenches it: the shared set now lives in
+   * `offscreen/worklets.js` and both decks go through it.
+   *
+   * REACHABLE, NOT CONSTRUCTED: the two direction assertions drive the SHIPPED
+   * `LivePipeline.build()` and `CachedDeck.ensureGraph()` against ONE fake
+   * context, in both orders. Nothing here reimplements the decision.
+   *
+   * THE FAKE CONTEXT REFUSES A SECOND REGISTRATION THE WAY CHROME DOES, with
+   * Chrome's own wording, and the instrument check below is what makes the two
+   * claims able to lose: against a permissive fake, "cached then live" would
+   * pass on a build where live.js registered a second time and threw in the
+   * browser.
+   */
+  {
+    const { ensurePlaybackWorklet } = await import('./extension/offscreen/worklets.js');
+    const { LivePipeline } = await import('./extension/offscreen/live.js');
+    const assetUrl = (relPath) => `stub://unit/${relPath}`;
+    const drive = (p) => p.then(() => null, (e) => String((e && e.message) || e));
+    /** an AudioContext that registers a processor name exactly once, as Chrome does */
+    const oneShotCtx = () => {
+      const added = [];
+      return {
+        added,
+        sampleRate: SR,
+        audioWorklet: {
+          addModule: async (url) => {
+            if (added.includes(url)) throw new Error("A processor named 'stem-playback' is already registered");
+            added.push(url);
+          },
+        },
+      };
+    };
+    const liveOn = (ctx) => new LivePipeline({
+      deck: 'A', ctx: () => ctx, master: () => null, ring: () => null,
+      infer: async () => ({}), ensureModel: async () => {}, send: () => {}, log: () => {}, assetUrl,
+    });
+    const cachedOn = (ctx) => new CachedDeck('A', {
+      ctx: () => ctx, master: () => null, send: () => {}, log: () => {}, assetUrl,
+    });
+
+    const probe = oneShotCtx();
+    await probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js');
+    const second = await drive(probe.audioWorklet.addModule('stub://unit/offscreen/playback-processor.js'));
+    ok('INSTRUMENT CHECK: the fake context refuses a second registration the way Chrome does  '
+      + '[control: against a permissive fake, both claims below pass on a build that registers twice]',
+      second != null && /already registered/i.test(second),
+      second == null ? 'the fake accepted a second addModule of the same processor — it cannot reproduce the defect' : second);
+
+    // ---- live first, then a cached deck on the same context
+    const ctxLF = oneShotCtx();
+    const lfLive = await drive(liveOn(ctxLF).build());
+    const lfCached = await drive(cachedOn(ctxLF).ensureGraph());
+    ok('LIVE FIRST, THEN CACHED ON THE SAME CONTEXT: one registration, and neither builder trips over it  '
+      + '[entry point: live.js LivePipeline.build() then cacheddeck.js CachedDeck.ensureGraph()]',
+      ctxLF.added.length === 1
+      && !/already registered/i.test(String(lfLive)) && !/already registered/i.test(String(lfCached)),
+      ctxLF.added.length !== 1
+        ? `${ctxLF.added.length} registrations on one context, expected 1`
+        : `1 registration; live stopped at ${JSON.stringify(String(lfLive).slice(0, 48))}, cached at ${JSON.stringify(String(lfCached).slice(0, 48))}`);
+
+    // ---- and the other way round, which is the order that used to fail
+    const ctxCF = oneShotCtx();
+    const cfCached = await drive(cachedOn(ctxCF).ensureGraph());
+    const cfLive = await drive(liveOn(ctxCF).build());
+    ok('...AND CACHED FIRST, THEN LIVE — the order that used to reject out of build() as START_FAILED  '
+      + '[entry point: cacheddeck.js CachedDeck.ensureGraph() then live.js LivePipeline.build()]',
+      ctxCF.added.length === 1
+      && !/already registered/i.test(String(cfCached)) && !/already registered/i.test(String(cfLive)),
+      ctxCF.added.length !== 1
+        ? `${ctxCF.added.length} registrations on one context, expected 1`
+        : /already registered/i.test(String(cfLive))
+          ? `the live deck rejected with ${JSON.stringify(String(cfLive))} — a live prime cannot start while a cached deck holds the context`
+          : `1 registration; cached stopped at ${JSON.stringify(String(cfCached).slice(0, 48))}, live at ${JSON.stringify(String(cfLive).slice(0, 48))}`);
+
+    /**
+     * THE TWO REJECTIONS THAT ARE NOT THE SAME KIND, driven directly because
+     * neither is reachable from a deck builder in Node: one is what the registrar
+     * must swallow and the other is what it must never swallow, and a registrar
+     * that got them the wrong way round would pass both direction claims above.
+     */
+    const collided = await drive(ensurePlaybackWorklet({
+      audioWorklet: { addModule: async () => { throw new Error("A processor named 'stem-playback' is already registered"); } },
+    }, assetUrl));
+    ok('A NAME COLLISION IS TOLERATED — the module loaded, and the caller\'s AudioWorkletNode is what proves it  '
+      + '[entry point: extension/offscreen/worklets.js ensurePlaybackWorklet(), the one both decks call]',
+      collided === null,
+      collided === null ? 'resolved' : `rejected with ${JSON.stringify(collided)}`);
+
+    const broken = await drive(ensurePlaybackWorklet({
+      audioWorklet: { addModule: async () => { throw new Error('Failed to fetch playback-processor.js'); } },
+    }, assetUrl));
+    ok('...AND A GENUINE LOAD FAILURE IS NOT — a 404 or a syntax error in the worklet still reaches the deck  '
+      + '[entry point: extension/offscreen/worklets.js ensurePlaybackWorklet(), the one both decks call]',
+      broken != null && /Failed to fetch/.test(broken),
+      broken == null
+        ? 'ensurePlaybackWorklet() SWALLOWED a load failure — the deck would then build a node for a processor that is not there'
+        : broken);
+  }
 }
 
 // ===========================================================================
