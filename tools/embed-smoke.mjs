@@ -1515,6 +1515,17 @@ try {
 
   // ============================== the durable arm refusal, and the chord to fix it
   /**
+   * APPEND ABOVE THIS BLOCK, NOT BELOW IT. Everything from here to the end of
+   * the `try` runs against a DISARMED deck with a BANNER UP, and both of those
+   * are states earlier assertions in this file assert the NEGATION of: `#banner`
+   * is checked hidden twice, and the armed-state assertions read
+   * `session.tabId`. This block writes `session: { tabId: null, … }` and seeds a
+   * refusal deliberately, so an assertion appended after it is reading a
+   * different deck from the one it thinks it is — and its last act replaces the
+   * frame's `chrome.commands` table for the rest of the run.
+   * `extension/shared/host.js` carries the same note for its duty lists, for the
+   * same reason.
+   *
    * THE ONE READ ON THIS PAGE THAT NO BROWSER ASSERTION HAS EVER COVERED.
    *
    * A refusal to arm is sent AND persisted (`sw/service-worker.js`), because the
@@ -1601,14 +1612,27 @@ try {
     + `  ${JSON.stringify(bannerTitle)}`);
 
   /**
-   * THE NOT-ARMED HINT NAMES THE CHORD, and the chord is the browser's.
+   * THE NOT-ARMED HINT NAMES A CHORD THE USER HAS — and NO MORE THAN THAT is
+   * claimed here, which is the correction review forced on this block.
    *
-   * `chrome.commands.getAll()` is read here out of the SERVICE WORKER — a
-   * different context from the deck, reached by a different path — so the two
-   * strings being equal is two independent readings of one binding rather than
-   * one value compared with itself. The same pair of claims the setup page gets
-   * (what is DRAWN, and what is ANNOUNCED), now for the surface the user is
-   * actually standing on when they want to arm.
+   * `chrome.commands.getAll()` is read out of the SERVICE WORKER, a different
+   * context from the deck reached by a different path, and the first version of
+   * this comment called that "two independent readings of one binding". It is
+   * not. On every machine this suite runs on — and on CI — the binding IS the
+   * manifest's suggested key, so a deck that ignored the platform and TYPED
+   * `Ctrl+Shift+9` into `paintArmHint()` passes this equality unchanged. Both
+   * mutations were run: a literal in `paintArmHint`, and a boot site that calls
+   * `host.armShortcut()` and throws the answer away. Neither moved this number.
+   * That is a control that cannot lose, and AGENTS.md is explicit about what
+   * that is worth.
+   *
+   * SO THE READING IS MADE INDEPENDENT BELOW instead of being asserted to be.
+   * The block after this one replaces the frame's command table with a chord no
+   * manifest in this repo declares and remounts the deck — the only arrangement
+   * in which "drawn" and "returned" are two different values that can disagree.
+   * This pair stays because it is the claim about the REAL binding (the chord
+   * the user would actually press is the chord on screen), and because it is the
+   * same pair the setup page gets: what is DRAWN, and what is ANNOUNCED.
    */
   const deckRawChord = await sw.evaluate(async () => {
     const all = await chrome.commands.getAll().catch(() => []);
@@ -1620,7 +1644,7 @@ try {
   const hintSaid = await frame.locator('#src-chord')
     .evaluate((el) => el.getAttribute('aria-label') || '').catch(() => '');
   ok(deckRawChord !== '' && hintChord === deckRawChord && /toolbar icon/.test(hintLead),
-    'THE DECK\'S NOT-ARMED HINT NAMES THE CHORD THE BROWSER IS BOUND TO, beside the toolbar icon it already named'
+    'THE DECK\'S NOT-ARMED HINT NAMES A CHORD THE BROWSER HAS BOUND, beside the toolbar icon it already named'
     + `  chrome.commands.getAll() says "${deckRawChord}" for arm-tab, the deck drew "${hintChord}"`);
   /**
    * The same branch `welcome.js` makes, asserted the same way: an accessible
@@ -1632,6 +1656,94 @@ try {
   ok(/^[A-Za-z]/.test(hintChord) ? hintSaid === '' : /^[A-Za-z]+( [A-Za-z0-9]+)+$/.test(hintSaid),
     '...and the deck ANNOUNCES it in words exactly when it DRAWS it in glyphs, the same test the setup page makes'
     + `  drawn "${hintChord}", announced "${hintSaid || '(nothing — the text is already words)'}"`);
+
+  /**
+   * ON SCREEN, NOT MERELY IN `textContent` — because `.hint` is
+   * `overflow: hidden; text-overflow: ellipsis; white-space: nowrap`, and the
+   * chord is the LAST thing on the line. Everything above reads `textContent`,
+   * which survives clipping perfectly intact: a chord ellipsised away is a chord
+   * every assertion in this block still passes on.
+   *
+   * THE SENTENCE GREW BY THE LENGTH OF A KEY CAP in this slice, so this is the
+   * line that goes red the day it grows again past the width the deck actually
+   * gets. `scrollWidth === clientWidth` is the whole test on a nowrap box.
+   * FLOOR: a chord must be drawn at all, so an empty hint cannot pass it by
+   * being trivially narrow.
+   */
+  const hintBox = await frame.locator('#src-sub')
+    .evaluate((el) => ({ scroll: el.scrollWidth, client: el.clientWidth }))
+    .catch(() => null);
+  ok(hintChord !== '' && !!hintBox && hintBox.scroll <= hintBox.client,
+    '...and the whole sentence FITS the deck, so the chord is not the first thing an ellipsis eats'
+    + `  #src-sub scrollWidth ${hintBox ? hintBox.scroll : '?'} px, clientWidth ${hintBox ? hintBox.client : '?'} px`);
+
+  /**
+   * THE CHORD IS READ FROM THE PLATFORM, AND THIS IS THE ONLY ARRANGEMENT IN
+   * WHICH THAT CAN GO RED.
+   *
+   * The equality above compares the deck's chord with the browser's, and on
+   * every machine that runs this suite those are the same string for a second
+   * reason: the manifest suggests it. So the command table in the DECK'S FRAME
+   * is replaced, before the frame exists, with a chord no manifest in this repo
+   * declares and no keyboard in this harness is bound to — and the deck is
+   * remounted so its boot read runs under the replacement. A deck that types a
+   * chord, or that calls `host.armShortcut()` and discards the answer, now draws
+   * `Ctrl+Shift+9` at a browser that says `Alt+Shift+7`.
+   *
+   * WHY AN INIT SCRIPT AND NOT A PATCH AFTER MOUNT: the chord is asked for ONCE,
+   * at boot, and never followed (a rebind happens on another page, and this deck
+   * is created by the arm gesture). There is no second read to intercept, so the
+   * patch has to be in place before the frame's module evaluates.
+   *
+   * WHY A REMOUNT AND NOT A RELOAD: `content.js` owns the frame, `mount()` is a
+   * no-op while one is connected, and `'toggle'` from the service worker is the
+   * gesture that removes it. Two real messages on the real bus, which is this
+   * file's technique everywhere else.
+   *
+   * THE INJECTED CHORD IS DELIBERATELY NOT THE MANIFEST'S in either of its
+   * parts: `Alt` is not `Ctrl`, `7` is not `9`. A deck that got half of it from
+   * the platform and half from a template cannot pass.
+   */
+  const INJECTED_CHORD = 'Alt+Shift+7';
+  await page.addInitScript((chord) => {
+    // Only the extension frame HAS a command table; the YouTube page has no
+    // `chrome` at all and must be left exactly as it was.
+    try {
+      if (globalThis.chrome && chrome.commands && typeof chrome.commands.getAll === 'function') {
+        chrome.commands.getAll = () => Promise.resolve([{ name: 'arm-tab', shortcut: chord, description: '' }]);
+      }
+    } catch (e) { /* a context without `chrome` is not one we meant to patch */ }
+  }, INJECTED_CHORD);
+
+  await sw.evaluate(async (tabId) => {
+    const msg = (mode) => chrome.tabs.sendMessage(tabId, {
+      v: 1, to: 'tab', from: 'sw', type: 'STEM_SPLITTER_LIVE_EMBED', mode,
+    });
+    await msg('toggle');   // the show/hide gesture: this removes the frame
+    await new Promise((r) => setTimeout(r, 200));
+    await msg('show');     // and this builds a new one, under the patch
+  }, armedTabId);
+
+  // Wait for the CONDITION, not for a clock — the same shape as the remount
+  // above. A deck that draws the wrong chord spins to the cap and then reports
+  // the chord it drew, which is the sentence worth reading.
+  let injChord = '', injMs = 0;
+  {
+    const t0 = Date.now();
+    for (;;) {
+      injChord = ((await frame.locator('#src-chord').textContent().catch(() => '')) || '').trim();
+      injMs = Date.now() - t0;
+      if (injChord === INJECTED_CHORD || injMs > BOOT_BUDGET_MS) break;
+      await page.waitForTimeout(16);
+    }
+  }
+  const injSaid = await frame.locator('#src-chord')
+    .evaluate((el) => el.getAttribute('aria-label') || '').catch(() => '');
+  ok(injChord === INJECTED_CHORD && injSaid === '',
+    'THE DECK DRAWS WHAT THE PLATFORM RETURNED: a command table answering with a chord no manifest here declares puts THAT chord on the deck'
+    + `  the frame's chrome.commands.getAll() was made to answer "${INJECTED_CHORD}" and the deck drew "${injChord}"`
+    + `${injSaid ? `, announced "${injSaid}" — a chord already drawn in words needs no accessible name` : ''}`
+    + `  (settled in ${injMs} ms of ${BOOT_BUDGET_MS})`);
 } catch (e) {
   /**
    * AN UNEXPECTED THROW IS ONE RED, NOT A CRASH — because a crash is loud but
