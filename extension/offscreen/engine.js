@@ -1,13 +1,36 @@
 /**
- * The offscreen document owns audio reality: the MediaStreams, the ONE
- * AudioContext, the capture worklets, the inference workers, the master bus and
- * the export job.
+ * THE ENGINE'S ORCHESTRATION. It owns audio reality: the MediaStreams, the ONE
+ * AudioContext, the capture worklets, the inference workers, the master bus, the
+ * stem cache and the message switch that drives all of it.
  *
- * What it CANNOT do (measured, probe/R0-RESULTS.md): chrome.storage,
- * chrome.downloads, chrome.tabs, chrome.runtime.getManifest. Its entire chrome.*
- * surface is runtime.{connect,getURL,id,onConnect,onMessage,sendMessage}.
- * Anything persistent goes through the service worker; anything large goes
- * through OPFS.
+ * IT IS HOST-AGNOSTIC, and that is the property to preserve when editing it.
+ * Everything platform-bound THIS file needs lives behind the five duties of
+ * `EngineHost` (`../shared/host.js`), supplied here by `./host.js` — the Chrome
+ * extension's implementation, and the only `chrome.`-speaking module this file
+ * reaches for:
+ *
+ *   send / onMessage    the extension message bus
+ *   captureStream       getUserMedia with the tabCapture constraints
+ *   assetUrl            chrome.runtime.getURL, for the worklet modules
+ *   onTeardown          pagehide — a document-lifetime event, not an engine one
+ *
+ * (`./host.js` is not yet the only file under `offscreen/` that says `chrome.`:
+ * deck.js, cacheddeck.js, live.js and master.js still call
+ * `chrome.runtime.getURL` themselves. S2 (#4) threads `assetUrl` through them.)
+ *
+ * Nothing else here is Chrome-specific, and the audit trail is the whole list
+ * rather than a sample: Web Audio (`AudioContext`, `AudioWorkletNode`),
+ * `SharedArrayBuffer`, OPFS (`navigator.storage.getDirectory`),
+ * `navigator.mediaDevices.enumerateDevices`, `self.crossOriginIsolated`,
+ * `crypto.randomUUID` and `location.href`. That is every platform global this
+ * file touches — plain web platform, all of it — so a second Host supplies the
+ * five duties and this file runs unchanged (ADR 0001 decision 5).
+ *
+ * There is NO export job — the header said there was for a long time. `state.job`
+ * survives as a shape: only `status`, `error` and `stage` are ever written (by
+ * `fail()`), the other five fields only by the reset literal, and no surface
+ * reads any of it. It is kept, not revived, because `fail()` has nowhere else to
+ * record and removing it is not this slice's change.
  *
  * ---------------------------------------------------------------------------
  * MODE 3 (dual deck). Two decks live in THIS document, because Chrome allows
@@ -46,8 +69,22 @@ import { StemCache, CacheWriter, cacheKey, videoIdFromUrl,
 // line that confidently names the wrong bound.
 import { PITCH_MIN_SEMITONES, PITCH_MAX_SEMITONES } from '../engine/pitch.js';
 import { effectiveXfPosition } from '../engine/mixer.js';
+/**
+ * THE HOST. Exactly one host-supplied module, imported statically, because
+ * `embed.html`'s CSP rules out handing a Host object in at boot and the seam has
+ * to be the same shape in both contexts (../shared/host.js).
+ */
+import * as host from './host.js';
+import { assertHost, ENGINE_HOST_DUTIES } from '../shared/host.js';
 
-const ME = 'off';
+/**
+ * BEFORE ANYTHING ELSE IN THIS MODULE RUNS. `MasterBus`, `Deck` and the boot
+ * `HELLO` all execute at module scope below, and `HELLO` is the first thing to
+ * reach `host.send` — so a Host that is short a duty must be refused here, where
+ * the error names the duty, rather than at the first arm, where it names a line
+ * inside `captureStart` that has already taken a track off the user's tab.
+ */
+assertHost(host, ENGINE_HOST_DUTIES, 'EngineHost');
 
 /**
  * This document's identity. Two offscreen documents cannot coexist (Chrome
@@ -99,8 +136,17 @@ function log(line) {
   console.log('[engine]', line);
 }
 
+/**
+ * The transmit path for the WHOLE engine, not just this file: `shared.send`
+ * below hands it to every Deck, LivePipeline and CachedDeck.
+ *
+ * RETURNS UNDEFINED, and that is a contract rather than an accident — twenty-two
+ * call sites end a `case` of `handle()` with `return send({...})` inside an
+ * `async` function, so a promise returned here would be awaited by every one of
+ * them.
+ */
 function send(msg) {
-  chrome.runtime.sendMessage({ v: 1, to: 'ui', from: ME, ...msg }).catch(() => {});
+  host.send(msg);
 }
 let pushQueued = false;
 function push(force) {
@@ -195,7 +241,7 @@ const gpu = new GpuScheduler({ priority: 'A', armed: true });
 async function ensureContext() {
   if (ctx) return ctx;
   const c = new AudioContext({ sampleRate: SR, latencyHint: 'playback' });
-  await c.audioWorklet.addModule(chrome.runtime.getURL('offscreen/capture-processor.js'));
+  await c.audioWorklet.addModule(host.assetUrl('offscreen/capture-processor.js'));
   if (c.state !== 'running') await c.resume().catch(() => {});
   state.boot.sampleRate = c.sampleRate;
   if (c.sampleRate !== SR) {
@@ -808,13 +854,20 @@ async function stopDeck(d) {
 }
 
 // ------------------------------------------------------------------- capture
-async function captureStart(streamId, source, mode = 'export', id = DECK_DEFAULT) {
+/**
+ * `sourceToken`, not `streamId`: the token is OPAQUE to the engine. The Host
+ * mints it — under this Host, the service worker's
+ * `chrome.tabCapture.getMediaStreamId` — and the engine only carries it back to
+ * `host.captureStream`.
+ *
+ * THE SAB CHECK IS FIRST, BEFORE THE TOKEN IS SPENT, and that ordering is R5:
+ * a stream opened and then abandoned holds the user's tab muted. Everything
+ * after the stream exists is inside the try/catch below for the same reason.
+ */
+async function captureStart(sourceToken, source, mode = 'export', id = DECK_DEFAULT) {
   if (!SAB_OK) throw new Error('SharedArrayBuffer unavailable — the capture ring cannot be built');
   const d = deck(id);
-  const s = await navigator.mediaDevices.getUserMedia({
-    audio: { mandatory: { chromeMediaSource: 'tab', chromeMediaSourceId: streamId } },
-    video: false,
-  });
+  const s = await host.captureStream(sourceToken);
   // Review finding M2: attach can throw on a re-entrant start or inside
   // ensureContext. Chrome mutes a tab the moment it is captured, so a
   // dropped-but-live track leaves the user's tab permanently silent with no
@@ -1028,11 +1081,11 @@ async function readOpfsRoot(name) {
  */
 const pageRate = { A: 1, B: 1 };
 
-chrome.runtime.onMessage.addListener((m) => {
-  if (!m || m.to !== ME) return;
-  handle(m);
-  return false;
-});
+// The Host owns the routing guard and the listener's return value; `handle` is
+// handed the raw envelope and its promise is deliberately not awaited — every
+// case reports through `send`/`push`, and `handle`'s own catch is the only
+// error path (see `fail()`).
+host.onMessage(handle);
 
 async function handle(m) {
   try {
@@ -1575,8 +1628,16 @@ async function teardown() {
   push(true);
 }
 
-addEventListener('pagehide', () => {
-  // Synchronous best effort — pagehide will not await. The tracks are the part
+/**
+ * R5's third and last track-stop. The Host says WHEN this context is going away
+ * — `pagehide` here, something else under another Host — and the engine says
+ * WHAT cannot be left behind.
+ *
+ * Reaches into `Deck` internals rather than calling `d.dispose()` because
+ * `dispose()` is async and teardown will not await it.
+ */
+host.onTeardown(() => {
+  // Synchronous best effort — teardown will not await. The tracks are the part
   // that matters: a live track left running keeps the user's tab muted.
   for (const d of liveDecks()) {
     if (d.stream) d.stream.getTracks().forEach((t) => t.stop());
@@ -1584,6 +1645,12 @@ addEventListener('pagehide', () => {
   }
 });
 
+// ponytail: this boot line names the Chrome offscreen document, in a file whose
+// header says it is host-agnostic. It is a RUNTIME STRING, so S11's prose pass
+// will not sweep it up, and a second Host would announce itself as a document it
+// does not have. Left alone here on purpose: it sits inside the load-bearing
+// boot-order triple below, and rewording it buys no gate. Upgrade path: S9 is
+// already enumerating host-coupled residue — rename it there, or in S11.
 log(`offscreen up · SAB ${SAB_OK} · crossOriginIsolated ${self.crossOriginIsolated}`);
 decks.A.ensureWorker();
 send({ type: 'HELLO' });

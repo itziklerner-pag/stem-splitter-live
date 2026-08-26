@@ -423,10 +423,11 @@ const anyBlind = (rows) => rows.some((g) => g.cents === null);
  * the claim is made where it is checkable: NOTHING between the capture tap and
  * the DAC references the page rate at all.
  *
- * `offscreen/offscreen.js` is excluded by name and only it: `pageRate` lives
+ * `offscreen/engine.js` is excluded by name and only it: `pageRate` lives
  * there, its own doc block calls it "A RECORD AND NOT A CONTROL", and the SPEED
  * handler is the one legitimate mention in the engine. Every other engine file
- * naming it would be that record growing a reader.
+ * naming it would be that record growing a reader. (It was `offscreen.js` until
+ * the Host seam split that file; the exclusion follows the record, not the name.)
  *
  * FAILS IF IT CANNOT LOOK: zero files scanned is a red, not a pass.
  */
@@ -435,7 +436,7 @@ const anyBlind = (rows) => rows.some((g) => g.cents === null);
     const r = relative(ROOT, p);
     return (r.startsWith('extension/engine/') || r.startsWith('extension/offscreen/')
       || r.startsWith('extension/workers/') || r.startsWith('extension/shared/'))
-      && r !== 'extension/offscreen/offscreen.js';
+      && r !== 'extension/offscreen/engine.js';
   });
   // Comments are stripped first: this is a claim about CODE, and a header that
   // explains why the engine does not read the rate must not fail an assertion
@@ -446,7 +447,7 @@ const anyBlind = (rows) => rows.some((g) => g.cents === null);
     .filter(([, s]) => /\bpageRate\b|\bplaybackRate\b/.test(s))
     .map(([p]) => p);
   ok('NOTHING DOWNSTREAM OF THE TAP READS THE PAGE RATE  '
-    + '[entry point: extension/{engine,offscreen,workers,shared}/**, less offscreen.js which owns the record]',
+    + '[entry point: extension/{engine,offscreen,workers,shared}/**, less offscreen/engine.js which owns the record]',
     scanned.length > 0 && readers.length === 0,
     scanned.length === 0
       ? 'scanned zero engine files — this assertion has no coverage at all'
