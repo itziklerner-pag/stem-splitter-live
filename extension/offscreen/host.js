@@ -186,10 +186,24 @@ export const modelBytes = async (onProgress = () => {}) => {
  * Cheap on purpose — `cache.match` resolves a `Response` without reading its
  * body, so this answers the setup page's "will arming cost 109 MB?" without
  * spending anything. It is the reason `STATUS` can answer at boot.
+ *
+ * `false` WHEN IT CANNOT LOOK, which is the duty's own wording and is why the
+ * `catch` is here rather than at the call site. Both awaits below can reject —
+ * the Cache API is unavailable when storage is blocked or partitioned away —
+ * and `engine.js`'s `STATUS` case awaits this BEFORE `ensureWorker()`,
+ * `echoXf()` and `push()`, so a rejection does not become a model error: it
+ * abandons the rest of the case, and `handle()`'s catch writes the reason to
+ * `state.job.error`, which nothing paints. The deck simply stays blank. `false`
+ * is also the safe direction of the two: the user is offered a download they
+ * may decline, rather than having 109 MB spent on a `true` nobody checked.
  */
 export const modelCached = async () => {
-  const cache = await caches.open(MODEL_CACHE_NAME);
-  return !!(await cache.match(MODEL_URL));
+  try {
+    const cache = await caches.open(MODEL_CACHE_NAME);
+    return !!(await cache.match(MODEL_URL));
+  } catch {
+    return false;
+  }
 };
 
 /**
