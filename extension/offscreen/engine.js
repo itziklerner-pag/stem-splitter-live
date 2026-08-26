@@ -897,10 +897,17 @@ async function stopDeck(d) {
 
 // ------------------------------------------------------------------- capture
 /**
- * `sourceToken`, not `streamId`: the token is OPAQUE to the engine. The Host
- * mints it — under this Host, the service worker's
- * `chrome.tabCapture.getMediaStreamId` — and the engine only carries it back to
- * `host.captureStream`.
+ * `sourceToken`, and SO IS THE WIRE FIELD since S11 froze Host interface v1: the
+ * token is OPAQUE to the engine. The Host mints it — under this Host, the
+ * service worker's `chrome.tabCapture.getMediaStreamId` — and the engine only
+ * carries it back to `host.captureStream`. It used to arrive as
+ * `CAPTURE_START.streamId`, which is a Chrome noun on a wire the unit is
+ * forbidden to know the Host of; the parameter here was already right and the
+ * envelope was not.
+ *
+ * `source` IS `{title, url}` AND HAS NO TAB ID, for the same reason and with a
+ * sharper edge: nothing in the unit ever read `source.tabId`, so the field cost
+ * a second Host a value it had to invent to fill a shape nobody consumed.
  *
  * THE SAB CHECK IS FIRST, BEFORE THE TOKEN IS SPENT, and that ordering is R5:
  * a stream opened and then abandoned holds the user's tab muted. Everything
@@ -1037,7 +1044,7 @@ async function devCapture(hz, id = DECK_DEFAULT) {
   osc.connect(g).connect(dest);
   osc.start();
   d.devTone = { ctx: tctx, osc };
-  await d.attach(dest.stream, { tabId: null, title: `dev tone ${hz} Hz @ 48 kHz`, url: 'synthetic' });
+  await d.attach(dest.stream, { title: `dev tone ${hz} Hz @ 48 kHz`, url: 'synthetic' });
   push(true);
 }
 
@@ -1075,7 +1082,7 @@ async function devLive({ hop, tap: wantTap, attachOnly, deck: id = DECK_DEFAULT,
   if (hop) for (const x of liveDecks()) x.live.setHop(hop);
   // attach in the DEFAULT mode, exactly like the shipping CAPTURE_START path,
   // so startLive()'s mode flip is what the harness exercises
-  await d.attach(dest.stream, { tabId: null, title: `dev live fixture ${d.id}`, url: file || 'fixture' });
+  await d.attach(dest.stream, { title: `dev live fixture ${d.id}`, url: file || 'fixture' });
   push(true);
   // `attachOnly` stops HERE, leaving the capture running in export mode with
   // nothing but the gain-0 sink attached to ctx.destination — which is the state
@@ -1147,7 +1154,7 @@ async function handle(m) {
         if (!m.deck || m.deck === DECK_DEFAULT) {
           state.job = { status: 'idle', chunk: 0, chunks: 0, pct: 0, elapsedMs: 0, etaMs: null, error: null, stage: null };
         }
-        return void await captureStart(m.streamId, m.source, 'export', m.deck || DECK_DEFAULT)
+        return void await captureStart(m.sourceToken, m.source, 'export', m.deck || DECK_DEFAULT)
           .catch((e) => fail('capture', e));
 
       case 'CAPTURE_STOP':

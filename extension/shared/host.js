@@ -37,6 +37,156 @@
  * blank" into a sentence.
  */
 
+/* =========================================================================
+ * HOST INTERFACE v1 — FROZEN AT v0.2.0 (S11, issue #12)
+ * =========================================================================
+ *
+ * WHAT "FROZEN" MEANS HERE, because it is weaker than the word usually is and
+ * pretending otherwise would be the lie this whole file is written against.
+ * There is one Host, one tag series (ADR 0001 decision 6) and no npm publish,
+ * so nothing enforces compatibility except this sentence and the tag:
+ *
+ *   FROZEN — the five duty tables below (`ENGINE_HOST_DUTIES`,
+ *     `BACKEND_DUTIES`, `DECK_HOST_DUTIES`, `DECK_PAGE_DUTIES`,
+ *     `DECK_TRANSPORT_DUTIES`), the `BUS` addresses, the shapes of the four
+ *     messages a Host must ORIGINATE, and the write set on `DeckTransport.drive`.
+ *     Removing or renaming any of those is a MAJOR change and gets a major tag.
+ *     Adding a duty is a MINOR change that every existing Host fails at boot,
+ *     loudly, by `assertHost` — which is the whole reason `assertHost` exists.
+ *   NOT FROZEN — the prose. Every paragraph here is an obligation the type
+ *     cannot show, and a sharper wording of the same obligation is a patch.
+ *
+ * THE QUESTION THIS FREEZE WAS JUDGED AGAINST, and it is one question rather
+ * than a checklist: CAN AN ELECTRON MAIN PROCESS IMPLEMENT EVERY DUTY WITHOUT
+ * LYING? A duty it can only discharge by inventing a value — a tab id it does
+ * not have, a thread count it never counted — is a duty that will be discharged
+ * with an invented value, and the invention will be believed. Four things
+ * failed that test and were changed here rather than left for v2; four more
+ * were tested, passed, and are recorded so the next reader does not re-open
+ * them; and two are named as known v1 limitations, because saying so is worth
+ * more than a duty added in a hurry.
+ *
+ * ---- CHANGED, because a Host would have had to lie ----------------------
+ *
+ * 1. `CAPTURE_START.streamId` IS NOW `sourceToken`. The engine's parameter was
+ *    already `sourceToken` and already documented as opaque; the WIRE field
+ *    stayed Chrome's. A Host mints whatever its capture grant is — a device id,
+ *    a window handle, a pipe name — and had to put it in a field named after
+ *    `chrome.tabCapture.getMediaStreamId`'s return value.
+ *
+ * 2. `CAPTURE_START.source` LOST ITS `tabId`. Nothing in the unit ever read it:
+ *    `offscreen/engine.js` reads `source.url` (the cache key's video id) and
+ *    `source.title`, and the engine's own dev paths wrote `tabId: null` to fill
+ *    a shape nobody consumed. A Host with no tabs had to invent a value for a
+ *    field with no reader — the purest form of the lie this freeze looked for.
+ *    `source` is `{title, url}`: what a Source IS, not where this Host keeps it.
+ *
+ * 3. THE DECK'S "AM I ARMED?" IS A BOOLEAN. `SESSION.session.tabId` was read by
+ *    `ui/embed.js` at four sites as `!!session.tabId`, which made a tab id the
+ *    unit's own definition of armed — the last place in the unit that knew what
+ *    a tab was. It is `session.armed` now, derived Host-side
+ *    (`sw/service-worker.js` `sessionForDeck()`), which is where a translation
+ *    belongs. The deck PROJECTS the record rather than merging it, so a Host
+ *    that omits `armed` reads as disarmed instead of leaving the last value
+ *    standing.
+ *
+ * 4. `LIVE_START` LOST ITS `tabId` TOO. The engine never read `m.tabId`; the
+ *    deck sent one because it had one. A field on the wire that no receiver
+ *    reads is a field a second implementer will spend a day sourcing.
+ *
+ * ---- TESTED AND LEFT ALONE, with the reason, so it stays settled ---------
+ *
+ * 5. `EngineHost.send` STAMPS THE ENVELOPE AND `DeckHost.send` DOES NOT. Both
+ *    are implementable without lying — one Host writes two functions — so this
+ *    is an asymmetry, not a leak, and the asymmetry is load-bearing: the engine
+ *    has exactly one correspondent and 22 call sites that end
+ *    `return send({...})`, while the deck has two and would have to pass an
+ *    address in, which is the envelope crossing the seam by another route. See
+ *    the note above `DECK_HOST_DUTIES` for the long form. NOT reconciled.
+ *
+ * 6. `createBackend`'s `onReady({threads, adapter})` STAYS ORT-SHAPED AND
+ *    NULLABLE. A native backend answers `{threads: null, adapter: null}`, which
+ *    is a legitimate answer the deck already renders as "say nothing about wasm
+ *    or a GPU" — so no Host has to lie, and a third neutral field would be an
+ *    abstraction with one implementation and no consumer, which
+ *    `CONTRIBUTING.md`'s engineering bias forbids. A backend that wants to
+ *    describe itself in its own words is a v2 change with a caller behind it.
+ *
+ * 7. `DeckTransport.drive`'s CLOSED WRITE SET IS ENFORCED AT BOTH ENDS, and
+ *    stays that way. ADR 0001 decision 4 fixes it at `muted`, `currentTime`,
+ *    `playbackRate`; `ui/host.js` filters what goes on the wire and the unit
+ *    names the three fields at the call site rather than spreading a patch.
+ *    Belt and braces is right here: L1 is a security property and this channel
+ *    reaches a `<video>` on somebody else's page.
+ *
+ * 8. `DeckPage.onAutonav` STAYS REPORT-ONLY, AND THE INSTRUCTION STAYS A
+ *    PREFERENCE. The deck writes `prefs.autoplayNext` through `storageSet` and
+ *    the Host watches that key; it is not a deck -> host command and v1 does not
+ *    make it one. That is a real coupling and it is DECLARED rather than
+ *    closed: see the `onAutonav` typedef, which names the key, and
+ *    `docs/VENDORING.md`, which lists it as a wire a second Host must connect.
+ *    A `page.setAutonav(bool)` duty is the v2 shape; adding it now would leave
+ *    two mechanisms live at once, which is worse than one that is written down.
+ *
+ * ---- KNOWN v1 LIMITATIONS, named rather than papered over ----------------
+ *
+ * 9. THE NOT-ARMED HINT IS THIS HOST'S SENTENCE. `ui/embed.js` prints "Click the
+ *    Stem Splitter Live toolbar icon on this tab to arm it", which is true of a
+ *    browser extension and of nothing else. The Host is not lying — it answers
+ *    `armShortcut()` with `null` honestly — the UNIT is. It is not a duty in v1
+ *    because user-facing copy behind a seam hands a second product one English
+ *    sentence it cannot lay out, wrap or translate. `docs/VENDORING.md` names
+ *    the string as one a copy patches, and the failure is cosmetic and visible
+ *    on the first screenshot rather than silent.
+ *
+ * 10. `DeckTransport.onState` CARRIES MORE THAN ADR 0001 DECISION 4'S WORDING.
+ *     The decision — and `CONTRIBUTING.md` L1 — word the read side as three
+ *     values (`paused`, `currentTime`, `duration`). `extension/content.js` has
+ *     read five since before the seam existed: those three plus `ended` and
+ *     `playbackRate`, with `seeking` as an event rather than a poll. All five
+ *     are transport state and none of them is media — no `src`, no `currentSrc`,
+ *     no `buffered`, no `srcObject`, no `captureStream()` — so the RULE holds
+ *     and its WORDING does not. Narrowing the payload would break the deck;
+ *     widening the wording is an L1 edit, and L1 belongs to the owner and not to
+ *     a seam slice (`CONTRIBUTING.md` is rank 1 over everything in this file).
+ *     v1 therefore freezes the SHAPE that ships and flags the wording. This is
+ *     the one thing in this block that is somebody else's to close.
+ * ========================================================================= */
+
+/**
+ * THE BUS ADDRESSES — the one piece of the unit's own protocol a second Host has
+ * to know, and until v1 it was three string literals in four files.
+ *
+ * `onMessage` is documented as "hand me every message addressed to me", and a
+ * second Host reading that sentence has no way to learn what "addressed" means:
+ * the envelope is `{ v: 1, to, from, ...payload }`, `to` is one of these three
+ * strings, and both `offscreen/host.js` and `ui/host.js` used to spell their own
+ * with a `const ME` nothing connected to the deck's `to: 'off'`. Declaring them
+ * here — in the seam's own file, next to the duty that consumes them — is what
+ * makes the routing guard a thing a Host can implement from the interface
+ * rather than from a grep.
+ *
+ * IT IS DECLARED HERE AND NOT IN `shared/config.js`, which is where the planning
+ * note guessed it would go: `config.js` is the constants and the model's
+ * identity — what the AUDIO is — and an address is what the SEAM is. A Host
+ * imports one file to learn its duties and it should not need a second to learn
+ * how to deliver them.
+ *
+ * `host` IS AN ADDRESS ON THE BUS AND NOT A SYNONYM FOR "the Host". The deck
+ * talks to two correspondents, and under this Host the second one is the MV3
+ * service worker — the only context that can arm a tab. A Host with no such
+ * split answers `to: 'sw'` in the same place it answers `to: 'off'`; what it
+ * must not do is drop the message, because that is the arm gesture.
+ */
+export const BUS = Object.freeze({
+  /** The engine (`offscreen/engine.js`). Historically `'off'`, for the MV3 offscreen document. */
+  engine: 'off',
+  /** The deck (`ui/embed.js`). */
+  deck: 'ui',
+  /** The Host's own privileged context — under this Host, the service worker. */
+  host: 'sw',
+});
+
 /**
  * @typedef {object} EngineHost
  *
@@ -63,18 +213,27 @@
  *   re-wrapping or filtering it breaks receivers quietly. `fn` returns nothing
  *   and is never awaited.
  *   WHAT THE HOST MUST ORIGINATE — the undeclared half of this seam, and the
- *   larger half of what a second Host has to supply. Three of the engine's
- *   messages come from the Host itself rather than from the deck:
- *   `CAPTURE_START { streamId, source: { tabId, title, url }, deck? }`,
- *   `CAPTURE_STOP { deck? }` and `DECK_PREPARE { deck? }`. Two of those field
- *   names are still Chrome's. The capture PARAMETER is `sourceToken` and
- *   opaque, but the WIRE field is still `streamId`, and `source.tabId` is a tab
- *   id under a Host that need not have tabs — this engine's own dev paths
- *   already write `tabId: null` to satisfy a shape nothing reads. Nothing
- *   breaks, because both values are opaque to the unit; the names are wrong
- *   rather than the behaviour. Renaming them means editing the sender, which is
- *   host-side (`sw/service-worker.js:249`) and outside this seam's files, so
- *   S11 owns it as part of freezing Host interface v1.
+ *   larger half of what a second Host has to supply. THREE MESSAGES, FROZEN AT
+ *   v1, addressed `to: BUS.engine` and stamped `from` whatever the Host calls
+ *   itself (this one uses `BUS.host`):
+ *
+ *     CAPTURE_START { sourceToken, source: { title, url }, deck? }
+ *     CAPTURE_STOP  { deck? }
+ *     DECK_PREPARE  { deck? }
+ *
+ *   `sourceToken` IS OPAQUE and goes straight back to `captureStream` — the
+ *   engine never looks inside it. `source` DESCRIBES THE SOURCE and is exactly
+ *   two fields, both of which the engine really reads: `url` (the cache key's
+ *   video id) and `title` (the cache entry's label). `deck` is `'A'`, absent
+ *   meaning the default deck.
+ *
+ *   BOTH OF THOSE NAMES CHANGED AT THE FREEZE, and the old ones say why the
+ *   freeze bothered: the wire field was `streamId`, after
+ *   `chrome.tabCapture.getMediaStreamId`, and `source` carried a `tabId` that
+ *   NOTHING IN THE UNIT EVER READ — the engine's own dev paths wrote
+ *   `tabId: null` to satisfy a shape with no consumer. A second Host would have
+ *   had to invent both. See the v1 block at the top of this file, changes 1
+ *   and 2.
  *
  * @property {(sourceToken: unknown) => Promise<MediaStream>} captureStream
  *   Open the audio of the Source that `sourceToken` names. The token is OPAQUE
@@ -217,9 +376,11 @@
  *   `{vendor, architecture}`. A native backend — CoreML, DirectML, CUDA — has
  *   neither and answers `{threads: null, adapter: null}`, which is a legitimate
  *   answer rather than a degraded one: `offscreen/deck.js` renders what it was
- *   given and says nothing about wasm or a GPU when it was given neither. S11
- *   owns whether v1 of this interface gains a neutral field to describe such a
- *   backend in its own words; until then a Host must not invent numbers here.
+ *   given and says nothing about wasm or a GPU when it was given neither. v1
+ *   ADDED NO NEUTRAL FIELD (freeze block, item 6): two nulls is already an
+ *   answer no Host has to lie to give, and a third field with one
+ *   implementation and no consumer is the abstraction `CONTRIBUTING.md`'s
+ *   engineering bias forbids. A Host must not invent numbers here.
  */
 
 /**
@@ -686,6 +847,28 @@ export function serialiseBackend(backend, what = 'Backend') {
  * @property {(fn: (msg: object) => void) => void} onMessage
  *   Call `fn` for each message addressed to THIS context, with the raw
  *   envelope. What `fn` returns is dropped.
+ *   WHAT THE HOST MUST ORIGINATE — the counterpart of the same clause on
+ *   `EngineHost.onMessage`, and the deck's half is smaller but sharper, because
+ *   two of the three are the ONLY way the user is ever told the arm gesture
+ *   failed. All three are addressed `to: BUS.deck`:
+ *
+ *     SESSION            { session: { armed, title, url, armedAt } }
+ *     ARM_ERROR          { code, message }
+ *     ARM_ERROR_CLEARED  { }
+ *
+ *   `session.armed` IS A BOOLEAN THE HOST DERIVES, frozen that way at v1 —
+ *   it used to be `session.tabId` and the deck read its truthiness, which made
+ *   a tab id the unit's definition of armed (freeze block, change 3). The deck
+ *   PROJECTS this record rather than merging it, so a Host that omits `armed`
+ *   reads as disarmed rather than leaving the last value standing. `title` and
+ *   `url` describe the Source; the deck reads neither today.
+ *   `ARM_ERROR` IS SENT AND PERSISTED, and the persisted half is the one that
+ *   matters: the deck page is created BY the arm gesture, so on a refusal it is
+ *   still loading while this message goes to nobody. The durable copy at
+ *   `ARM_ERROR_KEY` in the `'session'` area is what the deck reads at boot —
+ *   see `storageGet` below, which carries the record's shape.
+ *   `ARM_ERROR_CLEARED` retires a refusal the Host has decided no longer
+ *   applies. A Host that never sends it leaves a stale banner up until its TTL.
  *
  * @property {(area: 'local'|'session', key: string) => Promise<unknown>} storageGet
  *   Read back the value stored at `key`, or `null` if nothing is stored there.
@@ -762,10 +945,13 @@ export function serialiseBackend(backend, what = 'Backend') {
  *   not-armed hint reads "Click the Stem Splitter Live toolbar icon on this tab
  *   to arm it, or press <chord>", and a Host with no toolbar and no tabs has no
  *   truthful version of the first half — `null` here is exactly the branch such
- *   a Host takes, and it prints that sentence alone. The string predates the
- *   seam and is left in the unit deliberately for now; S11 owns deciding whether
- *   host-specific instruction prose is sourced from the Host or declared out of
- *   scope when it freezes Host interface v1.
+ *   a Host takes, and it prints that sentence alone. v1 LEFT THE SENTENCE IN
+ *   THE UNIT AND SAID SO (freeze block, item 9): it is not a duty, because
+ *   user-facing copy behind a seam hands a second product one English sentence
+ *   it cannot lay out, wrap or translate — and unlike the leaks v1 did close,
+ *   this one is cosmetic and shows on the first screenshot rather than as a
+ *   silent wrong answer. `docs/VENDORING.md` lists it among the strings a copy
+ *   patches.
  *
  * @property {DeckPage} page
  *   Where the deck is drawn: its keys, its height, its life on the page, and the
@@ -857,14 +1043,15 @@ export function serialiseBackend(backend, what = 'Backend') {
  *    glyph platform and must not anywhere else, and `chordLabel()` is where that
  *    is written down and checked.
  *
- * WHICH CONTEXT IS "HERE" is the one piece of unit protocol a second DeckHost
- * has to know, and today it is a literal in `ui/host.js` (`const ME = 'ui'`)
- * with its counterpart `from: 'ui'` on the other side of the seam in
- * `embed.js`. Note also that rule 1 is true of a BROADCAST transport and only
- * of one: on a point-to-point transport the Host must read `msg.to` to route
- * `'off'` from `'sw'`, which is envelope knowledge rule 1 otherwise says is not
- * the host's. Both are inputs to S11, which freezes this interface and owns
- * exporting the address set from `shared/config.js`.
+ * WHICH CONTEXT IS "HERE" WAS THE ONE PIECE OF UNIT PROTOCOL A SECOND DeckHost
+ * HAD TO GUESS, and v1 closed it: the addresses are `BUS` at the top of this
+ * file, and `ui/host.js`, `offscreen/host.js` and `ui/embed.js` all read their
+ * own out of it rather than each spelling a literal. Note also that rule 1 is
+ * true of a BROADCAST transport and only of one: on a point-to-point transport
+ * the Host must read `msg.to` to route `BUS.engine` from `BUS.host`, which is
+ * envelope knowledge rule 1 otherwise says is not the host's. That is not a
+ * contradiction — it is the one field a transport is allowed to read, and it is
+ * why the address set is declared rather than left as three literals.
  */
 export const DECK_HOST_DUTIES = Object.freeze({
   send: 'put one finished message from the deck on the bus',
@@ -893,10 +1080,12 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *     another route, and it would put the Host in a position to normalise what
  *     it stamps — the thing rule 1 exists to forbid.
  *
- * Reconciling them means changing behaviour on one side, so it is S11's call
- * and not the integrator's. What is not deferred is saying so: the asymmetry is
- * now a sentence in the file that gets frozen, rather than a difference a
- * second-host author discovers by reading both implementations.
+ * S11 TESTED IT AND LEFT IT (freeze block, item 5). Neither contract makes a
+ * Host lie — one Host writes two functions, and each is the shape its own side
+ * needs — so reconciling would cost 22 call sites and a stamping deck `send`
+ * that could normalise what it stamps, which is precisely what rule 1 below
+ * exists to forbid. The asymmetry is a sentence in the frozen file rather than
+ * a difference a second-host author discovers by reading both implementations.
  */
 
 /* ========================================================================= */
@@ -950,7 +1139,15 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   implements all six page duties still has a dead autoplay checkbox. S4
  *   (issue #6) puts storage behind a duty, which does not by itself close this:
  *   the unit and the host would still be agreeing on a key name out of band.
- *   S11 owns declaring the instruction, the way it owns the `send` asymmetry.
+ *   v1 DECLARED IT RATHER THAN CLOSING IT (freeze block, item 8). THE KEY IS
+ *   `PREFS_KEY` (`shared/config.js`) IN THE `'local'` AREA AND THE FIELD IS
+ *   `autoplayNext`: the deck writes the whole prefs object through
+ *   `storageSet('local', PREFS_KEY, …)`, and a Host that wants a working
+ *   checkbox watches that key with its own change listener and acts on that
+ *   field. A `page.setAutonav(boolean)` duty is the v2 shape; adding it in v1
+ *   would leave two mechanisms live at once, which is worse than one that is
+ *   written down. `docs/VENDORING.md` lists it as a wire a second Host must
+ *   connect.
  *
  * @property {(claim: {armed: boolean, keys: string[]}) => void} claimKeys
  *   Which key codes are the deck's right now, and whether a deck is armed at
@@ -992,12 +1189,16 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   `content.js`/`speed.js`, before the SPEED verdict is composed. A second Host
  *   that has no notion of an ad break owes them nothing beyond a value its own
  *   speed logic can read.
- *   FLAGGED, NOT RECONCILED: ADR 0001 decision 4 words the READ side as three
- *   values — `paused`, `currentTime`, `duration` — and the shipped payload is
- *   wider than that wording, by `ended`, `playbackRate` and `seeking`, all three
- *   of which the deck reads today. S11 freezes Host interface v1 and owns the
- *   reconciliation; narrowing the payload is an L1 decision and belongs to the
- *   owner, not to a seam slice.
+ *   FLAGGED, STILL NOT RECONCILED, AND v1 SAYS WHY (freeze block, item 10).
+ *   ADR 0001 decision 4 and `CONTRIBUTING.md` L1 both word the READ side as
+ *   three values — `paused`, `currentTime`, `duration`. `content.js` has read
+ *   five since before the seam existed: those three plus `ended` and
+ *   `playbackRate`, with `seeking` arriving as an event rather than a poll, and
+ *   the deck reads all five. Every one of them is transport state and none is
+ *   media, so L1's RULE holds and L1's WORDING does not. v1 froze the shape that
+ *   ships; correcting the wording is an edit to `CONTRIBUTING.md`, which is rank
+ *   1 over this file and belongs to the owner rather than to a seam slice. It is
+ *   the one item in the freeze block that is somebody else's to close.
  *
  * @property {(fn: () => void) => void} onJump
  *   The content moved under the deck — a seek, or the page swapping in another
@@ -1029,8 +1230,8 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   it was given and ignores anything else in the patch — so that widening it
  *   is an edit to a Host and to this list, and never a field a caller smuggles
  *   through.
- *   IT IS A MECHANISM PER HOST, NOT ONE MECHANISM FOR ALL HOSTS, and until S11
- *   says otherwise both ends carry it: `ui/host.js` filters what it puts on the
+ *   IT IS A MECHANISM PER HOST, NOT ONE MECHANISM FOR ALL HOSTS, and v1 KEPT
+ *   BOTH ENDS (freeze block, item 7): `ui/host.js` filters what it puts on the
  *   wire, AND the unit names its three fields at the call site rather than
  *   spreading a patch object into it (`test.js` holds both halves). A Host that
  *   did the obvious `Object.assign(player, patch)` would reopen the write set

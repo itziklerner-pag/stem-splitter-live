@@ -12,7 +12,7 @@
  * Every message in and out carries `deck: 'A' | 'B'`; the deck field is injected
  * by the `send` dependency, so nothing in this file has to remember it.
  *
- *   UI -> here   LIVE_START {deck, tabId} · LIVE_STOP {deck} · SET_HOP {seconds}
+ *   UI -> here   LIVE_START {deck} · LIVE_STOP {deck} · SET_HOP {seconds}
  *                STEM_GAIN {deck, stem, gainDb} · STEM_MUTE {deck, stem, muted}
  *                STEM_SOLO {deck, stem, soloed} · MASTER_GAIN {deck, gainDb}
  *                XFADER {position} · XF_CURVE {curve} · XF_ASSIGN {deck, stem, target}

@@ -7,14 +7,23 @@
  */
 
 import { MODEL } from '../shared/config.js';
+import { BUS } from '../shared/host.js';
 import { fmtBytes } from './audio-math.js';
 import { isMac, chordLabel } from './embed-state.js';
 
 const $ = (id) => document.getElementById(id);
 const text = (el, v) => { if (el && el.textContent !== v) el.textContent = v; };
 
-const toOff = (m) => chrome.runtime.sendMessage({ v: 1, to: 'off', from: 'ui', ...m }).catch(() => {});
-const toSw = (m) => chrome.runtime.sendMessage({ v: 1, to: 'sw', from: 'ui', ...m }).catch(() => {});
+/**
+ * The setup page shares the deck's address on the bus and reads it, like every
+ * other context since Host interface v1 (S11), out of `BUS` in the seam's own
+ * declaration rather than out of a literal. It is a second listener on
+ * `to: BUS.deck` — the model-download progress it paints comes off the same
+ * `STATE` messages the deck reads, which is why `EngineHost.send` is documented
+ * as a FAN-OUT and not a point-to-point link.
+ */
+const toOff = (m) => chrome.runtime.sendMessage({ v: 1, to: BUS.engine, from: BUS.deck, ...m }).catch(() => {});
+const toSw = (m) => chrome.runtime.sendMessage({ v: 1, to: BUS.host, from: BUS.deck, ...m }).catch(() => {});
 
 let model = { status: 'unknown', got: 0, total: MODEL.bytes, phase: null, error: null };
 
@@ -90,7 +99,7 @@ function paint() {
 }
 
 chrome.runtime.onMessage.addListener((m) => {
-  if (!m || m.to !== 'ui' || m.type !== 'STATE') return false;
+  if (!m || m.to !== BUS.deck || m.type !== 'STATE') return false;
   if (m.state && m.state.model) { model = { ...model, ...m.state.model }; paint(); }
   return false;
 });
