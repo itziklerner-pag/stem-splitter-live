@@ -118,9 +118,16 @@ is fine, but start from the reason it was settled rather than from scratch —
 - **WebGPU is the target.** Take ORT Web's automatic WASM fallback if it is free;
   do not spend a day optimising it.
 - **Model weights come from a pinned, hashed upstream host.** Do not self-host, and
-  do not commit the weights. The pin — URL, SHA-256, byte count — lives in
-  `extension/shared/config.js` as the single source of truth every script derives
-  from. Never re-type it into a second file.
+  do not commit the weights. **The pin is split across the Host seam** (S7): the
+  URL and the cache bucket live in `extension/offscreen/host-pin.js`, because
+  fetching the bytes is a Host's job, and the SHA-256 and byte count live in
+  `extension/shared/config.js`, because deciding whether the bytes are the model
+  is the unit's — it decides it on every load, over whatever the Host hands over
+  (`extension/shared/modelcache.js`). Each half is a single source of truth every
+  script derives from; never re-type either into a second file. It reads as one
+  pin in two places because it is: `fetch` and the Cache API are not `chrome.*`,
+  so a URL in the unit is a network path no gate on the unit can see, and moving
+  it is what makes P1 and M1 hold under a second Host rather than under this one.
 - **No tab picker, ever.** `tabCapture` grants are per-tab, and only a
   browser-level invocation *on that tab* mints one — a toolbar click or
   `Ctrl+Shift+9`. A list rendered inside our own page is not one, so a picker could
