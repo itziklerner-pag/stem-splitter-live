@@ -77,7 +77,7 @@
 
 import { encodeWav, decodeWav } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
-  videoIdFromUrl, primeRefusal, commitRefusal } from './extension/shared/stemcache.js';
+  videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 // The transpose lanes' group delay, IMPORTED and never re-typed. It is a term in
 // the latency assertion below, and a second copy of 3072 in this file is a second
@@ -3572,6 +3572,128 @@ if (group('cache')) {
     ok('and a second round trip is BIT IDENTICAL — undithered means idempotent, ' +
        'so re-caching cannot accumulate noise',
       again.every((v, i) => v === back[i]));
+  }
+
+  head('cache — one cache owns one directory (a second tier cannot reach the first)');
+  /**
+   * REACHABLE: drives the real `StemCache` over a real OPFS surface, not a
+   * reimplementation of it. Every method below is the shipped one.
+   *
+   * WHY THIS EXISTS. The directory used to be a module constant that every
+   * instance shared — `dir()` read `CACHE_DIR` and ignored `this` — so a second
+   * cache constructed for a second tier silently operated on the FIRST tier's
+   * directory. `clear()` is the worst of it, because it removes the directory
+   * whole and its `.catch(() => {})` swallows the evidence: a 32f clear would
+   * delete the live 16-bit cache and report success. `list()`, `put()`,
+   * `delete()` and `evict()` had the same blindness one step less loudly.
+   *
+   * The two mutations that were watched red are named in the assertions.
+   */
+  {
+    /**
+     * A minimal in-memory OPFS. Only the six calls `shared/stemcache.js` makes
+     * are implemented, and the two that must REJECT do reject — `getFileHandle`
+     * on a missing file is what `readJson()` and `get()` catch, and
+     * `removeEntry` on a missing entry is what `clear()` and `delete()` catch.
+     * A shim that resolved those instead would make this whole block pass
+     * against a cache that never stored anything.
+     *
+     * `navigator` IS A CONFIGURABLE GETTER WITH NO SETTER in Node 22, so a plain
+     * `globalThis.navigator = {...}` silently does nothing and leaves
+     * `navigator.storage` undefined. Measured, not assumed. defineProperty is
+     * the only thing that takes.
+     */
+    const mkDir = (name) => {
+      const files = new Map();
+      return {
+        name, files,
+        async getFileHandle(n, opts) {
+          if (!files.has(n)) {
+            if (!(opts && opts.create)) throw new Error(`NotFoundError: ${n}`);
+            files.set(n, new Uint8Array(0));
+          }
+          return {
+            async getFile() {
+              const b = files.get(n);
+              return { async text() { return Buffer.from(b).toString('utf8'); },
+                       async arrayBuffer() { return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); } };
+            },
+            async createWritable() {
+              let buf = new Uint8Array(0);
+              return { async write(data) { buf = new Uint8Array(data instanceof ArrayBuffer ? data : Buffer.from(data)); },
+                       async close() { files.set(n, buf); } };
+            },
+          };
+        },
+        async removeEntry(n) { if (!files.delete(n)) throw new Error(`NotFoundError: ${n}`); },
+      };
+    };
+    const dirs = new Map();
+    const root = {
+      async getDirectoryHandle(n, opts) {
+        if (!dirs.has(n)) {
+          if (!(opts && opts.create)) throw new Error(`NotFoundError: ${n}`);
+          dirs.set(n, mkDir(n));
+        }
+        return dirs.get(n);
+      },
+      async removeEntry(n) { if (!dirs.delete(n)) throw new Error(`NotFoundError: ${n}`); },
+    };
+    const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    Object.defineProperty(globalThis, 'navigator', {
+      value: { storage: { getDirectory: async () => root } }, configurable: true, writable: true,
+    });
+
+    try {
+      // Eight frames per plane: this block is about WHICH DIRECTORY the bytes
+      // land in, and a longer fixture would only make it slower to be wrong.
+      const stems = {};
+      for (const s2 of STEMS) stems[s2] = [0, 1].map(() => new Float32Array(8).fill(0.25));
+
+      const live = new StemCache(1 << 30);                       // the shipping default
+      const f32 = new StemCache(1 << 30, 'stemcache-f32');       // the desktop tier
+
+      ok('a cache constructed with no directory still owns the shipping one  '
+         + '[entry point: new StemCache(maxBytes)]',
+        live.dirName === CACHE_DIR, `${live.dirName} vs ${CACHE_DIR}`);
+
+      await live.put('k-live', { title: 'live' }, stems);
+      await f32.put('k-32f', { title: 'f32' }, stems);
+
+      // MUTATION 1 (watched red): revert `dir(name)` to `getDirectoryHandle(CACHE_DIR)`.
+      // Both caches then write into 'stemcache', and each list() returns 2.
+      const liveKeys = (await live.list()).map((e) => e.key);
+      const f32Keys = (await f32.list()).map((e) => e.key);
+      ok('each cache lists ONLY its own entries  '
+         + '[entry point: StemCache.list() over two instances on different directories]',
+        liveKeys.length === 1 && liveKeys[0] === 'k-live'
+        && f32Keys.length === 1 && f32Keys[0] === 'k-32f',
+        `live=[${liveKeys}] f32=[${f32Keys}]`);
+
+      ok('...and the bytes really are in two directories on disk, not one manifest '
+         + 'filtered two ways',
+        dirs.has(CACHE_DIR) && dirs.has('stemcache-f32')
+        && [...dirs.get(CACHE_DIR).files.keys()].some((f) => f.startsWith('k-live.'))
+        && [...dirs.get('stemcache-f32').files.keys()].some((f) => f.startsWith('k-32f.')),
+        `${[...dirs.keys()]}`);
+
+      // MUTATION 2 (watched red): revert `clear()` to
+      // `root.removeEntry(CACHE_DIR, ...)`. The 32f clear then deletes the LIVE
+      // directory, live.list() returns 0, and this goes red — which is the
+      // failure in its real shape, a destroyed live tier, not a name mismatch.
+      await f32.clear();
+      const survived = (await live.list()).map((e) => e.key);
+      ok('clearing the 32f tier LEAVES THE LIVE TIER INTACT  '
+         + '[entry point: StemCache.clear() on the non-default directory]',
+        survived.length === 1 && survived[0] === 'k-live',
+        survived.length ? `live still holds [${survived}]` : 'THE LIVE CACHE WAS DESTROYED BY A 32f CLEAR');
+
+      ok('...and the tier that was cleared really is empty, so the clear was not a no-op '
+         + '(which would pass the assertion above for the wrong reason)',
+        (await f32.list()).length === 0);
+    } finally {
+      Object.defineProperty(globalThis, 'navigator', saved);
+    }
   }
 }
 

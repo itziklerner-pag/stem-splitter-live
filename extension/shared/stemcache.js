@@ -200,9 +200,15 @@ export function commitRefusal(writer, page, tailMaxSec = PRIME_TAIL_MAX_SEC) {
 }
 
 // ------------------------------------------------------------------- storage
-async function dir() {
+/**
+ * The OPFS directory ONE CACHE OWNS, named by the caller rather than by this
+ * module. Every read and every write in the class below goes through here, so a
+ * hard-coded name here is not a default — it is every instance sharing one
+ * directory no matter what it was constructed with.
+ */
+async function dir(name) {
   const root = await navigator.storage.getDirectory();
-  return root.getDirectoryHandle(CACHE_DIR, { create: true });
+  return root.getDirectoryHandle(name, { create: true });
 }
 async function readJson(d, name, fallback) {
   try {
@@ -261,13 +267,26 @@ export function planEviction(entries, maxBytes, pin = null) {
 }
 
 export class StemCache {
-  /** @param {number} maxBytes size cap; eviction is LRU down to this */
-  constructor(maxBytes) {
+  /**
+   * @param {number} maxBytes size cap; eviction is LRU down to this
+   * @param {string} dirName  the OPFS directory this cache owns, under the
+   *   storage root. Defaults to `CACHE_DIR`, so the live 16-bit cache is
+   *   constructed exactly as it always was.
+   *
+   * IT IS A CONSTRUCTOR ARGUMENT BECAUSE A SECOND TIER IS A SECOND DIRECTORY,
+   * and until this existed the directory was a module constant that every
+   * instance shared. Two caches over one directory is not a smaller version of
+   * two caches — `list()` returns the other tier's entries, `evict()` deletes
+   * against the wrong cap, and `clear()` destroys a cache the caller never
+   * named. The name travels with the instance so none of those can be reached.
+   */
+  constructor(maxBytes, dirName = CACHE_DIR) {
     this.maxBytes = maxBytes;
+    this.dirName = dirName;
   }
 
   async list() {
-    const d = await dir();
+    const d = await dir(this.dirName);
     const m = await loadManifest(d);
     return m.entries;
   }
@@ -287,7 +306,7 @@ export class StemCache {
    * @returns {Promise<{meta:object, stems:Record<string,Float32Array[]>}|null>}
    */
   async get(key) {
-    const d = await dir();
+    const d = await dir(this.dirName);
     const m = await loadManifest(d);
     const e = m.entries.find((x) => x.key === key);
     if (!e) return null;
@@ -315,7 +334,7 @@ export class StemCache {
    * @param {Record<string, Float32Array[]>} stems  stem name -> [L, R]
    */
   async put(key, meta, stems) {
-    const d = await dir();
+    const d = await dir(this.dirName);
     let bytes = 0;
     for (const s of STEMS) {
       const ch = stems[s];
@@ -337,7 +356,7 @@ export class StemCache {
   }
 
   async delete(key) {
-    const d = await dir();
+    const d = await dir(this.dirName);
     for (const s of STEMS) await d.removeEntry(`${key}.${s}.wav`).catch(() => {});
     const m = await loadManifest(d);
     m.entries = m.entries.filter((x) => x.key !== key);
@@ -352,7 +371,7 @@ export class StemCache {
    * every line of it is correct.
    */
   async evict(pin = null) {
-    const d = await dir();
+    const d = await dir(this.dirName);
     const m = await loadManifest(d);
     const plan = planEviction(m.entries, this.maxBytes, pin);
     for (const e of plan.removed) {
@@ -366,10 +385,18 @@ export class StemCache {
     return { ...plan, maxBytes: this.maxBytes, tracks: m.entries.length };
   }
 
-  /** Drop everything, including files the manifest has lost track of. */
+  /**
+   * Drop everything, including files the manifest has lost track of.
+   *
+   * THIS ONE DELETES A WHOLE DIRECTORY, so it is the call that punishes a
+   * module-constant name hardest: pointed at the wrong tier it destroys a cache
+   * the caller never named and then reports success, because `removeEntry` on a
+   * directory that is not there is caught and ignored two lines down. It reads
+   * `this.dirName` for that reason and not for symmetry.
+   */
   async clear() {
     const root = await navigator.storage.getDirectory();
-    await root.removeEntry(CACHE_DIR, { recursive: true }).catch(() => {});
+    await root.removeEntry(this.dirName, { recursive: true }).catch(() => {});
   }
 
   /** What the UI needs to render the cache: cap, use, and the tracks in LRU order. */
