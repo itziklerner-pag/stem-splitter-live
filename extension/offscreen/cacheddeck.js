@@ -217,6 +217,26 @@ export class CachedDeck {
      */
     this.bpmFault = null;
     this.bpmFaults = 0;
+
+    /**
+     * THE TRANSPORT SURFACE'S STATE — `drive()` and `release()` below, and the
+     * report `pushTransport()` puts on the wire.
+     *
+     * A Host whose Source is a FILE has a player: this deck. It presents a real
+     * six-duty `DeckTransport` (`shared/host.js`) backed by these three, rather
+     * than declaring `transport: null` — which reads as "nobody will ever tell
+     * me whether a player is playing" and makes the deck start a capture and a
+     * 109 MB model load on boot (`ui/embed-state.js` follow(), upstream #43).
+     *
+     * `transportMuted` is the ONE piece of deck state a transport write can
+     * move that the user did not ask for, so it is the one `release()` has to
+     * undo. It is deliberately NOT `masterDb`: the user's own master gain must
+     * survive a lock being taken and given back, and folding the two would make
+     * a release either forget the user's setting or fail to unmute.
+     */
+    this.transportMuted = false;
+    /** The last report actually sent, as a key, so a still deck is silent. */
+    this.transportAt = null;
   }
 
   // ------------------------------------------------------------------ graph
@@ -293,6 +313,17 @@ export class CachedDeck {
     this.bpmFaults = 0;
     this.writeHead = 0;
     this.readBase = 0;
+    /**
+     * A NEW TRACK IS NOT UNDER ANYONE'S LOCK. A `transportMuted` carried across
+     * a load would play the next track silently, with every meter and every
+     * status field saying it was playing — the stale-but-plausible shape
+     * `shared/stemcache.js`'s header calls the worst bug this project can ship,
+     * wearing a mixer's clothes. Cleared here and in stop(), which are the two
+     * track boundaries; `release()` is what clears it INSIDE a track.
+     * It is cleared BEFORE pushMaster() below, so the graph is built unmuted.
+     */
+    this.transportMuted = false;
+    this.transportAt = null;
     this.pushGains(0);
     this.pushMaster();                 // the graph exists now; see setMasterGain
     this.pushPitch();                  // ...and so does the transpose
@@ -390,6 +421,9 @@ export class CachedDeck {
     this.writeHead = 0;
     this.readBase = 0;
     this.status = 'idle';
+    // The other track boundary — see load(). A deck going idle is not under a
+    // lock any more, and the next load must not inherit one.
+    this.transportMuted = false;
     this.pushState();
   }
 
@@ -499,8 +533,17 @@ export class CachedDeck {
     this.masterAuto = auto;
     this.pushMaster();
   }
+  /**
+   * THE MASTER FIELD, WITH THE TRANSPORT'S MUTE ON TOP OF IT. `masterDb` is the
+   * user's (and the dual-deck trim's); `transportMuted` is a Host lock's, taken
+   * through `drive({muted})` and given back through `release()`. Two writers,
+   * one field, and the order is the point: a mute wins while it is held and the
+   * user's dB is still there underneath when it is released.
+   */
   pushMaster() {
-    if (this.node) this.node.port.postMessage({ t: 'gain', i: G_MASTER, value: dbToGain(this.masterDb), tau: TAU.master });
+    if (!this.node) return;
+    const value = this.transportMuted ? 0 : dbToGain(this.masterDb);
+    this.node.port.postMessage({ t: 'gain', i: G_MASTER, value, tau: TAU.master });
   }
   /**
    * The transpose. Refused rather than clamped, for the same reason the live
@@ -615,6 +658,157 @@ export class CachedDeck {
   setXfCurve(c) { this.xf.curve = c; this.pushGains(TAU.fader); }
   setXfAssign(stem, target) { const i = STEMS.indexOf(stem); if (i >= 0) { this.xf.assign[i] = target; this.pushGains(TAU.fader); } }
 
+  // -------------------------------------------------- the transport surface
+  /**
+   * WHAT A `DeckTransport` REPORTS, OFF THIS DECK'S OWN PLAYBACK CLOCK.
+   *
+   * A Host with a File source has no `<video>`, and this is what it reports
+   * instead. The six fields are exactly the six `shared/host.js`'s
+   * `DeckTransport.onState` says the deck READS — `playing`, `currentTime`,
+   * `duration`, `ended` and `seeking` — five of the six; the sixth is the rate,
+   * and the block below says why this player has none. A Host relays what is
+   * here verbatim and invents nothing.
+   *
+   * WHY THIS IS NOT `LIVE_STATE`, WHICH ALREADY CARRIES A POSITION. `LIVE_STATE`
+   * is the READOUT, and its `status` collapses `loaded`, `paused` and `ended`
+   * into the single word `'ready'` (see pushState below). Those are three
+   * different answers to "is your player playing, and is it finished" and a
+   * transport must be able to give them separately: an `ended` deck reported as
+   * `paused` is a deck the Host will never rewind. Parsing a readout to
+   * reconstruct transport state is the second copy of a decision, in the
+   * direction where the copy is the one that is wrong.
+   *
+   * THERE IS NO RATE FIELD, AND ITS ABSENCE IS THE HONEST ANSWER RATHER THAN AN
+   * OMISSION. `DeckTransport.onState` names six values the deck reads and this
+   * carries five; the sixth is the player's rate, and this player has none to
+   * report. The ring is consumed by the audio device at its own rate, there is
+   * no resampler anywhere on this path, and the transpose is not a rate —
+   * `engine/pitch.js` is length-exact, so a transposed deck still plays one
+   * second per second.
+   *
+   * IT IS ALSO THE RULE, not merely the fact. `qa/speed-pitch.mjs` asserts that
+   * NOTHING under `extension/{engine,offscreen,workers,shared}/` names the page
+   * rate in code, less `offscreen/engine.js` which owns the engine's record of
+   * it — that gate is how this project knows the engine never shifts on the
+   * page's rate, and a report inventing a constant `1` here would be the first
+   * engine file to grow a reader of it. The deck side is unharmed:
+   * `ui/embed.js::onElementRate` ignores a value that is not a positive finite
+   * number, so nothing paints a rate, and `speedGate` greys the speed control
+   * on `source === 'cache'` in any case — a cached deck's speed control has
+   * been locked, with a sentence, since before this surface existed.
+   *
+   * `seeking` IS FALSE ON EVERY REPORT, INCLUDING THE ONE seek() PUSHES, and
+   * that is a decision rather than an omission. This deck's seek is one
+   * synchronous turn — the ring is flushed and refilled before seek() returns —
+   * so there is no interval during which it is seeking to report. It also must
+   * not be true, and the mechanism is a loop: `ui/embed.js`'s `onVideoState`
+   * turns every report into `PAGE_VIDEO { currentTime, seeking }`, and
+   * `offscreen/engine.js` seeks a cached deck on `seeking === true`. A deck
+   * that reported its own seek would be told to seek to a position ~100 ms
+   * stale by the time it arrived, ten times a second, flushing the tempo tap on
+   * every heartbeat (see seek(), which resets it) — a deck that never locks a
+   * tempo, with nothing red anywhere.
+   *
+   * @returns {{playing:boolean, currentTime:number, duration:number,
+   *            ended:boolean, seeking:boolean, atMs:number}}
+   */
+  transportReport() {
+    return {
+      playing: this.status === 'playing',
+      currentTime: +this.positionSec().toFixed(3),
+      duration: this.track ? +(this.track.frames / SR).toFixed(3) : 0,
+      ended: this.status === 'ended',
+      seeking: false,
+      /**
+       * WHEN IT WAS SAMPLED, on the wall clock and for the same reason
+       * `LIVE_STATE` carries one: this crosses a bus hop, and a Host that
+       * relays it to a deck 50-100 ms later would be reporting a playhead that
+       * has moved further than the video lock's own 60 ms threshold.
+       * `Date.now()` and not `performance.now()` — two contexts, two origins.
+       */
+      atMs: Date.now(),
+    };
+  }
+
+  /**
+   * PUT THE REPORT ON THE WIRE, on every event that moves it and on none that
+   * does not. Called from pushState(), which is already the one place every
+   * transport method and the FILL_HZ heartbeat converge on — so "every event
+   * that moves it" is a property of that convergence and not of a list here
+   * that could fall out of step with it.
+   *
+   * DEDUPED ON THE VALUE, so a paused or idle deck falls silent instead of
+   * repeating itself ten times a second. `atMs` is deliberately not in the key:
+   * it moves on every tick and would defeat the dedupe entirely, which is the
+   * one-character version of not having one.
+   */
+  pushTransport() {
+    const r = this.transportReport();
+    const key = `${r.playing}|${r.currentTime}|${r.duration}|${r.ended}|${r.seeking}`;
+    if (key === this.transportAt) return;
+    this.transportAt = key;
+    this.s.send({ type: 'TRANSPORT_STATE', deck: this.id, ...r });
+  }
+
+  /**
+   * WRITE THE PLAYER — `DeckTransport.drive`, landing on this deck's playback
+   * instead of on a media element.
+   *
+   * THE WRITE SET IS CLOSED AND IT IS ADR 0001 DECISION 4'S: mute, rate and
+   * position, and nothing else, ever. TWO OF THE THREE LAND HERE and the third
+   * is refused in `offscreen/engine.js`, which is not a division of taste:
+   * `qa/speed-pitch.mjs` asserts that no engine-side file except that one names
+   * the page rate in code, and this player is the very thing that rule
+   * describes — it has no rate to be driven to. The refusal is written where the
+   * engine's record of the rate already lives, beside the `SPEED` handler's
+   * identical refusal for a cached deck ("no page rate to drive").
+   *
+   * THE CLOSURE IS IMPLEMENTED HERE, by reading named fields off whatever was
+   * handed over — so `offscreen/engine.js` passes the raw inbound message,
+   * envelope and all, and a field a caller smuggled in lands nowhere rather than
+   * being trusted because the Host filtered it first. `ui/host.js` closes it
+   * again at the other end, and the two closures are not redundant: one is per
+   * Host and one is per player, and a second Host doing the obvious
+   * `Object.assign(player, patch)` inherits whatever the unit passed.
+   *
+   * @param {{muted?:boolean, currentTime?:number}} patch
+   * @returns {string[]} the fields that landed, in the order they were applied
+   */
+  drive(patch) {
+    const p = patch || {};
+    const applied = [];
+    if (typeof p.muted === 'boolean' && p.muted !== this.transportMuted) {
+      this.transportMuted = p.muted;
+      this.pushMaster();
+      applied.push('muted');
+    }
+    // LAST, because it is the one that flushes the ring: a mute applied before
+    // the seek survives it, and pushState() at the foot of seek() then reports
+    // the new position outward in the same turn.
+    if (Number.isFinite(p.currentTime)) { this.seek(p.currentTime); applied.push('currentTime'); }
+    return applied;
+  }
+
+  /**
+   * HAND THE PLAYER BACK THE WAY IT WAS FOUND — `DeckTransport.release`.
+   *
+   * Unmuted, rate 1. It is NOT a no-op just because there is no element: a
+   * muted deck left behind is a track that plays silently with every meter
+   * saying otherwise, and it is the one thing `drive()` can do that the user
+   * cannot see and cannot undo. The position is deliberately NOT restored — a
+   * player handed back keeps its playhead; that is what "the way it was found"
+   * means for a transport, and rewinding on release would undo the user's own
+   * scrub.
+   */
+  release() {
+    const was = this.transportMuted;
+    this.transportMuted = false;
+    if (was) this.pushMaster();
+    // Report outward, so a Host that took the lock can see it was given back
+    // rather than assume it. pushState() is what carries the transport report.
+    this.pushState();
+  }
+
   // ----------------------------------------------------------------- report
   /** Transport position: what the worklet has actually consumed, not written. */
   positionSec() {
@@ -658,6 +852,14 @@ export class CachedDeck {
   pushState() {
     this.tickKey();
     this.tickBpm();
+    /**
+     * THE TRANSPORT REPORT RIDES THE SAME HEARTBEAT AS THE READOUT, and it is
+     * pushed FIRST. A Host relays it to the deck as `DeckTransport.onState`,
+     * and the deck's handler sends the engine `PAGE_VIDEO` — which is an input
+     * to the commit decision `LIVE_STATE` cannot reach. Same ordering argument
+     * as `ui/embed.js`'s "the page's transport goes to the engine first".
+     */
+    this.pushTransport();
     /**
      * THE PLAYHEAD AND ITS TIMESTAMP, SAMPLED TOGETHER AND ON THESE TWO LINES.
      * Identical to `offscreen/live.js::pushState`, deliberately: a cached deck

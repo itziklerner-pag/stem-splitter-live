@@ -1323,6 +1323,37 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *   The player the host's page is showing, if it has one. A DeckHost that has
  *   none declares `transport: null`.
  *
+ *   AND "NONE" MEANS NONE, NOT "THE DECK DRIVES ITSELF". This is the single
+ *   most expensive sentence on this interface, so it is written here as well as
+ *   at `assertHostOption`: a Host whose Source is a FILE has a player — the
+ *   deck itself, playing already-separated stems off the engine's playback
+ *   clock — and it presents a real six-duty transport backed by that clock.
+ *   Declaring `transport: null` for it makes `host.transport != null` false,
+ *   which makes `videoPlaying` structurally unwritable (its only writer is
+ *   `onState`), which makes `follow()` return `'start'` on the first status
+ *   tick: an unrequested capture and a 109 MB model load before the user has
+ *   touched anything. Four ratified documents instructed exactly that before
+ *   anyone drove the boot path. Upstream #43; `ui/embed.js`'s HOSTED block
+ *   records the same trap by the route it was first found.
+ *
+ *   WHAT AN ENGINE-BACKED TRANSPORT IS MADE OF, since the unit supplies both
+ *   ends of it and a Host is only the wire between them:
+ *     `onState`        relay `TRANSPORT_STATE` — `{playing, currentTime,
+ *                      duration, ended, seeking, atMs}`, pushed by
+ *                      `offscreen/cacheddeck.js` on every event that moves it.
+ *                      FIVE OF THE SIX VALUES: that player reports no rate,
+ *                      because it has none, and the block in that file says
+ *                      why the absence is the honest answer rather than a gap.
+ *     `onJump`         the Host's own: a new Source opened under the deck.
+ *     `onSpeedReport`  the Host's own verdict. The deck greys its speed control
+ *                      on a cached deck regardless of what is reported here.
+ *     `drive`          send `TRANSPORT_DRIVE`. Mute and position land on the
+ *                      deck; a rate is refused and counted by the engine.
+ *     `release`        send `TRANSPORT_RELEASE`. NOT A NO-OP with no element:
+ *                      the mute a lock took has to be given back, or the track
+ *                      plays silently with every meter saying otherwise.
+ *     `requestSpeed`   the Host's own. Unreachable from a cached deck's UI.
+ *
  * @property {(fn: (d: object) => void) => void} onState
  *   The player moved. PUSH, NEVER POLL — a contract, not a taste: the deck
  *   follows these transitions, and a poll misses every one that opens and

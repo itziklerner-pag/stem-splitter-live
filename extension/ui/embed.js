@@ -41,7 +41,7 @@ import {
 } from '../shared/host.js';
 import { host } from './host.js';
 import {
-  chip, follow, RUNNING, peakTick,
+  chip, makeFollower, RUNNING, peakTick,
   shortcut, hostKeys, stemKeyHint, keyPlan, clampSemitones, SEMITONE_MIN, SEMITONE_MAX,
   snapSpeed, stepSpeed, speedFar, speedGate, SPEED_HOME, bpmPlan, beatPulse,
   isMac, modLabel, chordLabel,
@@ -239,15 +239,16 @@ let meterAt = 0;
  * is what stops `follow()` restarting the deck on the next 10 Hz status message
  * after something went wrong. Cleared by Restart, by dismissing the banner, and
  * by the user pausing and playing again — the gesture that means "try again"
- * in a build whose only transport is the page's.
+ * in a build whose only Start button is the player the Host reports.
  */
 let halted = false;
-/**
- * The page's player, per content.js. TRI-STATE: true playing, false paused,
- * **null nobody told us** — see follow() in embed-state.js for why the third
- * value is not the same as `false`.
- */
-let videoPlaying = null;
+// THE PLAYER'S STATE AND WHETHER THERE IS A PLAYER AT ALL used to be a `let`
+// and a `const` here. Both are the FOLLOWER's now — `makeFollower(transport, …)`
+// at the foot of this file, declared in `embed-state.js` — and moving them is
+// the whole of upstream #43: a value this file can assign is a value no suite
+// can prove only the transport writes, and the defect that cost this project
+// four ratified documents was in the WIRING between the Host and `follow()`,
+// never in `follow()` itself.
 /**
  * Has the user declined the one-time download in this sitting? Asking again on
  * every play/pause would be a nag; asking again after a reload is right, since
@@ -757,49 +758,50 @@ function stopLive() {
  * THE FOLLOW LOOP. The deck runs when the user's video runs, and this is the
  * only place that starts or stops it for that reason.
  *
- * The decision itself is `follow()` in embed-state.js, where it is pure and
- * tested; this function is the two lines of effect. Called after every input
- * that can change the answer: a status message, a session change, the page
- * reporting play/pause, and the switch itself.
+ * THE DECISION AND ITS TWO INPUTS ARE THE FOLLOWER'S. `follow()` is still the
+ * pure function it always was, but the deck no longer calls it: it hands the
+ * follower the three values IT owns — the failure latch, whether a deck is
+ * armed, and what the engine last said — and the follower supplies the two that
+ * come from the Host. That split is upstream #43, and it is the difference
+ * between a decision that is asserted and a decision that is DRIVEN.
+ *
+ * Called after every input that can change the answer: a status message, a
+ * session change, the player reporting play/pause, and the switch itself.
  */
-/**
- * Does this deck have a Host that reports its player? See follow(), and the
- * `transport` binding at the top of this file for why it is not a frame test.
- */
-const HOSTED = transport != null;
-
 function reconcile() {
-  const what = follow({
-    halted, armed: session.armed, status: live.status, videoPlaying, hosted: HOSTED,
-  });
-  if (what === 'start') {
-    /**
-     * THE MODEL GATE LIVES HERE, on a path that starts a pipeline, and not on
-     * the play handler alone.
-     *
-     * Attaching a capture makes the engine fetch the weights immediately
-     * (offscreen.js captureStart -> ensureSession), so ANY route to `start`
-     * with no model on disk is a 172 MiB download the user did not ask for.
-     * Gating the gesture instead of the effect is how the first version leaked
-     * one: a stray start during boot never went through the play handler.
-     *
-     * `restartLive()` IS THE OTHER SUCH ROUTE and carries the same gate — this
-     * line used to say "the only path", and it was wrong for as long as
-     * `onContentJump()` has existed. The gate belongs on each route INTO
-     * `startLive()` rather than inside it, because `startLive()` cannot refuse
-     * without also making the optimistic `priming` two lines below a lie.
-     */
-    if (modelInTheWay()) return;
-    err = null;
-    startLive();
-    // Optimistic, and only as far as `priming`: the engine owns every status
-    // above it. Without this the button does not change until the first
-    // LIVE_STATE, which is a visible dead beat on a control just pressed.
-    live.status = 'priming';
-    live.primedPct = 0;
-  } else if (what === 'stop') {
-    stopLive();
-  }
+  follower.decide({ halted, armed: session.armed, status: live.status });
+}
+
+/**
+ * THE 'start' EFFECT, AS ONE NAMED FUNCTION rather than a branch inside the
+ * follow loop, so that what the deck does when `follow()` says start is a thing
+ * a suite can point at. `makeFollower` is handed this and `stopLive`, and those
+ * two are the entire effect vocabulary of the loop.
+ *
+ * THE MODEL GATE LIVES HERE, on a path that starts a pipeline, and not on the
+ * play handler alone.
+ *
+ * Attaching a capture makes the engine fetch the weights immediately
+ * (offscreen.js captureStart -> ensureSession), so ANY route to `start` with no
+ * model on disk is a 172 MiB download the user did not ask for. Gating the
+ * gesture instead of the effect is how the first version leaked one: a stray
+ * start during boot never went through the play handler.
+ *
+ * `restartLive()` IS THE OTHER SUCH ROUTE and carries the same gate — this line
+ * used to say "the only path", and it was wrong for as long as
+ * `onContentJump()` has existed. The gate belongs on each route INTO
+ * `startLive()` rather than inside it, because `startLive()` cannot refuse
+ * without also making the optimistic `priming` two lines below a lie.
+ */
+function startPipeline() {
+  if (modelInTheWay()) return;
+  err = null;
+  startLive();
+  // Optimistic, and only as far as `priming`: the engine owns every status
+  // above it. Without this the button does not change until the first
+  // LIVE_STATE, which is a visible dead beat on a control just pressed.
+  live.status = 'priming';
+  live.primedPct = 0;
 }
 
 /**
@@ -818,14 +820,16 @@ function modelInTheWay() {
 }
 
 /**
- * The page's player moved. This is the only transport in this build.
+ * THE PLAYER MOVED — everything the deck does with a report, on EVERY report
+ * including the heartbeat. The transition half is `onPlaying()` below.
  *
- * Pressing play after a failure is the retry gesture: there is no Restart
- * button in the header any more, and "press play again" is what a user does
- * without being told. So a fresh play clears the latch.
+ * "The player" is whatever the Host reports and not necessarily a `<video>`:
+ * a Host whose Source is a file has a player too — the deck itself, running off
+ * the engine's playback clock — and it reports through this same duty. Nothing
+ * in here reads a media element; it reads the six values `DeckTransport.onState`
+ * declares.
  */
 function onVideoState(d) {
-  const playing = d.playing === true;
   /**
    * THE PAGE'S TRANSPORT GOES TO THE ENGINE FIRST, and the order is
    * load-bearing rather than tidy. `reconcile()` below can send LIVE_STOP, and
@@ -861,9 +865,16 @@ function onVideoState(d) {
    * repaint costs nothing when nothing changed.
    */
   paintBpm();
+}
 
-  if (playing === videoPlaying) return;
-  videoPlaying = playing;
+/**
+ * ...AND THE PART THAT RUNS ONLY WHEN PLAY/PAUSE ACTUALLY FLIPPED. The
+ * follower owns the comparison, because it owns the tri-state: everything
+ * above runs on every report, including the heartbeat, and this runs on a
+ * transition. Splitting them is what stopped the failure latch being cleared
+ * ten times a second on a video that had been playing all along.
+ */
+function onPlaying(playing) {
   // Pressing play after a failure is the retry: there is no Restart in the
   // header any more, and "press play again" is what a user does unprompted.
   if (playing) halted = false;
@@ -1167,7 +1178,7 @@ function paintStatus() {
     armed: session.armed,
     halted,
     status: live.status,
-    videoPlaying,
+    videoPlaying: follower.videoPlaying,
     passthrough: live.passthroughNow,
     primedPct: live.primedPct,
     modelPct,
@@ -2206,11 +2217,38 @@ host.page.onAutonav(onAutonav);
  * thing that greys the speed control — read as "anything that is not ok" rather
  * than as a list of states; see speedGate.
  */
-if (transport) {
-  transport.onState(onVideoState);
-  transport.onJump(onContentJump);
-  transport.onSpeedReport(onSpeedReport);
-}
+/**
+ * THE FOLLOWER — the boot composition, built in `embed-state.js` where it can
+ * be driven from Node. It is handed the transport `assertHostOption` returned
+ * and NOTHING ELSE about whether this deck is hosted: `hosted` is derived from
+ * that one value inside it, and `videoPlaying` is writable only through the
+ * report the transport pushes. That is why `transport: null` cannot be made to
+ * look like a Host with a player, in this file or in a suite.
+ *
+ * CONSTRUCTED HERE AND NOT AT THE TOP, and `listen()` is the reason the two are
+ * separable at all: registering the handlers is a point in the deck's boot —
+ * after its own bus listener is up and before it tells the page it is ready —
+ * and a report that arrives before it is dropped, deliberately.
+ */
+const follower = makeFollower(transport, {
+  onState: onVideoState,
+  onPlaying,
+  onJump: onContentJump,
+  onSpeedReport,
+  start: startPipeline,
+  stop: stopLive,
+});
+/**
+ * ...and the player, when there is one. PUSH, NOT POLL, and the seek is why:
+ * `onContentJump` is the deck's whole notice that the ~2.4 s already in the
+ * ring is now audio from somewhere else, and a poll would see a seek that
+ * opened and closed between two samples as nothing at all.
+ *
+ * `onSpeedReport` is speed.js's verdict on the element, and it is the ONLY
+ * thing that greys the speed control — read as "anything that is not ok" rather
+ * than as a list of states; see speedGate.
+ */
+follower.listen();
 
 // ------------------------------------------------------------------ controls
 $('mdl-go').addEventListener('click', () => {
@@ -2503,7 +2541,7 @@ const bootPoll = setInterval(() => {
 // Exposed for the automated harness only (tools/embed-smoke.mjs), same as the
 // DJ console's `__console`. Nothing in the UI reads it.
 globalThis.__embed = {
-  get videoPlaying() { return videoPlaying; },
+  get videoPlaying() { return follower.videoPlaying; },
   get transpose() { return semitones; },
   get instrument() { return instrument; },
   /** What the key block is showing, already composed. See paintKey(). */

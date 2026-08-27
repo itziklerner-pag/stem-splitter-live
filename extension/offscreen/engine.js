@@ -1262,6 +1262,20 @@ function bounceFailed(id, code, detail) {
   send({ type: 'BOUNCE_ERROR', deck: id, code: c, message });
 }
 
+/**
+ * HOW MANY TIMES A TRANSPORT DRIVE HAS ASKED THIS DECK FOR A RATE IT CANNOT
+ * PLAY AT, since the last release. A COUNT AND NOT A FLAG, because a Host whose
+ * lock re-asserts at ~4 Hz for a whole track and one that asked once are
+ * different facts about that Host and only the count tells them apart.
+ *
+ * It is a counter of REFUSALS and never a rate: nothing here stores what was
+ * asked for, so this record cannot become the reader `pageRate` above says it
+ * must not grow.
+ *
+ * @type {Record<'A'|'B', number>}
+ */
+const transportRateRefusals = { A: 0, B: 0 };
+
 // The Host owns the routing guard and the listener's return value; `handle` is
 // handed the raw envelope and its promise is deliberately not awaited — every
 // case reports through `send`/`push`, and `handle`'s own catch is the only
@@ -1339,6 +1353,82 @@ async function handle(m) {
         // for, which is the whole difference from a live deck (cacheddeck.js
         // seek()). The live path handles its own jump elsewhere.
         if (m.seeking === true && isCached(id)) cachedDecks[id].seek(t);
+        return;
+      }
+
+      /**
+       * THE OTHER END OF A DeckTransport WHOSE PLAYER IS THIS ENGINE.
+       *
+       * A Host whose Source is a FILE has no `<video>` to report or to write,
+       * so it presents a `DeckTransport` backed by the cached deck's own
+       * playback clock: it relays `TRANSPORT_STATE` (cacheddeck.js
+       * pushTransport) to the deck as `onState`, and it sends these two back.
+       * That is what makes a File source a hosted deck rather than one
+       * declaring `transport: null` — which reads as "nobody will ever tell me
+       * whether a player is playing" and makes `follow()` start a capture and a
+       * 109 MB model load on boot. Upstream #43; `shared/host.js`'s
+       * `DeckTransport` typedef carries the duty prose.
+       *
+       * `m` IS PASSED WHOLE, ENVELOPE AND ALL, ON PURPOSE. The write set is
+       * closed inside `CachedDeck.drive()`, which reads three named fields and
+       * ignores everything else — so this call site is also the proof that the
+       * closure is the DECK's and not a filter some caller can forget. A field a
+       * Host smuggles in reaches here and lands nowhere.
+       *
+       * NOTHING TO DRIVE IS SAID RATHER THAN SWALLOWED. A drive for a deck with
+       * no cached track is a Host and an engine that disagree about what is
+       * loaded, and a silent drop leaves a lock that believes it was taken.
+       */
+      case 'TRANSPORT_DRIVE': {
+        const id = normalizeDeckId(m.deck);
+        if (!isCached(id)) {
+          log(`[${id}] ignored a transport drive: no cached deck is loaded on it`);
+          return;
+        }
+        cachedDecks[id].drive(m);
+        /**
+         * THE THIRD FIELD OF THE WRITE SET, REFUSED HERE AND NOT IN THE DECK.
+         *
+         * `qa/speed-pitch.mjs` asserts that no file under
+         * `extension/{engine,offscreen,workers,shared}/` names the page rate in
+         * code except this one, which owns the record above — so the deck
+         * cannot spell this field, and that is the gate working rather than an
+         * inconvenience. A cached deck has no rate to be driven to: the ring is
+         * consumed by the audio device at its own rate, there is no resampler
+         * on this path, and the transpose is length-exact. Same refusal, same
+         * reason and nearly the same sentence as the `SPEED` handler's
+         * `why: 'cache'` branch below.
+         *
+         * COUNTED ALWAYS, LOGGED ONCE PER DECK. A Host's video lock re-asserts
+         * a correction at ~4 Hz, so one line per refusal buries the first and
+         * only useful one — the same contract `cacheddeck.js`'s tempo-tap fault
+         * keeps, for the same reason. The latch is cleared by a release, which
+         * is the Host saying it has stopped driving.
+         */
+        const rate = Number(m.playbackRate);
+        if (Number.isFinite(rate) && rate !== 1) {
+          transportRateRefusals[id]++;
+          if (transportRateRefusals[id] === 1) {
+            log(`[${id}] TRANSPORT_DRIVE REFUSED ${rate} — this deck is playing stems from disk, so there `
+              + 'is no page rate to drive and no resampler to make one. Counted from here, logged once.');
+          }
+        }
+        return;
+      }
+
+      case 'TRANSPORT_RELEASE': {
+        const id = normalizeDeckId(m.deck);
+        if (!isCached(id)) {
+          log(`[${id}] ignored a transport release: no cached deck is loaded on it`);
+          return;
+        }
+        // Cleared FIRST, so a release that reports a total also ends the latch:
+        // the next lock is a new lock and gets its own first line.
+        if (transportRateRefusals[id]) {
+          log(`[${id}] transport released after ${transportRateRefusals[id]} refused rate write(s)`);
+          transportRateRefusals[id] = 0;
+        }
+        cachedDecks[id].release();
         return;
       }
 

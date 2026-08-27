@@ -143,6 +143,10 @@ import {
 // place for the assertion to disagree with the code it is checking.
 import { PITCH_GROUP_DELAY_SAMPLES } from './extension/engine/pitch.js';
 import { syncCorrection, audioClockAt } from './extension/ui/audio-math.js';
+// The deck's BOOT COMPOSITION (U6, #43). `embed.js` cannot be imported from
+// Node — it builds a DOM at module scope — but the decision layer it hands the
+// Host's transport to can, which is the whole reason that layer is here.
+import { makeFollower } from './extension/ui/embed-state.js';
 import { SEGMENT, STRIDE, SR, STEMS, RING_FRAMES } from './extension/shared/config.js';
 import { RingConsumer, ringByteLength } from './extension/shared/ring.js';
 import { rfft, stft, istft, hann } from './extension/engine/fft.js';
@@ -9970,6 +9974,15 @@ if (group('host')) {
     const embedSrc = strip(embedRaw);
     const hostRaw = readFileSync(new URL('./extension/ui/host.js', import.meta.url), 'utf8');
     const hostSrc = strip(hostRaw);
+    /**
+     * ...AND THE FILE THE BOOT COMPOSITION MOVED INTO (U6, upstream #43).
+     * `makeFollower` registers `onState`/`onJump`/`onSpeedReport` and derives
+     * `hosted`; `embed.js` still calls `drive`, `release` and `requestSpeed`.
+     * The deck's use of the transport is therefore SPLIT ACROSS TWO UNIT FILES,
+     * and a scan that read only one of them would report half a seam as the
+     * whole of it — in the direction that reads as "these duties are dead".
+     */
+    const stateSrc = strip(readFileSync(new URL('./extension/ui/embed-state.js', import.meta.url), 'utf8'));
 
     /**
      * THE CHECKS ARE ONLY WORTH THEIR NAMES IF THE DECK ACTUALLY RUNS THEM, AND
@@ -10049,16 +10062,42 @@ if (group('host')) {
      * chord, and for the same reason: the absence alone is satisfied by a build
      * in which the frame test was simply deleted and `hosted` hard-coded.
      */
-    const hostedLine = /const HOSTED = transport != null;/.test(embedSrc);
+/**
+     * WHERE `hosted` IS DERIVED, AND THAT THERE IS EXACTLY ONE PLACE.
+     *
+     * It used to be `const HOSTED = transport != null;` in `embed.js`, one line
+     * below the deck's own copy of `videoPlaying`. U6 (upstream #43) moved both
+     * into `makeFollower`, because a `videoPlaying` this file can assign is a
+     * `videoPlaying` no suite can prove only the transport writes — and the
+     * defect was never in `follow()`, it was in that wiring.
+     *
+     * THREE CLAUSES, AND EACH ONE FAILS ON ITS OWN:
+     *   1. `embed.js` hands the follower the value `assertHostOption` returned
+     *      and nothing else. Handing it a boolean, or a second transport, is how
+     *      the two cases become indistinguishable inputs again.
+     *   2. `embed-state.js` derives `hosted` from that value.
+     *   3. `embed.js` no longer asks the question itself — a second copy of
+     *      `transport != null` here is a second answer that can disagree.
+     * ...and the frame test stays absent, as before.
+     */
+    const handsTransport = /^const follower = makeFollower\(transport, \{/m.test(embedSrc);
+    const derivesHosted = /const hosted = transport != null;/.test(stateSrc);
+    const asksTwice = [...embedSrc.matchAll(/transport\s*!=\s*null/g)].length;
     const framesInDeck = [...embedSrc.matchAll(/\bwindow\.parent\b|\bparent\.postMessage\b/g)].map((m) => m[0]);
-    ok('THE DECK ASKS THE HOST, NOT THE WINDOW: `hosted` comes off the transport and embed.js names no frame at all  '
-      + '[entry point: extension/ui/embed.js, comments stripped]',
-      hostedLine && framesInDeck.length === 0,
-      !hostedLine
-        ? 'no `const HOSTED = transport != null;` in embed.js — the input to follow()`s hosted branch is not the Host'
-        : framesInDeck.length
-          ? `embed.js still names ${framesInDeck.join(', ')} — under a desktop Host that is the wrong question`
-          : 'hosted <- transport != null, and no window.parent anywhere in the deck');
+    ok('THE DECK ASKS THE HOST, NOT THE WINDOW, AND ASKS ONCE: `hosted` is derived inside makeFollower from the '
+      + 'transport the deck was handed, and embed.js names no frame at all  '
+      + '[entry point: extension/ui/embed.js module scope and extension/ui/embed-state.js makeFollower(), comments stripped]',
+      handsTransport && derivesHosted && asksTwice === 0 && framesInDeck.length === 0,
+      !handsTransport
+        ? 'no `const follower = makeFollower(transport, {` at embed.js module scope — whatever decides hosted, '
+          + 'it is not the value assertHostOption returned'
+        : !derivesHosted
+          ? 'no `const hosted = transport != null;` in embed-state.js — the input to follow()`s hosted branch is not the Host'
+          : asksTwice
+            ? `embed.js asks \`transport != null\` ${asksTwice} more time(s) — two answers that can disagree`
+            : framesInDeck.length
+              ? `embed.js still names ${framesInDeck.join(', ')} — under a desktop Host that is the wrong question`
+              : 'hosted <- transport != null, once, inside makeFollower; no window.parent anywhere in the deck');
 
     ok('...and the frame test is the HOST\'s, where it is true: ui/host.js is the one file that asks it',
       /window\.parent !== window/.test(hostSrc),
@@ -10079,27 +10118,36 @@ if (group('host')) {
      * which is why the two patterns differ.
      */
     const reachedPage = [...new Set([...embedSrc.matchAll(/\bhost\.page\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
-    const reachedTr = [...new Set([...embedSrc.matchAll(/\btransport\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+    const trIn = (src) => [...new Set([...src.matchAll(/\btransport\.(\w+)\s*\(/g)].map((m) => m[1]))].sort();
+    const reachedTrEmbed = trIn(embedSrc);
+    const reachedTrState = trIn(stateSrc);
+    const reachedTr = [...new Set([...reachedTrEmbed, ...reachedTrState])].sort();
     const undeclared = [
       ...reachedPage.filter((k) => !pageDuties.includes(k)).map((k) => `host.page.${k}()`),
       ...reachedTr.filter((k) => !transportDuties.includes(k)).map((k) => `transport.${k}()`),
     ];
     ok('EVERY PAGE AND TRANSPORT DUTY THE DECK REACHES FOR IS DECLARED  '
-      + '[entry point: extension/ui/embed.js, comments stripped]',
+      + '[entry point: extension/ui/embed.js and extension/ui/embed-state.js, comments stripped]',
       reachedPage.length > 0 && reachedTr.length > 0 && undeclared.length === 0,
       reachedPage.length === 0 || reachedTr.length === 0
         ? `the deck reaches ${reachedPage.length} page and ${reachedTr.length} transport duties — either the seam is gone or this scan cannot see it`
         : undeclared.length
           ? `undeclared: ${undeclared.join(', ')} — declare it or a Host will pass the boot check and still throw`
-          : `${reachedPage.length} page: ${reachedPage.join(', ')} · ${reachedTr.length} transport: ${reachedTr.join(', ')}`);
+          : `${reachedPage.length} page: ${reachedPage.join(', ')} · ${reachedTr.length} transport: `
+            + `${reachedTrState.join(', ')} in embed-state.js, ${reachedTrEmbed.join(', ')} in embed.js`);
 
     const unreached = [
       ...pageDuties.filter((k) => !reachedPage.includes(k)).map((k) => `page.${k}`),
       ...transportDuties.filter((k) => !reachedTr.includes(k)).map((k) => `transport.${k}`),
     ];
     ok('...and every declared one is actually reached for, so a second Host implements nothing dead',
-      reachedPage.length > 0 && reachedTr.length > 0 && unreached.length === 0,
-      unreached.length ? `declared but never called: ${unreached.join(', ')}` : `all ${pageDuties.length + transportDuties.length}`);
+      reachedPage.length > 0 && reachedTrEmbed.length > 0 && reachedTrState.length > 0 && unreached.length === 0,
+      reachedTrState.length === 0
+        ? 'nothing in embed-state.js calls a transport duty — the boot composition is not there, and the '
+          + 'three push duties would read as reached only because some other file happens to name them'
+        : unreached.length
+          ? `declared but never called: ${unreached.join(', ')}`
+          : `all ${pageDuties.length + transportDuties.length}`);
 
     // ------------------------------------------------- the outgoing page wire
     /**
@@ -10267,6 +10315,433 @@ if (group('host')) {
         ? '4 refused: wrong source, wrong namespace, unrouted type, null'
         : `${heard.length} got through: ${heard.map(([k]) => k).join(',')}`);
   }
+
+  // ------------------------------- the deck as transport master (U6, #43)
+  head('host — THE DECK AS TRANSPORT MASTER: a File source gets a real transport, and does not start the pipeline on boot');
+  /**
+   * THE BOOT LAYER, DRIVEN. Read this before changing anything below.
+   *
+   * Every assertion above about `transport: null` is at the DECLARATION layer:
+   * `assertHostOption` accepts a declared absence, refuses an omission, refuses
+   * a short namespace. All true, all necessary, and NONE of them touches what
+   * the deck DOES with the answer. That gap is not hypothetical — four ratified
+   * documents instructed a File source to declare `transport: null` on exactly
+   * the reasoning those assertions support, and nothing anywhere in this tree
+   * had ever driven the boot path with `hosted: false`.
+   *
+   * So this section drives it, over the REAL pieces:
+   *   - a real `CachedDeck` on a real `StemRingWriter`, which IS the playback
+   *     clock a File source's player runs on;
+   *   - the ~20 lines of WIRE a Host writes to turn that into a
+   *     `DeckTransport` — it relays and it sends, and it invents nothing;
+   *   - the real `makeFollower` from `ui/embed-state.js`, which is the deck's
+   *     own boot composition and the only thing that writes `videoPlaying`.
+   *
+   * WHAT IS COUNTED, AND WHAT THE COUNT IS AND IS NOT. The follower's `start`
+   * effect is recorded as the two things `embed.js::startPipeline` does: it
+   * asks the model gate, and behind it it asks the service worker for a capture
+   * grant. THE RECORDER IS THIS FILE'S; that `startPipeline` really is those
+   * two things, and really is what the deck hands the follower, is a separate
+   * assertion at the foot of this section — because `embed.js` builds a DOM at
+   * module scope and cannot be evaluated here. Neither half is evidence alone.
+   *
+   * NO CLOCK ANYWHERE. `play()` starts a 10 Hz fill timer and it is stopped on
+   * the next line: the heartbeat is not the subject, the EVENTS are, and a
+   * suite that waited for a timer would be measuring setInterval.
+   */
+  if (typeof SharedArrayBuffer !== 'function') {
+    ok('SharedArrayBuffer available — the engine-backed transport is driven over a real stem ring', false,
+      'not in this node build, so the boot layer could not be driven at all');
+  } else {
+    const { StemRingWriter: SRW, stemRingByteLength: srBytes } = await import('./extension/shared/stemring.js');
+    const { STEM_RING_FRAMES: SRF } = await import('./extension/shared/config.js');
+    /**
+     * DERIVED, NOT TYPED. `cacheddeck.js` derives the master slot as
+     * `STEMS.length + 1` and says in as many words that a stale literal there
+     * lands a duck on a stem's slot with nothing reporting it. A literal 7 here
+     * would be the same defect on the reading side.
+     */
+    const G_MASTER = STEMS.length + 1;
+
+    const bus = [];
+    const gainMsgs = [];
+    const logs = [];
+    const mkTrack = (frames, seedOffset = 0) => {
+      const stems = {};
+      STEMS.forEach((name, k) => {
+        stems[name] = [0, 1].map((c) => {
+          const a = new Float32Array(frames);
+          for (let i = 0; i < frames; i++) a[i] = ((k * 2 + c + 1 + seedOffset) / 20) * Math.sin(i / 50);
+          return a;
+        });
+      });
+      return { stems, frames, meta: { videoId: null, title: 'a file' } };
+    };
+    const cd = new CachedDeck('A', {
+      ctx: () => ({ outputLatency: 0.048 }),
+      master: () => ({ build: async () => ({ input: () => ({}) }) }),
+      send: (m) => bus.push(m),
+      log: (l) => logs.push(l),
+      assetUrl: (relPath) => `stub://unit/${relPath}`,
+    });
+    cd.ensureGraph = async () => {
+      cd.out = new SRW(new SharedArrayBuffer(srBytes(SRF)), SRF);
+      // `disconnect` is stubbed because `dispose()` runs at the foot of this
+      // section; leaving it out turns a tidy-up into the group guard’s report.
+      cd.node = { port: { postMessage: (msg) => gainMsgs.push(msg) }, disconnect: () => {} };
+      cd.planes = Array.from({ length: RING_PLANES }, () => new Float32Array(65536));
+    };
+
+    /**
+     * THE ~20 LINES A HOST WITH A FILE SOURCE WRITES, and it is deliberately
+     * dumb: it relays `TRANSPORT_STATE` to the deck verbatim and forwards what
+     * `drive` was given WITHOUT FILTERING IT. `ui/host.js` does filter, and it
+     * is right to — but a Host that does not is exactly the case the deck's own
+     * closure exists for, and filtering here would hide it.
+     */
+    const wire = { onState: null, onJump: null, onSpeedReport: null };
+    const toEngine = [];
+    const fileTransport = {
+      onState(fn) { wire.onState = fn; },
+      onJump(fn) { wire.onJump = fn; },
+      onSpeedReport(fn) { wire.onSpeedReport = fn; },
+      drive(patch) { toEngine.push({ type: 'TRANSPORT_DRIVE', deck: 'A', ...patch }); },
+      release() { toEngine.push({ type: 'TRANSPORT_RELEASE', deck: 'A' }); },
+      requestSpeed(rate) { toEngine.push({ type: 'SPEED', deck: 'A', rate }); },
+    };
+    /** Drain the engine's outbox into the Host's relay. The Host is the wire. */
+    const reports = [];
+    const pump = () => {
+      for (const m of bus.splice(0)) {
+        if (m.type !== 'TRANSPORT_STATE') continue;
+        const { type, deck, ...payload } = m;
+        reports.push(payload);
+        if (wire.onState) wire.onState(payload);
+      }
+    };
+
+    const recorder = () => {
+      const r = { modelAsks: 0, captures: 0, stops: 0, states: 0, jumps: 0, speeds: 0, flips: [] };
+      return [r, {
+        onState: () => { r.states++; },
+        onPlaying: (p) => { r.flips.push(p); },
+        onJump: () => { r.jumps++; },
+        onSpeedReport: () => { r.speeds++; },
+        // embed.js::startPipeline, as its two steps: the model gate, and the
+        // capture grant request startLive() sends behind it.
+        start: () => { r.modelAsks++; r.captures++; },
+        stop: () => { r.stops++; },
+      }];
+    };
+
+    const trFile = threw(() => assertHost(fileTransport, DECK_TRANSPORT_DUTIES, 'DeckHost.transport'));
+    ok('A FILE SOURCE GETS A FULL SIX-DUTY TRANSPORT, backed by the engine\'s playback clock and not by a media element  '
+      + '[entry point: assertHost(), the same check embed.js runs over host.transport at boot]',
+      trFile === null && Object.keys(DECK_TRANSPORT_DUTIES).length === 6,
+      trFile || `${Object.keys(DECK_TRANSPORT_DUTIES).length} duties: ${Object.keys(DECK_TRANSPORT_DUTIES).join(', ')}`);
+
+    await cd.load(mkTrack(SR * 20));
+    pump();
+
+    // ------------------------------------------------------------ THE GATE
+    const [hostedRec, hostedFx] = recorder();
+    const hostedFollower = makeFollower(fileTransport, hostedFx);
+    hostedFollower.listen();
+    /**
+     * THE BOOT WINDOW: the deck is armed, the engine has said nothing yet, and
+     * the status ticks arrive at 10 Hz. THREE of them, because the defect is
+     * "the FIRST tick starts it" and one tick cannot tell a hold from a stall.
+     */
+    const bootWhat = [
+      hostedFollower.decide({ halted: false, armed: true, status: 'idle' }),
+      hostedFollower.decide({ halted: false, armed: true, status: 'idle' }),
+      hostedFollower.decide({ halted: false, armed: true, status: 'idle' }),
+    ];
+    ok('THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE: across the whole boot window it asks for '
+      + 'ZERO capture grants and ZERO model loads, and holds  '
+      + '[entry point: makeFollower().decide(), reached from embed.js reconcile() on every status message]',
+      hostedFollower.hosted === true && hostedFollower.videoPlaying === null
+      && bootWhat.every((w) => w === 'hold') && hostedRec.captures === 0 && hostedRec.modelAsks === 0,
+      `hosted=${hostedFollower.hosted}, videoPlaying=${String(hostedFollower.videoPlaying)}, `
+        + `${bootWhat.join('/')} — ${hostedRec.captures} capture grant request(s), ${hostedRec.modelAsks} model ask(s)`);
+
+    /**
+     * THE CONTROL, AND IT IS THE DEFECT FOUR DOCUMENTS RATIFIED. The same
+     * fixture, the same tick, with the one thing changed that those documents
+     * said to change: the Host declares `transport: null`.
+     *
+     * IT IS AN ASSERTION AND NOT A ONE-OFF MUTATION on purpose. A mutation is
+     * evidence on the day it is run; a control cannot decay silently, and this
+     * is the very number the assertion above claims is zero. If this one ever
+     * reads 0 too, the assertion above has stopped measuring and says so here
+     * rather than staying green for ever.
+     */
+    const [nullRec, nullFx] = recorder();
+    const nullFollower = makeFollower(null, nullFx);
+    nullFollower.listen();
+    const nullWhat = nullFollower.decide({ halted: false, armed: true, status: 'idle' });
+    ok('CONTROL — WITH `transport: null` THE SAME BOOT TICK STARTS THE PIPELINE: an unrequested capture and, behind '
+      + 'it, a 109 MB model load, before the user has touched anything  '
+      + '[entry point: the same makeFollower().decide(), with the Host declaring it has no player]',
+      nullFollower.hosted === false && nullFollower.videoPlaying === null
+      && nullWhat === 'start' && nullRec.captures === 1 && nullRec.modelAsks === 1,
+      `hosted=${nullFollower.hosted}, ${nullWhat} — ${nullRec.captures} capture grant request(s), `
+        + `${nullRec.modelAsks} model ask(s) on the first tick`);
+
+    /**
+     * ...AND THE HOSTED FOLLOWER IS NOT MERELY INERT. A follower that held on
+     * every input would pass the gate above while measuring nothing. The user's
+     * first gesture is the deck playing; the report reaches `videoPlaying`
+     * through the transport, and nothing else can write it.
+     */
+    cd.play();
+    cd.stopFill();                    // no clocks in this suite — see the header
+    pump();
+    const playWhat = hostedFollower.decide({ halted: false, armed: true, status: 'idle' });
+    ok('...and the SAME follower starts on the user\'s first gesture, so the hold above is a decision and not a stall  '
+      + '[entry point: CachedDeck.play() -> TRANSPORT_STATE -> onState -> makeFollower().decide()]',
+      hostedFollower.videoPlaying === true && playWhat === 'start'
+      && hostedRec.captures === 1 && hostedRec.flips.join(',') === 'true',
+      `videoPlaying=${String(hostedFollower.videoPlaying)}, ${playWhat}, ${hostedRec.captures} capture(s), `
+        + `flips [${hostedRec.flips.join(',')}]`);
+
+    /**
+     * AND `videoPlaying` IS UNREACHABLE FROM OUTSIDE. This is what makes the two
+     * cases above genuinely different INPUTS rather than one input set two ways:
+     * a fixture that could assign the flag could make the hosted and unhosted
+     * cases identical, and a gate whose fixture makes two inputs identical is
+     * blind to whatever distinguishes them.
+     */
+    const flagBefore = hostedFollower.videoPlaying;
+    try { hostedFollower.videoPlaying = false; } catch { /* getter-only: a strict-mode assignment throws */ }
+    ok('...and nothing outside the transport can write `videoPlaying` — the two cases above differ by an INPUT, '
+      + 'not by a flag a fixture set',
+      flagBefore === true && hostedFollower.videoPlaying === true,
+      `assigning false left it ${String(hostedFollower.videoPlaying)}`);
+
+    const shortFx = threw(() => makeFollower(fileTransport, { onState() {}, onJump() {} }));
+    ok('...and a deck that supplies the follower half its effects is refused at boot, naming the ones it left out  '
+      + '[entry point: makeFollower(), called at extension/ui/embed.js module scope]',
+      shortFx != null && shortFx.includes('start()') && shortFx.includes('stop()') && shortFx.includes('onPlaying()'),
+      shortFx == null
+        ? 'a follower with no start() was ACCEPTED — the deck would decide to run and nothing would run'
+        : shortFx);
+
+    // -------------------------------- the report IS the engine's playback clock
+    /**
+     * ON EVERY EVENT THAT MOVES IT. The deck is walked through its transport
+     * methods and each one's report is compared against `positionSec()` READ
+     * BACK FROM THE DECK — not against a number this file computed, which would
+     * be a second copy of the clock and would agree with itself for ever.
+     */
+    reports.length = 0;
+    const walk = [];
+    const step = (name, fn) => {
+      fn(); pump();
+      walk.push({ name, at: +cd.positionSec().toFixed(3), got: reports[reports.length - 1] || null });
+    };
+    // Consume two seconds the way the worklet does, so the playhead has moved.
+    step('consume', () => { Atomics.store(cd.out.hdr, 1, cd.out.readFrames() + SR * 2); cd.pushState(); });
+    step('seek', () => cd.seek(10));
+    step('pause', () => cd.pause());
+    step('play', () => { cd.play(); cd.stopFill(); });
+    const wrong = walk.filter((w) => !w.got || Math.abs(w.got.currentTime - w.at) > 1e-9);
+    ok('onState REPORTS THE ENGINE\'S OWN PLAYHEAD on every event that moves it — the deck is the source of truth, '
+      + 'not a follower  '
+      + '[entry point: CachedDeck.pushTransport(), reached from pushState() on load/play/pause/seek/stop and the fill heartbeat]',
+      walk.length === 4 && wrong.length === 0,
+      wrong.length
+        ? wrong.map((w) => `${w.name}: reported ${w.got ? w.got.currentTime : 'NOTHING'} with the deck at ${w.at}`).join(' · ')
+        : walk.map((w) => `${w.name}@${w.at}`).join(' '));
+
+    ok('...and it carries the playing/ended pair the readout cannot: LIVE_STATE flattens loaded, paused and ended '
+      + 'into the one word "ready", and a transport has to tell them apart',
+      walk[2].got && walk[3].got && walk[2].got.playing === false && walk[2].got.ended === false
+      && walk[3].got.playing === true && walk.every((w) => w.got && w.got.duration === 20 && typeof w.got.atMs === 'number'),
+      walk[2].got && walk[3].got
+        ? `pause -> playing=${walk[2].got.playing}/ended=${walk[2].got.ended}, play -> playing=${walk[3].got.playing}, `
+          + `duration ${walk[3].got.duration}s`
+        : 'a step put no report on the wire at all');
+
+    /**
+     * A STILL DECK IS SILENT. The report is deduped on its VALUE, so a paused
+     * deck stops repeating itself at 10 Hz — and `atMs` is deliberately not in
+     * the key, because a timestamp that moves every tick defeats a dedupe
+     * entirely, which is the one-character version of not having one.
+     */
+    cd.pause();
+    pump();
+    reports.length = 0;
+    cd.pushState(); cd.pushState(); cd.pushState();
+    pump();
+    ok('...and a deck that has not moved says NOTHING — three heartbeats with the playhead still put no report on '
+      + 'the wire, so a Host is not woken ten times a second by a paused deck',
+      reports.length === 0,
+      `${reports.length} report(s) from three heartbeats with the playhead still`);
+
+    /**
+     * NEVER `seeking: true`, INCLUDING ON THE REPORT seek() ITSELF PUSHES, and
+     * it is a loop rather than a nicety: `embed.js::onVideoState` turns every
+     * report into `PAGE_VIDEO { currentTime, seeking }` and `engine.js` seeks a
+     * cached deck on `seeking === true` — so a deck that reported its own seek
+     * would be told to seek to a ~100 ms stale position ten times a second,
+     * flushing the tempo tap on every heartbeat.
+     */
+    reports.length = 0;
+    cd.play(); cd.stopFill(); cd.seek(3); cd.seek(12); pump();
+    const seekingSaid = reports.filter((r) => r.seeking !== false);
+    ok('...and NO report ever says `seeking` — one that did would be routed back as PAGE_VIDEO and re-seek the deck '
+      + 'it came from, flushing the tempo tap on every heartbeat',
+      reports.length >= 2 && seekingSaid.length === 0,
+      reports.length < 2
+        ? `only ${reports.length} report(s) across two seeks — this assertion could not look`
+        : `${reports.length} reports across two seeks, none seeking`);
+
+    // ------------------------------------------------ drive(), and its closure
+    /**
+     * THE WRITE SET IS CLOSED AT THE DECK. `offscreen/engine.js` hands
+     * `CachedDeck.drive()` the RAW inbound message, envelope and all, so this
+     * call is shaped exactly as the engine shapes it — plus two fields a Host
+     * might smuggle in. Two of the three land; the smuggled pair land nowhere,
+     * and the rate is the engine's to refuse (`qa/speed-pitch.mjs` forbids the
+     * deck from naming it at all).
+     */
+    cd.setMasterGain(-6);
+    gainMsgs.length = 0;
+    const stateOf = () => JSON.stringify({
+      masterDb: cd.masterDb, masterAuto: cd.masterAuto, semitones: cd.semitones,
+      xf: cd.xf, mix: cd.mix, status: cd.status,
+    });
+    const beforeDrive = stateOf();
+    const applied = cd.drive({
+      v: 1, to: 'off', from: 'ui', type: 'TRANSPORT_DRIVE', deck: 'A',
+      muted: true, currentTime: 5, volume: 0.1, seekTo: 99,
+    });
+    pump();
+    const masterAfterMute = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('drive() WRITES MUTE AND POSITION AND NOTHING ELSE — the envelope, a smuggled `volume` and a smuggled '
+      + '`seekTo` all land nowhere  '
+      + '[entry point: CachedDeck.drive(), handed the raw message by offscreen/engine.js case TRANSPORT_DRIVE]',
+      applied.join(',') === 'muted,currentTime'
+      && cd.transportMuted === true && Math.abs(cd.positionSec() - 5) < 0.01
+      && cd.volume === undefined && stateOf() === beforeDrive,
+      `applied [${applied.join(',')}], muted=${cd.transportMuted}, at ${cd.positionSec().toFixed(2)}s, `
+        + `volume=${String(cd.volume)}, everything else ${stateOf() === beforeDrive ? 'unchanged' : 'MOVED'}`);
+
+    ok('...and the mute REACHES THE GRAPH rather than only the field: the master slot goes to zero while the user\'s '
+      + '−6 dB is still underneath it',
+      masterAfterMute != null && masterAfterMute.value === 0 && cd.masterDb === -6,
+      masterAfterMute == null
+        ? 'no master gain message reached the worklet at all — the mute is a field nobody plays'
+        : `master slot ${G_MASTER} -> ${masterAfterMute.value}, masterDb still ${cd.masterDb}`);
+
+    gainMsgs.length = 0;
+    const posBeforeRelease = cd.positionSec();
+    cd.release();
+    pump();
+    const masterAfterRelease = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('release() HANDS THE PLAYER BACK, READ BACK OFF THE DECK: unmuted, the user\'s −6 dB restored to the graph, '
+      + 'and the playhead left where the user left it  '
+      + '[entry point: CachedDeck.release(), reached from offscreen/engine.js case TRANSPORT_RELEASE]',
+      cd.transportMuted === false && masterAfterRelease != null
+      && Math.abs(masterAfterRelease.value - dbToGain(-6)) < 1e-12
+      && Math.abs(cd.positionSec() - posBeforeRelease) < 1e-9,
+      masterAfterRelease == null
+        ? 'release() sent nothing to the graph — a deck muted by a lock stays silent with every meter saying otherwise'
+        : `muted=${cd.transportMuted}, master -> ${masterAfterRelease.value.toFixed(6)} `
+          + `(${dbToGain(-6).toFixed(6)} is −6 dB), playhead ${cd.positionSec().toFixed(2)}s`);
+
+    /**
+     * A NEW TRACK IS NOT UNDER ANYONE'S LOCK. A `transportMuted` carried across
+     * a load plays the next track silently with every meter and every status
+     * field saying it is playing.
+     */
+    cd.drive({ muted: true });
+    gainMsgs.length = 0;
+    await cd.load(mkTrack(SR * 5, 1));
+    pump();
+    const masterAfterLoad = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('...and a NEW TRACK does not inherit a lock that was never released — the mute clears at the track boundary  '
+      + '[entry point: CachedDeck.load(), which clears it before pushMaster()]',
+      cd.transportMuted === false && masterAfterLoad != null && masterAfterLoad.value > 0,
+      `muted=${cd.transportMuted}, master -> ${masterAfterLoad ? masterAfterLoad.value : 'nothing'}`);
+
+    cd.stop();
+    cd.dispose();
+
+    // ----------------------------- the page-hosted path, over the SHIPPED Host
+    /**
+     * UNCHANGED, AND DRIVEN THROUGH THE REAL ui/host.js. The follower is handed
+     * the SHIPPED page transport and fed a `VIDEO` message the way content.js
+     * sends one; the deck must follow it exactly as it always has. This is the
+     * half that catches the fix breaking the build that ships today.
+     */
+    // The host's own outbound namespace, as content.js stamps it. Spelled
+    // again here rather than reached out of the block above: this section is
+    // the one a later slice is most likely to move, and a name it borrowed
+    // from a sibling scope would follow it out of the file silently.
+    const HOST_NS = 'stem-splitter-live-host';
+    const [pageRec, pageFx] = recorder();
+    const pageFollower = makeFollower(deckHost.transport, pageFx);
+    pageFollower.listen();
+    const pageBoot = pageFollower.decide({ halted: false, armed: true, status: 'idle' });
+    deliver(framedWin, framedWin.parent, { from: HOST_NS, type: 'VIDEO', playing: true, currentTime: 12, duration: 300 });
+    const pagePlay = pageFollower.decide({ halted: false, armed: true, status: 'idle' });
+    deliver(framedWin, framedWin.parent, { from: HOST_NS, type: 'VIDEO', playing: false, currentTime: 13, duration: 300 });
+    const pagePause = pageFollower.decide({ halted: false, armed: true, status: 'running' });
+    ok('THE PAGE-HOSTED PATH IS UNCHANGED: over the SHIPPED ui/host.js transport the deck still holds before the page '
+      + 'speaks, starts on play and stops on pause  '
+      + '[entry point: extension/ui/host.js transport.onState -> makeFollower(), the build that ships today]',
+      pageFollower.hosted === true && pageBoot === 'hold' && pagePlay === 'start' && pagePause === 'stop'
+      && pageRec.captures === 1 && pageRec.stops === 1 && pageRec.flips.join(',') === 'true,false',
+      `boot ${pageBoot}, play ${pagePlay}, pause ${pagePause} — ${pageRec.captures} capture(s), `
+        + `${pageRec.stops} stop(s), flips [${pageRec.flips.join(',')}]`);
+
+    // --------------------------- what the recorder above is standing in for
+    /**
+     * THE OTHER HALF OF THE COUNT, AND IT IS NOT OPTIONAL. Everything above
+     * counts calls into a recorder THIS FILE wrote. That the recorder stands in
+     * for a capture grant and a model load is a claim about `embed.js`, which
+     * cannot be evaluated from Node — so it is read as text, comments stripped,
+     * and the chain is checked link by link:
+     *   the follower's `start` effect is `startPipeline`
+     *     -> `startPipeline` asks the model gate, then `startLive()`
+     *       -> `startLive()` asks the service worker for a capture grant and
+     *          sends LIVE_START behind it.
+     * A break anywhere in it makes every count above stop meaning what it says,
+     * and nothing else in this file would notice.
+     */
+    const embedTxt = strip(readFileSync(new URL('./extension/ui/embed.js', import.meta.url), 'utf8'));
+    const engineTxt = strip(readFileSync(new URL('./extension/offscreen/engine.js', import.meta.url), 'utf8'));
+    const chain = [
+      ['the follower’s start effect is startPipeline', /makeFollower\(transport, \{[\s\S]{0,400}?start: startPipeline,/],
+      ['...and its stop effect is stopLive', /makeFollower\(transport, \{[\s\S]{0,400}?stop: stopLive,/],
+      ['startPipeline asks the model gate first', /function startPipeline\(\)\s*\{\s*if \(modelInTheWay\(\)\) return;/],
+      ['...then startLive()', /function startPipeline\(\)[\s\S]{0,300}?startLive\(\);/],
+      ['startLive asks the service worker for a capture grant', /function startLive\(\)[\s\S]{0,500}?SW_CAPTURE_START/],
+      ['...and sends LIVE_START behind it', /function startLive\(\)[\s\S]{0,200}?LIVE_START/],
+    ];
+    const brokenLinks = chain.filter(([, re]) => !re.test(embedTxt)).map(([w]) => w);
+    ok('THE RECORDER ABOVE IS STANDING IN FOR A REAL CAPTURE GRANT AND A REAL MODEL LOAD: the deck hands the follower '
+      + 'startPipeline, which is the model gate and then the capture  '
+      + '[entry point: extension/ui/embed.js, comments stripped — the count is in this file, the chain is in the deck]',
+      brokenLinks.length === 0,
+      brokenLinks.length
+        ? `the chain is broken at: ${brokenLinks.join('; ')} — every count above still passes and means something else`
+        : `${chain.length} of ${chain.length} links`);
+
+    const engineChain = [
+      ['TRANSPORT_DRIVE reaches the cached deck', /case 'TRANSPORT_DRIVE':[\s\S]{0,900}?cachedDecks\[id\]\.drive\(m\);/],
+      ['TRANSPORT_RELEASE reaches it too', /case 'TRANSPORT_RELEASE':[\s\S]{0,900}?cachedDecks\[id\]\.release\(\);/],
+    ];
+    const engineBroken = engineChain.filter(([, re]) => !re.test(engineTxt)).map(([w]) => w);
+    ok('...and the engine really carries both halves of the wire, with the RAW message, so a Host has somewhere '
+      + 'honest to land drive and release  '
+      + '[entry point: extension/offscreen/engine.js handle(), comments stripped]',
+      engineBroken.length === 0,
+      engineBroken.length ? engineBroken.join('; ') : `${engineChain.length} of ${engineChain.length}`);
+  }
+
   } catch (e) {
     hostGroupThrew = e;
   } finally {
