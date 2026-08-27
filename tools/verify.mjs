@@ -1101,6 +1101,24 @@ const steps = [
   { id: 'qa-edge', title: 'node qa/test-edge.mjs — segment-grid edge lengths and the config constants, no browser', args: ['qa/test-edge.mjs'] },
   { id: 'passthrough', title: 'node qa/passthrough-gain.mjs — QA-15: G_PASS = min(stem gains), on the real emitter and mixer', args: ['qa/passthrough-gain.mjs'] },
   { id: 'pitch', title: 'node extension/engine/pitch.js — phase vocoder, ±6 semitones', args: ['extension/engine/pitch.js'] },
+  /**
+   * Beside `passthrough` and `pitch` because it is the same audio path, driven
+   * end to end: the stem ring, the mixer's resolved gains, the transpose lanes
+   * and the sum, through the SHIPPED playback worklet — offline, at the render
+   * quantum, in a `vm` realm, with no browser and no mutex.
+   *
+   * It is the FIRST offline-render harness in this tree: before it, neither
+   * `OfflineAudioContext` nor `startRendering` appeared anywhere under `tools/`
+   * or `qa/`. What it cannot see is Chromium's own OfflineAudioContext honouring
+   * a suspension schedule; that was measured separately and `qa/bounce.mjs`'s
+   * header says so rather than letting a green here be read as covering it.
+   *
+   * ~7 s, 47 assertions. Neither `slow` nor `heavy`: no browser, no weights. Its
+   * longest fixture is fourteen seconds of audio ON PURPOSE — the stem ring holds
+   * 11.89 s, and a bounce gate shorter than the ring cannot see the failure the
+   * whole slice exists to prevent.
+   */
+  { id: 'bounce', title: 'node qa/bounce.mjs — BOUNCE: the deck rendered offline through the shipped playback worklet, with its faders, mute/solo, crossfader and transpose baked in', args: ['qa/bounce.mjs'] },
   // `${RING_PLANES}`, not `14`. This read "10-plane routing" for the whole of
   // the six-stem migration — a step title naming a number the tree contradicts,
   // which is the cheap end of exactly the problem the migration has been

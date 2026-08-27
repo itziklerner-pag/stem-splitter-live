@@ -7557,10 +7557,13 @@ if (group('host')) {
    * existing Host fails at boot. That is precisely what lets a duty be DECLARED
    * in one tag and CONSUMED in the next: a second product implements it against
    * a tag it can already vendor, instead of against one that does not exist yet.
-   * Host interface v1.1 does exactly that — `sourceBytes` and `exportSink` are
-   * declared here for the ahead-of-time separation runner and the export path,
-   * neither of which is in this tree. Without this window the seam could only
-   * ever grow in the same tag as its caller, which is the serialisation the
+   * Host interface v1.1 did exactly that for two duties. `exportSink` HAS ITS
+   * CONSUMER NOW — the bounce path calls it at `offscreen/engine.js`'s
+   * `BOUNCE_START`, for one file rather than six — so its line below is gone,
+   * which is the discipline this exemption is written to enforce rather than an
+   * edit somebody happened to remember. `sourceBytes` stays exempt until the
+   * ahead-of-time separation runner lands. Without this window the seam could
+   * only ever grow in the same tag as its caller, which is the serialisation the
    * split into two tags exists to avoid.
    *
    * SO THE EXEMPTION IS EXACT IN BOTH DIRECTIONS, and that is what keeps it from

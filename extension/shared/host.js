@@ -492,6 +492,13 @@ export function modelSourceWord(source) {
  *   same place. `files` are BASE NAMES the unit chose; the Host owns the
  *   directory, the dialog and any collision policy, and returns a map keyed by
  *   the same names.
+ *   N MAY BE ONE, and the six-stem export is the EXAMPLE rather than the
+ *   contract. A Bounce — what a deck is playing, rendered offline with its
+ *   settings baked in (`engine/bounce.js`) — is one file, so it passes
+ *   `files: ['<title>.wav']` and reads one writable back out of a one-key map.
+ *   Said here because the paragraph above is otherwise easy to read as a
+ *   six-file promise, and a Host that special-cased six would refuse the
+ *   deliverable with no way to tell that it was the Host that was wrong.
  *   WHY A `WritableStream` AND NOT A BUFFER. Six 32-bit-float stems of a
  *   four-minute track are ~508 MB. A duty that took finished bytes would
  *   require every one of them resident at once, which is not a thing to ask of
