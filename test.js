@@ -86,6 +86,47 @@
  *
  * Everything else drives production code directly and is reachable by
  * construction. When you add a test, say which kind it is.
+ *
+ * ---------------------------------------------------------------------------
+ * TWO GUARDS THAT PRODUCE THE SAME OBSERVATION ARE ONE GUARD, and only one of
+ * them is being tested.
+ *
+ * AGENTS.md's rule is that a fixture which makes two INPUTS identical is blind
+ * to whatever distinguishes them. This is that rule ONE LEVEL UP — not two
+ * identical inputs, two identical OBSERVATIONS — and it is in this header
+ * rather than beside the assertion it was found on because it generalises to
+ * every group here.
+ *
+ * MEASURED, in `export`: "a 16-bit entry is not a deliverable" stayed GREEN with
+ * the MANIFEST ROW's depth check deleted, because the FILE HEADER check caught
+ * the same fixture, threw the same `WRONG_TIER`, and put "16-bit" in its
+ * message too. Two guards, one observation. The assertion could not say which
+ * had fired, so one of the two was untested while it sat green — and a mutation
+ * battery aimed at that assertion reported a watched red it had not watched.
+ *
+ * THE FIX IS A SECOND OBSERVATION THE TWO GUARDS DISAGREE ABOUT, never a more
+ * specific string to match. There it is A COUNT OF THE STEM FILES OPENED: the
+ * row check refuses before a single file is opened, and the header check has to
+ * open all six to look at one, so `opens.length === 0` is a number the
+ * surviving guard cannot produce.
+ *
+ * So when two paths can raise the same failure, ask what they do DIFFERENTLY —
+ * how far the run got, what it touched, how many times — and assert THAT. Same
+ * code and same words is not evidence about which line ran.
+ *
+ * ---------------------------------------------------------------------------
+ * AN ASSERTION NOTHING ELSE CAN MAKE IS LOAD-BEARING. Say so where it stands,
+ * so the next reader does not trim it as a restatement of its neighbour.
+ *
+ * `export`'s "the six files advance TOGETHER, never one finished at a time"
+ * reads like a weaker copy of the "NO PARTIAL FILE IS LEFT" assertion two lines
+ * above it. It is the only assertion in this file that can see a SEQUENTIAL
+ * write. MEASURED: swapping the run's two loops so each stem is written whole
+ * before the next one starts — the defect that leaves five complete WAVs on a
+ * user's disk after they press Stop — leaves "no partial file" GREEN, because
+ * at the cancel point the first stem is not finished either way. The SPREAD
+ * between the longest and shortest destination is the only figure that moves.
+ * Delete it and the interleaved write loop has no coverage at all.
  */
 
 import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter, WavWindowReader } from './extension/shared/wav.js';
@@ -1022,7 +1063,11 @@ if (group('export')) {
       stems: opts.stems,
       format: opts.format,
       chunkFrames: opts.chunkFrames || CHUNK,
-      openStem: (stem) => { opens.push(stem); return open(stem); },
+      // `onOpen` fires BETWEEN the reader opening and the next one, which is the
+      // only place a test can stand to reach the window after the readers are
+      // open and before the folder dialog. `run` is assigned before `run()` is
+      // ever called, so the closure is live by the time this fires.
+      openStem: (stem) => { opens.push(stem); if (opts.onOpen) opts.onOpen(stem, run); return open(stem); },
       exportSink: opts.exportSink || (async (plan) => {
         plans.push(plan);
         const map = {};
@@ -1111,9 +1156,51 @@ if (group('export')) {
       safeTitle('///') === '___' && safeTitle('') === 'export' && safeTitle('..') === 'export',
       `${JSON.stringify(safeTitle('///'))} ${JSON.stringify(safeTitle(''))} ${JSON.stringify(safeTitle('..'))}`);
 
-    ok('...a Windows DEVICE name is escaped — `NUL.wav` accepts every byte and keeps none',
+    ok('...a Windows DEVICE name is escaped — `NUL` accepts every byte and keeps none',
       safeTitle('NUL') === '_NUL' && safeTitle('com1') === '_com1' && safeTitle('conch') === 'conch',
       `${safeTitle('NUL')} ${safeTitle('com1')} ${safeTitle('conch')}`);
+
+    /**
+     * `<device>.<anything>` IS STILL THE DEVICE, and this assertion is here
+     * because the guard above it did not use to say so — the anchored `$` caught
+     * a title that WAS the device and nothing else.
+     *
+     * WHAT IT COST, MEASURED: `NUL.wav`, `Con.Fusion`, `nul.02`, `con.brio`,
+     * `com1.set`, `aux.1`, `lpt1.x` and `prn.mix` all came back unescaped. Win32
+     * resolves a reserved BASE followed by any extension to the device itself —
+     * MSDN: "NUL.txt and NUL.tar.gz are all equivalent to NUL" — so on Windows
+     * every byte of such an export went to the null device, which accepts
+     * everything and keeps nothing, and the run still emitted EXPORT_DONE naming
+     * six files. SILENT DATA LOSS REPORTED AS SUCCESS. Every fixture below was
+     * observed going through unescaped before the guard was widened.
+     */
+    const DEVICED = ['NUL.wav', 'Con.Fusion', 'nul.02', 'con.brio', 'com1.set', 'aux.1', 'lpt1.x', 'prn.mix', 'NUL.tar.gz'];
+    const wentThrough = DEVICED.filter((t) => !safeTitle(t).startsWith('_'));
+    ok('...AND SO IS `<device>.<anything>`: NUL.wav, NUL.txt and NUL.tar.gz all resolve to NUL on Windows  '
+      + `[entry point: safeTitle over ${DEVICED.length} <device>.<ext> titles — an unescaped one is every byte written to the null device, reported as EXPORT_DONE]`,
+      wentThrough.length === 0 && DEVICED.length > 5,
+      wentThrough.length ? `unescaped: ${wentThrough.join(', ')}` : `${DEVICED.length} escaped: ${DEVICED.map((t) => safeTitle(t)).join(', ')}`);
+
+    /**
+     * THE CONTROL, and without it the assertion above is satisfied by escaping
+     * every title that contains a dot — which is most of them. A base that only
+     * LOOKS like a device is not one: `conch` and `nulla` merely start with the
+     * letters, `comic` merely starts with `com`, and `a.con` has the device name
+     * AFTER the dot, where Windows does not look.
+     *
+     * `com0` AND `lpt0` ARE DELIBERATELY NOT HERE, and their absence is a
+     * declaration rather than an oversight: the guard's set is `com1-9`/`lpt1-9`
+     * and current MSDN also lists COM0 and LPT0. This repair widened the ANCHOR
+     * (`<device>.<anything>`) and did not touch the SET, which cannot be settled
+     * from Linux. Asserting either way here would be this suite claiming
+     * something it did not measure. See `safeTitle`'s RESERVED comment.
+     */
+    const LOOKALIKE = ['conch', 'nulla', 'comic', 'printer', 'concerto', 'a.con', 'auxiliary.wav', 'prnt.mix'];
+    const overEscaped = LOOKALIKE.filter((t) => safeTitle(t) !== t);
+    ok('...while a base that only LOOKS like a device is untouched, so the rule above is about devices and not about dots  '
+      + `[the control: a guard that escaped every dotted title would pass the assertion above; ${LOOKALIKE.length} lookalikes]`,
+      overEscaped.length === 0 && LOOKALIKE.length > 5,
+      overEscaped.length ? `over-escaped: ${overEscaped.map((t) => `${t} -> ${safeTitle(t)}`).join(', ')}` : `${LOOKALIKE.length} lookalikes survive unchanged`);
 
     const long = exportFileNames('é'.repeat(400))[0];
     ok('...and a very long title is cut to fit a 255-BYTE name, on a code-point boundary  '
@@ -1147,6 +1234,21 @@ if (group('export')) {
 
       ok('...EXPORT_DONE reports exactly the names the Host was given, in the same order',
         result !== null && same(result.files, plans[0].files), result ? result.files.join(' | ') : 'no result');
+
+      /**
+       * `bytes` IS A WIRE FIELD — `EXPORT_DONE { files, bytes }` — and it is
+       * checked against what the DESTINATIONS RECORDED RECEIVING, never against
+       * the run's own arithmetic. Nothing used to read it at all: dropping the
+       * header bytes from the total, and replacing the whole accumulation with a
+       * constant 0, were both measured GREEN across the entire group.
+       */
+      const delivered = STEMS.reduce((a, st) => a + recs[`Some_Track_ - ${st}.wav`].bytes().length, 0);
+      ok('...and EXPORT_DONE.bytes IS the number of bytes that reached the destinations, header and tail included  '
+        + '[entry point: ExportRun.run()\u2019s resolved `bytes` vs the recording sinks\u2019 own byte totals]',
+        result !== null && delivered > 0 && result.bytes === delivered
+        && delivered === STEMS.length * (58 + frames * 8),
+        result ? `${result.bytes} reported, ${delivered} delivered over ${STEMS.length} destinations `
+          + `(wanted ${STEMS.length} * (58 + ${frames} * 8) = ${STEMS.length * (58 + frames * 8)})` : 'no result');
 
       // ---- the header, parsed out of the bytes that were emitted ----------
       const bad = [];
@@ -1253,6 +1355,24 @@ if (group('export')) {
       ok('...and every tick names a file within the set it declares',
         writes.every((p) => p.files === STEMS.length && p.file >= 1 && p.file <= STEMS.length),
         `files=${writes.length ? writes[0].files : 0}`);
+
+      /**
+       * `etaMs` IS `null` WHILE THERE IS NOTHING TO DIVIDE BY, NEVER 0. A zero
+       * renders as "finished" on any surface that formats a duration, so the
+       * read tick — emitted before a single window is written — would announce a
+       * completed export at the moment the folder dialog opens. Reporting 0 for
+       * every tick was measured GREEN across the whole group.
+       *
+       * BOTH DIRECTIONS ARE HERE ON PURPOSE: null when it cannot be computed,
+       * and a real number once it can. An `etaMs` that were always null would
+       * satisfy the first half and carry no estimate at all.
+       */
+      ok('...and etaMs is `null` until something is done and a NUMBER afterwards \u2014 a zero would render as "finished"  '
+        + '[entry point: ExportRun #tick \u2014 the read tick is emitted at pct 0, before the folder dialog]',
+        reads.length === 1 && reads[0].etaMs === null
+        && writes.length > 0 && writes.every((p) => typeof p.etaMs === 'number' && Number.isFinite(p.etaMs) && p.etaMs >= 0),
+        `read tick etaMs ${JSON.stringify(reads[0] ? reads[0].etaMs : 'no read tick')}, `
+        + `${writes.filter((p) => typeof p.etaMs === 'number').length} of ${writes.length} write ticks numeric`);
     } catch (e) {
       blockThrew('export — the whole path, end to end', e);
     } finally { o.restore(); }
@@ -1304,11 +1424,20 @@ if (group('export')) {
         err ? `${err.code}: ${err.message}` : 'the run RESOLVED');
 
       /**
-       * ALL SIX ARE WRITTEN IN LOCKSTEP. Writing them one after another would
-       * have left the earlier stems COMPLETE on the user's disk after a cancel,
-       * and every assertion above would still pass for the file that happened to
-       * be open. The spread between the longest and shortest destination is what
-       * says the six advance together: at most one window apart.
+       * ALL SIX ARE WRITTEN IN LOCKSTEP, and THIS ASSERTION IS LOAD-BEARING —
+       * do not trim it as a restatement of "NO PARTIAL FILE IS LEFT" above.
+       *
+       * MEASURED: rewrite the run's two loops so each stem is written whole
+       * before the next one starts — the defect that leaves five complete WAVs
+       * on a user's disk after the user presses Stop — and every other
+       * assertion in this block stays GREEN. "No partial file" cannot see it,
+       * because at the cancel point the FIRST stem is not finished either way,
+       * and "every destination aborted" is true of a sequential run too.
+       *
+       * The SPREAD between the longest and shortest destination is the only
+       * figure that moves: at most one window while the six advance together,
+       * five whole files once they do not. It is the entire coverage of the
+       * interleaved write loop.
        */
       const lens = names.map((n) => recs[n].bytes().length);
       ok('...because the six files advance TOGETHER, never one finished at a time  '
@@ -1366,7 +1495,19 @@ if (group('export')) {
       ok('...while the format it DOES write is accepted, so the refusal is about the depth and not about the field',
         goodFmt.err === null, goodFmt.err ? `${goodFmt.err.code}: ${goodFmt.err.message}` : 'accepted');
 
-      // A 16-bit entry, in the LIVE tier, asked for as a deliverable.
+      /**
+       * A 16-bit entry, in the LIVE tier, asked for as a deliverable.
+       *
+       * `opens.length === 0` IS THE WHOLE ASSERTION, not decoration. TWO guards
+       * refuse this fixture — this manifest-row check and the file-header check
+       * below — and both throw `WRONG_TIER` with "16-bit" in the message, so a
+       * match on the code or on the words cannot tell which one fired. Measured:
+       * with the row check deleted this assertion stayed GREEN, and the battery
+       * anchor aimed at it reported a watched red it had not watched. The COUNT
+       * of stem files opened is the observation the two guards disagree about —
+       * the row refuses before anything opens, the header has to open all six.
+       * See this file's header: two guards with one observation are one guard.
+       */
       const live = new StemCache(CAP);
       await live.put('k16', { title: 'Live copy' }, sixStems(frames));
       const wrongTier = await drive(live, 'k16');
@@ -1423,6 +1564,109 @@ if (group('export')) {
         + '[entry point: the WritableStream rejecting \u2014 a full disk, a folder deleted under the run]',
         wrote.err instanceof ExportError && wrote.err.code === 'WRITE_FAILED' && closedAfterFail.length === 0,
         wrote.err ? `${wrote.err.code}, ${closedAfterFail.length} closed` : 'the run RESOLVED');
+
+      /**
+       * THE ONE WINDOW WHERE EVERY DESTINATION IS OPEN AND NOT ONE BYTE HAS BEEN
+       * WRITTEN — between the Host handing back the map and the first header
+       * going out. Two things throw in it, and both used to throw PAST the run's
+       * abort because they sat above the guard rather than inside it:
+       * `getWriter()` refuses a stream something already holds the lock on, and
+       * `WavStreamEncoder`'s constructor refuses a track over the 4 GiB RIFF
+       * ceiling. MEASURED before the fix: a raw TypeError / RangeError — not a
+       * member of the closed vocabulary — and every writable the Host had just
+       * opened left neither closed NOR aborted.
+       *
+       * WHY IT IS ASSERTED ON THE ABORT COUNTS AND NOT ON THE CODE. "The error
+       * has the right name" is satisfied by wrapping the throw and changing
+       * nothing else; what reaches a user is six files nobody will ever finish,
+       * and only the sinks' own `abort`/`close` counters can see that.
+       */
+      const dupRecs = [];
+      const shared = makeSink();
+      const duplicate = await drive(cache, 'kr', {
+        exportSink: async (plan) => {
+          const map = {};
+          // The same writable under two names — a Host collision policy that
+          // resolved two titles to one file would hand back exactly this.
+          plan.files.forEach((n, i) => { const rec = i < 2 ? shared : makeSink(); dupRecs.push(rec); map[n] = rec.stream; });
+          return map;
+        },
+      });
+      const dupOpened = [...new Set(dupRecs)];
+      const dupLeftOpen = dupOpened.filter((r) => r.aborted === 0);
+      const dupClosed = dupOpened.filter((r) => r.closed !== 0);
+      ok('A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES IS A NAMED REFUSAL, and every destination it opened is ABORTED  '
+        + '[entry point: getWriter() on an already-locked stream, inside the run\u2019s guard \u2014 counts off the sinks, not the code]',
+        duplicate.err instanceof ExportError && duplicate.err.code === 'WRITE_FAILED'
+        && dupOpened.length === STEMS.length - 1 && dupLeftOpen.length === 0 && dupClosed.length === 0,
+        duplicate.err
+          ? `${duplicate.err.name}/${duplicate.err.code}: ${dupOpened.length - dupLeftOpen.length} of ${dupOpened.length} aborted, ${dupClosed.length} closed`
+          : 'the run RESOLVED');
+
+      /**
+       * THE FIXTURE IS BOUNDED ON PURPOSE, and this is a rule about fixtures and
+       * not about this case: the frame count that clears the 4 GiB ceiling is
+       * half a billion, so a mutation that removes the refusal would otherwise
+       * put this suite into a six-million-window loop that never reports. A
+       * suite that can run away cannot go red. `read()` THROWS instead, so the
+       * mutant path dies at the first window and reds on the message.
+       */
+      const hugeEntry = { ...(await cache.entry('kr')), frames: 600e6 };
+      const huge = await drive(cache, 'kr', {
+        entry: hugeEntry,
+        openStem: async () => ({
+          frames: hugeEntry.frames, sampleRate: SR, bitDepth: 32, float: true, channels: 2,
+          async read() { throw new Error('this fixture must never reach a read: the 4 GiB refusal is what it measures'); },
+        }),
+      });
+      const hugeRecs = STEMS.map((st) => huge.recs[`Refusals - ${st}.wav`]).filter(Boolean);
+      ok('...and a track past the 4 GiB RIFF ceiling is refused BY NAME after the sinks open, all six aborted and none closed  '
+        + '[entry point: WavStreamEncoder\u2019s constructor \u2014 it refuses here rather than after three GiB have been streamed]',
+        huge.err instanceof ExportError && huge.err.code === 'WRITE_FAILED' && /4 GiB/.test(huge.err.message)
+        && hugeRecs.length === STEMS.length && hugeRecs.every((r) => r.aborted === 1 && r.closed === 0),
+        huge.err
+          ? `${huge.err.name}/${huge.err.code}: ${hugeRecs.filter((r) => r.aborted === 1).length} of ${STEMS.length} aborted, `
+            + `${hugeRecs.filter((r) => r.closed !== 0).length} closed`
+          : 'the run RESOLVED');
+
+      const noStems = await drive(cache, 'kr', { stems: [] });
+      ok('AN EXPORT OF NO STEMS IS REFUSED \u2014 an empty list is not a smaller export  '
+        + '[entry point: EXPORT_START { stems: [] }; a COUNT of opens and sink calls says it refused before touching anything]',
+        noStems.err instanceof ExportError && noStems.err.code === 'BAD_STEM'
+        && noStems.opens.length === 0 && noStems.plans.length === 0,
+        noStems.err
+          ? `${noStems.err.code} after ${noStems.opens.length} open(s) and ${noStems.plans.length} sink call(s): ${noStems.err.message}`
+          : 'the run RESOLVED');
+
+      const zeroFrames = await drive(cache, 'kr', { entry: { ...(await cache.entry('kr')), frames: 0 } });
+      const fracFrames = await drive(cache, 'kr', { entry: { ...(await cache.entry('kr')), frames: frames + 0.5 } });
+      ok('A LENGTH THAT IS NOT A POSITIVE INTEGER IS REFUSED \u2014 neither 0 nor a fraction can go into a RIFF header  '
+        + '[entry point: the manifest row\u2019s `frames`, checked before the tier, the readers and the dialog]',
+        zeroFrames.err instanceof ExportError && zeroFrames.err.code === 'READ_FAILED' && /0 frames/.test(zeroFrames.err.message)
+        && fracFrames.err instanceof ExportError && fracFrames.err.code === 'READ_FAILED'
+        && zeroFrames.opens.length === 0 && zeroFrames.plans.length === 0
+        && fracFrames.opens.length === 0 && fracFrames.plans.length === 0,
+        `0 -> ${zeroFrames.err ? zeroFrames.err.code : 'RESOLVED'}, ${frames + 0.5} -> ${fracFrames.err ? fracFrames.err.code : 'RESOLVED'}; `
+        + `${zeroFrames.opens.length + fracFrames.opens.length} open(s), ${zeroFrames.plans.length + fracFrames.plans.length} sink call(s)`);
+
+      /**
+       * THE READERS ARE OPEN AND THE DIALOG HAS NOT BEEN SHOWN. A cancel landing
+       * here must not open a folder dialog the user will never see the result
+       * of, and the check that stops it is the one BEFORE `exportSink` \u2014 the
+       * later between-windows check cannot reach it. `plans.length === 0` is a
+       * count of the Host being asked, which is the only way to tell the two
+       * cancel checks apart.
+       */
+      const earlyCancel = await drive(cache, 'kr', {
+        onOpen: (stem, run) => { if (stem === STEMS[STEMS.length - 1]) run.cancel(); },
+      });
+      ok('A CANCEL THAT LANDS BEFORE THE FOLDER DIALOG STOPS THE RUN AND NEVER ASKS THE HOST  '
+        + '[entry point: ExportRun.cancel() between the last reader opening and exportSink \u2014 a COUNT of sink calls]',
+        earlyCancel.err instanceof ExportError && earlyCancel.err.code === 'CANCELLED'
+        && earlyCancel.opens.length === STEMS.length && earlyCancel.plans.length === 0,
+        earlyCancel.err
+          ? `${earlyCancel.err.code} after ${earlyCancel.opens.length} open(s) and ${earlyCancel.plans.length} sink call(s)`
+          : 'the run RESOLVED');
 
       const twice = await drive(cache, 'kr');
       const again = await twice.run.run().then(() => null, (e) => e);

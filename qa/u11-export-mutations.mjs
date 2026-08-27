@@ -51,6 +51,39 @@
  * worth less than no battery. A run that produces no summary line at all is
  * reported as CRASHED and is NOT counted as a red: a mutation that takes the
  * suite down proves the suite can die, not that an assertion can fail.
+ *
+ * ---------------------------------------------------------------------------
+ * A COUNT OF REDS IS NOT A MEASUREMENT OF COVERAGE, which is why every anchor
+ * below carries `reds` — THE EXACT SET OF ASSERTIONS IT MUST TURN RED — and the
+ * run fails the case if the observed set differs IN EITHER DIRECTION.
+ *
+ * WHAT A COUNT CANNOT SEE. This battery used to print "38 of 38 anchors MATCH
+ * and RED" and that figure survives coverage MIGRATING between anchors: an
+ * assertion stops noticing the mutation aimed at it, some other assertion starts
+ * noticing a mutation it was never about, both anchors still report ">= 1 red",
+ * and the total is unchanged. Both halves matter:
+ *
+ *   MISSING   the assertion this mutation exists to exercise did not fire. The
+ *             coverage claim for it is void, whatever the total says.
+ *   EXTRA     something else fired. Either the mutation is broader than its
+ *             description — so the anchor is measuring a different defect from
+ *             the one it names — or an assertion has started answering a
+ *             question that is not its own. Both are found the same way and both
+ *             need looking at; an "at least these" comparison finds neither.
+ *
+ * AN ASSERTION IS IDENTIFIED BY THE FIRST `KEY_LEN` CHARACTERS of its line, and
+ * THE BASELINE RUN REFUSES TO PROCEED IF TWO ASSERTIONS SHARE A KEY. That is
+ * this suite's own rule turned on the instrument: two assertions that produce an
+ * identical observation are one assertion, and a battery that cannot tell them
+ * apart would report a watched red it never watched. (Measured in this slice:
+ * `export`'s row-depth guard and its file-header guard both threw WRONG_TIER
+ * with "16-bit" in the message, and the assertion between them was untested
+ * while it sat green. See test.js's header.)
+ *
+ * `blockThrew` lines are keys like any other. A mutation that kills a BLOCK is
+ * not the same event as a mutation that reds an ASSERTION — the block's death
+ * takes every later assertion in it out of the run — so the block-death line
+ * appears in `reds` explicitly wherever it is expected.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -79,20 +112,34 @@ const SUITE = 'test.js';
  */
 export const ANCHORED_AT = {
   base: '5993d32',
-  slice: 'U11 / phase4/u11-e1-export / issue #42',
+  slice: 'U11 / phase4/u11-e1-export / issue #42, re-cut after the review repair',
   files: {
-    [EXPORT]: '22a3d2105aa625bcb469d0aa960171f7cacfdce3046977fdf5f3cec81f5f1fff',
+    [EXPORT]: 'b6c953f2ca7d409efc4178a22dd52209049aa9331202eae7932f810796c7b758',
     [WAV]: 'd9e06b208d4b1051ced3a0b46991b83a3bab397fd21b56dc4b78d1275ae531ac',
     [ENGINE]: '84660beb44179ba0c98ad6adc1fce6c2e322f2b67ae48344fcfddca3d15184b5',
-    [SUITE]: '7af0896e17de96c70cab0481c2ae1f3c60ec852c1e471112efddcf89d9e80064',
+    [SUITE]: 'e5745bef2ffa9894a10a7f629e1753f2f4f731937027b87f6f19264c0a8278c8',
     [CACHE]: 'afa77f527575a0e48a401cb2618417d963d879c88996a6932e7c34109ff6f578',
   },
 };
 
 /**
  * Each anchor: the file, the EXACT text to find (which must occur once), what to
- * put there, and the assertion it is aimed at. `find` strings are deliberately
- * long — a short one matches in three places and patches the wrong one, silently.
+ * put there, the assertion it is aimed at, and `reds` — THE EXACT SET OF
+ * ASSERTIONS THE MUTATION MUST TURN RED, each identified by the first `KEY_LEN`
+ * characters of its line. `find` strings are deliberately long: a short one
+ * matches in three places and patches the wrong one, silently.
+ *
+ * `reds` IS COMPARED BOTH WAYS. A declared assertion that does not fire is
+ * MISSING (the coverage claim for it is void); an assertion that fires and is
+ * not declared is EXTRA (the mutation is broader than its description, or an
+ * assertion has started answering someone else's question). Either fails the
+ * case. `aims` is prose for a reader; `reds` is the measurement.
+ *
+ * A block-death line — `<block> — the block ran to its end without throwing` —
+ * is a key like any other and is listed explicitly where a mutation is expected
+ * to kill a block. It is not interchangeable with an assertion red: the block's
+ * death takes every later assertion in that block out of the run, which is why
+ * the sets for M3, M27 and M36 are as large as they are.
  */
 export const MUTATIONS = [
   {
@@ -100,6 +147,10 @@ export const MUTATIONS = [
     file: EXPORT,
     why: "exportFileNames returns the CALLER'S order instead of STEMS order",
     aims: 'the three STEMS-order assertions',
+    reds: [
+      "...and the CALLER'S order is ignored: a reversed request",
+      "...and a SUBSET is still in `STEMS` order, so index 0 is",
+    ],
     find: "  return STEMS.filter((s) => want.has(s)).map((s) => `${t} - ${s}.wav`);",
     to: "  return [...want].map((s) => `${t} - ${s}.wav`);",
   },
@@ -108,6 +159,12 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'safeTitle stops substituting path separators and colons',
     aims: 'A TITLE CANNOT ESCAPE THE CHOSEN FOLDER',
+    reds: [
+      "A TITLE CANNOT ESCAPE THE CHOSEN FOLDER — every base nam",
+      "...a title that reduces to nothing still yields a name, ",
+      "...and the sanitised title travels WITH the plan, becaus",
+      "export — the whole path, end to end — the block ran to i",
+    ],
     find: 'const ILLEGAL = /[\\u0000-\\u001f\\u007f/\\\\:*?"<>|]/g;',
     to: 'const ILLEGAL = /[\\u0000-\\u001f\\u007f]/g;',
   },
@@ -116,6 +173,21 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'safeTitle returns a constant — every export is renamed, no title escapes',
     aims: 'the INDEPENDENCE control: an ordinary title is untouched',
+    reds: [
+      "SIX FILES, ONE PER STEM, IN `STEMS` ORDER  [entry point:",
+      "...and a SUBSET is still in `STEMS` order, so index 0 is",
+      "...and an ORDINARY title is untouched, so the rule above",
+      "...a title that reduces to nothing still yields a name, ",
+      "...a Windows DEVICE name is escaped — `NUL` accepts ever",
+      "...AND SO IS `<device>.<anything>`: NUL.wav, NUL.txt and",
+      "...while a base that only LOOKS like a device is untouch",
+      "...and the sanitised title travels WITH the plan, becaus",
+      "export — the whole path, end to end — the block ran to i",
+      "export — a cancelled export — the block ran to its end w",
+      "A SINK MAP THAT IS SHORT ONE STEM IS REFUSED — five of s",
+      "...and the destinations the Host DID open are aborted, s",
+      "export — every refusal — the block ran to its end withou",
+    ],
     find: "  if (!s) return 'export';\n  return RESERVED.test(s) ? `_${s}` : s;",
     to: "  return 'export';",
   },
@@ -124,6 +196,10 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'safeTitle stops stripping leading and trailing dots, so `..` survives',
     aims: 'the escape assertion, and "a title that reduces to nothing still yields a name"',
+    reds: [
+      "A TITLE CANNOT ESCAPE THE CHOSEN FOLDER — every base nam",
+      "...a title that reduces to nothing still yields a name, ",
+    ],
     find: "  s = s.replace(/^[.\\s]+/, '').replace(/[.\\s]+$/, '');",
     to: '  s = s;',
   },
@@ -132,7 +208,11 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the Windows device-name guard never matches',
     aims: 'a Windows DEVICE name is escaped',
-    find: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;',
+    reds: [
+      "...a Windows DEVICE name is escaped — `NUL` accepts ever",
+      "...AND SO IS `<device>.<anything>`: NUL.wav, NUL.txt and",
+    ],
+    find: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)/i;',
     to: 'const RESERVED = /^(?!)$/;',
   },
   {
@@ -140,6 +220,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the title length cap is effectively removed',
     aims: 'a very long title is cut to fit a 255-byte name',
+    reds: [
+      "...and a very long title is cut to fit a 255-BYTE name, ",
+    ],
     find: 'const MAX_TITLE_BYTES = 200;',
     to: 'const MAX_TITLE_BYTES = 1e9;',
   },
@@ -149,14 +232,26 @@ export const MUTATIONS = [
     why: 'a cancelled run CLOSES the destinations instead of aborting them — '
       + 'exactly "cancel stops writing without discarding"',
     aims: 'A CANCELLED EXPORT ABORTS EVERY DESTINATION AND CLOSES NONE; NO PARTIAL FILE IS LEFT',
-    find: '      await Promise.all(writers.map((w) => w.abort(reason).catch(() => {})));',
-    to: '      await Promise.all(writers.map((w) => w.close().catch(() => {})));',
+    reds: [
+      "A CANCELLED EXPORT ABORTS EVERY DESTINATION AND CLOSES N",
+      "A DESTINATION THAT REJECTS MID-WRITE IS A NAMED REFUSAL ",
+      "A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES IS A NA",
+      "...and a track past the 4 GiB RIFF ceiling is refused BY",
+    ],
+    find: '      await Promise.all(writers.map(async (w) => { try { await w.abort(reason); } catch { /* already errored */ } }));',
+    to: '      await Promise.all(writers.map(async (w) => { try { await w.close(); } catch { /* already errored */ } }));',
   },
   {
     id: 'M8',
     file: EXPORT,
     why: 'the cancel flag is never checked, so cancel() does nothing',
     aims: 'every cancellation assertion',
+    reds: [
+      "A CANCELLED EXPORT ABORTS EVERY DESTINATION AND CLOSES N",
+      "...and the run really was under way when it was cancelle",
+      "...NO PARTIAL FILE IS LEFT: not one destination holds a ",
+      "...and it fails by NAME, on the declared vocabulary, rat",
+    ],
     find: '          if (this.cancelled) {\n            throw new ExportError(\'CANCELLED\', `stopped after ${off} of ${frames} frames — `',
     to: '          if (false) {\n            throw new ExportError(\'CANCELLED\', `stopped after ${off} of ${frames} frames — `',
   },
@@ -166,6 +261,9 @@ export const MUTATIONS = [
     why: 'the six files are written ONE AFTER ANOTHER instead of in lockstep, so a '
       + 'cancel leaves the earlier stems complete on disk',
     aims: 'the six files advance TOGETHER; NO PARTIAL FILE IS LEFT',
+    reds: [
+      "...because the six files advance TOGETHER, never one fin",
+    ],
     find: '      for (let off = 0; off < frames; off += this.chunkFrames) {\n'
       + '        const len = Math.min(this.chunkFrames, frames - off);\n'
       + '        for (let k = 0; k < order.length; k++) {',
@@ -178,8 +276,15 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the encoder is built at 16-bit PCM while everything else still says 32f',
     aims: 'EVERY FILE SAYS 32-BIT FLOAT … IN ITS OWN HEADER; the bit-identity assertions',
-    find: '      sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: EXPORT_FORMAT.bitDepth, float: true, dither: false, frames,',
-    to: '      sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: 16, float: false, dither: false, frames,',
+    reds: [
+      "...and EXPORT_DONE.bytes IS the number of bytes that rea",
+      "EVERY FILE SAYS 32-BIT FLOAT, 44 100 Hz, STEREO IN ITS O",
+      "THE STEMS ARE THE MODEL’S, UNMODIFIED: every sample of e",
+      "...INCLUDING the out-of-range samples — no clamp, no res",
+      "...and the DATA CHUNK is byte-identical to the cache fil",
+    ],
+    find: '        sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: EXPORT_FORMAT.bitDepth, float: true, dither: false, frames,',
+    to: '        sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: 16, float: false, dither: false, frames,',
   },
   {
     id: 'M11',
@@ -187,6 +292,11 @@ export const MUTATIONS = [
     why: 'A GAIN IS APPLIED ON THE DELIVERABLE PATH — the defect the whole slice exists '
       + 'to make impossible: a fader that reaches the written file',
     aims: 'THE STEMS ARE THE MODEL’S, UNMODIFIED; the data-chunk byte identity',
+    reds: [
+      "THE STEMS ARE THE MODEL’S, UNMODIFIED: every sample of e",
+      "...INCLUDING the out-of-range samples — no clamp, no res",
+      "...and the DATA CHUNK is byte-identical to the cache fil",
+    ],
     find: '          const bytes = encs[k].chunk(planes, len);',
     to: '          for (let q = 0; q < len; q++) { planes[0][q] *= 0.999; planes[1][q] *= 0.999; }\n'
       + '          const bytes = encs[k].chunk(planes, len);',
@@ -196,6 +306,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: "the file's own header is no longer checked against EXPORT_FORMAT — the manifest row is believed",
     aims: 'a row that says 32 over bytes that are 16 is caught by READING THE FILE’S HEADER',
+    reds: [
+      "...and a row that says 32 over bytes that are 16 is caug",
+    ],
     find: '      if (r.sampleRate !== EXPORT_FORMAT.sampleRate || r.bitDepth !== EXPORT_FORMAT.bitDepth\n'
       + '        || r.float !== true || r.channels !== EXPORT_FORMAT.channels) {',
     to: '      if (false) {',
@@ -205,6 +318,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the frame count in the manifest is no longer checked against the file',
     aims: 'AN ENTRY THAT DISAGREES WITH ITSELF IS REFUSED',
+    reds: [
+      "AN ENTRY THAT DISAGREES WITH ITSELF IS REFUSED — neither",
+    ],
     find: '      if (r.frames !== frames) {',
     to: '      if (false) {',
   },
@@ -213,6 +329,10 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a refused exportSink is swallowed and the run carries on with an empty map',
     aims: 'A REFUSED `exportSink` IS AN ERROR, NOT A SILENT NO-OP',
+    reds: [
+      "A REFUSED `exportSink` IS AN ERROR, NOT A SILENT NO-OP  ",
+      "...and every declared member is REACHABLE, so the vocabu",
+    ],
     find: "      throw new ExportError('SINK_REFUSED', `nowhere to write: ${(e && e.message) || e}`);",
     to: '      sinks = {};',
   },
@@ -221,6 +341,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a short sink map is accepted — five of six files, reported as done',
     aims: 'A SINK MAP THAT IS SHORT ONE STEM IS REFUSED',
+    reds: [
+      "A SINK MAP THAT IS SHORT ONE STEM IS REFUSED — five of s",
+    ],
     find: '    const missing = names.filter((n) => !sinks || !sinks[n] || typeof sinks[n].getWriter !== \'function\');',
     to: '    const missing = [];',
   },
@@ -229,6 +352,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the requested format is silently ignored instead of refused',
     aims: 'A FORMAT OTHER THAN 32-BIT FLOAT IS REFUSED BY NAME',
+    reds: [
+      "A FORMAT OTHER THAN 32-BIT FLOAT IS REFUSED BY NAME rath",
+    ],
     find: '      if (bd !== EXPORT_FORMAT.bitDepth || fl !== true) {',
     to: '      if (false) {',
   },
@@ -237,6 +363,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the manifest row’s depth is no longer consulted, so a 16-bit live entry is exportable',
     aims: 'A 16-BIT ENTRY IS NOT A DELIVERABLE',
+    reds: [
+      "A 16-BIT ENTRY IS NOT A DELIVERABLE — exporting one woul",
+    ],
     find: '    if (entry.depth != null && entry.depth !== EXPORT_FORMAT.bitDepth) {',
     to: '    if (false) {',
   },
@@ -245,6 +374,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a run can be started twice',
     aims: 'A RUN CANNOT BE STARTED TWICE',
+    reds: [
+      "A RUN CANNOT BE STARTED TWICE — two runs would write win",
+    ],
     find: "    if (this.started) throw new ExportError('BUSY', 'this export has already run — build a new one');",
     to: '    if (false) { /* nothing */ }',
   },
@@ -253,6 +385,10 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'checkExportCode accepts every code, so the closed vocabulary is not closed',
     aims: 'AN UNKNOWN CODE IS REFUSED; the message names the whole legal set',
+    reds: [
+      "AN UNKNOWN CODE IS REFUSED rather than accepted in silen",
+      "...and the message names the offending value, the entry ",
+    ],
     find: '  if (EXPORT_CODES.has(code)) return null;',
     to: '  if (true) return null;',
   },
@@ -261,6 +397,9 @@ export const MUTATIONS = [
     file: WAV,
     why: 'the reader answers a DEFAULT format when open() has not run',
     aims: 'a reader that has read no header REPORTS NOTHING rather than a default',
+    reds: [
+      "...a reader that has read no header REPORTS NOTHING rath",
+    ],
     find: "    if (!this.fmt) throw new Error('wav window: open() has not run — this reader has read no header and knows no format');",
     to: "    if (!this.fmt) return { sampleRate: 44100, bitDepth: 32, float: true, numChannels: 2, blockAlign: 8, bytesPerSample: 4, format: 3 };",
   },
@@ -270,6 +409,11 @@ export const MUTATIONS = [
     why: 'the windowed reader slurps the WHOLE file and slices it in memory — every sample '
       + 'assertion still passes and the memory claim is gone',
     aims: 'THE BIGGEST SINGLE READ IS ONE WINDOW; the read COUNT scales while the read SIZE does not',
+    reds: [
+      "THE BIGGEST SINGLE READ IS ONE WINDOW, AND IT DOES NOT G",
+      "...and the audio is read EXACTLY ONCE end to end, so tha",
+      "...and the read COUNT scales while the read SIZE does no",
+    ],
     find: '    const buf = await this.blob.slice(at, at + count * fmt.blockAlign).arrayBuffer();',
     to: '    const whole = await this.blob.slice(0, this.blob.size).arrayBuffer();\n'
       + '    const buf = whole.slice(at, at + count * fmt.blockAlign);',
@@ -279,6 +423,25 @@ export const MUTATIONS = [
     file: WAV,
     why: 'the window is read one byte late — plausible audio from the wrong place',
     aims: 'a window in the MIDDLE of the file is the same samples decodeWav reads there; the bit-identity assertions',
+    reds: [
+      "THE RUN COMPLETES over a real StemCache in the 32f tier ",
+      "...EXPORT_DONE reports exactly the names the Host was gi",
+      "...and EXPORT_DONE.bytes IS the number of bytes that rea",
+      "EVERY FILE SAYS 32-BIT FLOAT, 44 100 Hz, STEREO IN ITS O",
+      "THE STEMS ARE THE MODEL’S, UNMODIFIED: every sample of e",
+      "...INCLUDING the out-of-range samples — no clamp, no res",
+      "...and the DATA CHUNK is byte-identical to the cache fil",
+      "...two exports of the same entry are byte-identical — th",
+      "...and a SUCCESSFUL export closes every destination exac",
+      "PROGRESS IS ONE MESSAGE PER STEM PER WINDOW, plus one fo",
+      "...pct never goes backwards and ends at exactly 1  0.016",
+      "...while the format it DOES write is accepted, so the re",
+      "A RUN CANNOT BE STARTED TWICE — two runs would write win",
+      "THE BIGGEST SINGLE READ IS ONE WINDOW, AND IT DOES NOT G",
+      "...and the audio is read EXACTLY ONCE end to end, so tha",
+      "...and the read COUNT scales while the read SIZE does no",
+      "...and a window in the MIDDLE of the file is the same sa",
+    ],
     find: '    const at = this.dataOffset + from * fmt.blockAlign;',
     to: '    const at = this.dataOffset + from * fmt.blockAlign + 1;',
   },
@@ -287,6 +450,9 @@ export const MUTATIONS = [
     file: WAV,
     why: 'a read past the end comes back SHORT instead of being refused',
     aims: 'a read past the end is REFUSED, naming both counts',
+    reds: [
+      "...and a read past the end is REFUSED, naming both count",
+    ],
     find: '    if (from + count > this.frames) {',
     to: '    if (false) {',
   },
@@ -295,6 +461,9 @@ export const MUTATIONS = [
     file: CACHE,
     why: 'stemFile ignores which stem it was asked for — the six-identical-stems fan-out',
     aims: 'THE STEMS ARE THE MODEL’S, UNMODIFIED (each file against its OWN source)',
+    reds: [
+      "THE STEMS ARE THE MODEL’S, UNMODIFIED: every sample of e",
+    ],
     find: '    return (await d.getFileHandle(`${key}.${stem}.wav`)).getFile();',
     to: '    return (await d.getFileHandle(`${key}.${STEMS[0]}.wav`)).getFile();',
   },
@@ -303,6 +472,9 @@ export const MUTATIONS = [
     file: ENGINE,
     why: 'the engine stops checking the code it sends on EXPORT_ERROR',
     aims: '`offscreen/engine.js` CHECKS EVERY CODE IT SENDS',
+    reds: [
+      "...AND `offscreen/engine.js` CHECKS EVERY CODE IT SENDS:",
+    ],
     find: '  checkExportCode(code, `EXPORT_ERROR on deck ${deckId}`);',
     to: '  void deckId;',
   },
@@ -311,6 +483,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the deliverable path imports the mixer, so a fader could reach it',
     aims: 'THE DELIVERABLE PATH IMPORTS NO MIXER, NO DECK AND NO WORKLET',
+    reds: [
+      "THE DELIVERABLE PATH IMPORTS NO MIXER, NO DECK AND NO WO",
+    ],
     find: "import { WavStreamEncoder } from '../shared/wav.js';",
     to: "import { WavStreamEncoder } from '../shared/wav.js';\nimport { dbToGain } from './mixer.js';\nvoid dbToGain;",
   },
@@ -320,6 +495,17 @@ export const MUTATIONS = [
     why: 'the Host is asked TWICE for the same deliverable — the correlation problem the '
       + 'all-six-at-once duty exists to remove',
     aims: 'the Host was asked ONCE, for all six destinations together',
+    reds: [
+      "...the Host was asked ONCE, for all six destinations tog",
+      "...and the sanitised title travels WITH the plan, becaus",
+      "...and EXPORT_DONE.bytes IS the number of bytes that rea",
+      "export — the whole path, end to end — the block ran to i",
+      "A CANCELLED EXPORT ABORTS EVERY DESTINATION AND CLOSES N",
+      "...and the run really was under way when it was cancelle",
+      "...and the destinations the Host DID open are aborted, s",
+      "A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES IS A NA",
+      "...and a track past the 4 GiB RIFF ceiling is refused BY",
+    ],
     find: '      sinks = await this.exportSink({ title, files: names.slice() });',
     to: '      sinks = await this.exportSink({ title, files: names.slice() });\n'
       + '      await this.exportSink({ title, files: names.slice() });',
@@ -329,6 +515,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'progress reports a 0-based file index into a 1..files range',
     aims: 'every tick names a file within the set it declares',
+    reds: [
+      "...and every tick names a file within the set it declare",
+    ],
     find: "          this.#tick('write', k + 1, order.length, done / total, t0);",
     to: "          this.#tick('write', k, order.length, done / total, t0);",
   },
@@ -337,6 +526,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a stem the six-stem contract has no name for is accepted',
     aims: 'A STEM THE SIX-STEM CONTRACT HAS NO NAME FOR IS REFUSED',
+    reds: [
+      "A STEM THE SIX-STEM CONTRACT HAS NO NAME FOR IS REFUSED,",
+    ],
     find: '    const unknown = this.stems.filter((s) => !STEMS.includes(s));',
     to: '    const unknown = [];',
   },
@@ -345,6 +537,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a key that names nothing is no longer refused up front',
     aims: 'A KEY THAT NAMES NOTHING IS REFUSED before a single file or destination is opened',
+    reds: [
+      "A KEY THAT NAMES NOTHING IS REFUSED before a single file",
+    ],
     find: "    if (!entry || typeof entry.key !== 'string') {",
     to: '    if (false) {',
   },
@@ -353,6 +548,9 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'a stem file that will not open is swallowed instead of named',
     aims: 'A STEM FILE THAT WILL NOT OPEN IS A NAMED REFUSAL',
+    reds: [
+      "A STEM FILE THAT WILL NOT OPEN IS A NAMED REFUSAL, and n",
+    ],
     find: "        throw new ExportError('READ_FAILED', `${entry.key}: the ${stem} stem would not open — ${(e && e.message) || e}`);",
     to: '        r = null;',
   },
@@ -362,6 +560,9 @@ export const MUTATIONS = [
     why: 'StemCache.get() stops reading whole files, so the contrast the memory numbers are '
       + 'measured against disappears',
     aims: 'while `StemCache.get()` takes each stem WHOLE, which is why the export does not call it',
+    reds: [
+      "...while `StemCache.get()` takes each stem WHOLE, which ",
+    ],
     find: '        const w = decodeWav(await f.arrayBuffer());',
     to: '        const w = decodeWav(await f.slice(0, 66).arrayBuffer());',
   },
@@ -371,6 +572,9 @@ export const MUTATIONS = [
     why: 'checkExportCode cries wolf on every LEGAL code — the other direction of M19, and the '
       + 'question a "can it fail?" review never asks: can it PASS?',
     aims: 'EVERY MEMBER OF THE EXPORT VOCABULARY PASSES SILENTLY',
+    reds: [
+      "EVERY MEMBER OF THE EXPORT VOCABULARY PASSES SILENTLY  [",
+    ],
     find: '  if (EXPORT_CODES.has(code)) return null;',
     to: '  if (false) return null;',
   },
@@ -379,6 +583,10 @@ export const MUTATIONS = [
     file: EXPORT,
     why: 'the runner throws a code that is not in the declared set — the #29 failure exactly',
     aims: 'EVERY CODE THE RUNNER CAN THROW IS A DECLARED MEMBER',
+    reds: [
+      "A RUN CANNOT BE STARTED TWICE — two runs would write win",
+      "EVERY CODE THE RUNNER CAN THROW IS A DECLARED MEMBER  [e",
+    ],
     find: "    if (this.started) throw new ExportError('BUSY', 'this export has already run — build a new one');",
     to: "    if (this.started) throw new ExportError('ALREADY_RUN', 'this export has already run — build a new one');",
   },
@@ -387,6 +595,9 @@ export const MUTATIONS = [
     file: ENGINE,
     why: 'the engine stops wiring EXPORT_CANCEL, so the deck can start an export it cannot stop',
     aims: 'the engine really wires `EXPORT_START` and `EXPORT_CANCEL` to the runner',
+    reds: [
+      "...and the engine really wires `EXPORT_START` and `EXPOR",
+    ],
     find: "      case 'EXPORT_CANCEL':",
     to: "      case 'EXPORT_ABORT':",
   },
@@ -395,6 +606,25 @@ export const MUTATIONS = [
     file: WAV,
     why: 'the reader reports a rate it did not read out of the file',
     aims: 'THE WINDOWED READER REPORTS THE FILE’S OWN FORMAT',
+    reds: [
+      "THE RUN COMPLETES over a real StemCache in the 32f tier ",
+      "...the Host was asked ONCE, for all six destinations tog",
+      "...and the sanitised title travels WITH the plan, becaus",
+      "...EXPORT_DONE reports exactly the names the Host was gi",
+      "export — the whole path, end to end — the block ran to i",
+      "export — a cancelled export — the block ran to its end w",
+      "A REFUSED `exportSink` IS AN ERROR, NOT A SILENT NO-OP  ",
+      "A SINK MAP THAT IS SHORT ONE STEM IS REFUSED — five of s",
+      "...and the destinations the Host DID open are aborted, s",
+      "...while the format it DOES write is accepted, so the re",
+      "AN ENTRY THAT DISAGREES WITH ITSELF IS REFUSED — neither",
+      "A STEM FILE THAT WILL NOT OPEN IS A NAMED REFUSAL, and n",
+      "export — every refusal — the block ran to its end withou",
+      "THE BIGGEST SINGLE READ IS ONE WINDOW, AND IT DOES NOT G",
+      "...and the audio is read EXACTLY ONCE end to end, so tha",
+      "...and the read COUNT scales while the read SIZE does no",
+      "THE WINDOWED READER REPORTS THE FILE’S OWN FORMAT  [entr",
+    ],
     find: '    this.fmt = fmt;',
     to: '    this.fmt = { ...fmt, sampleRate: 48000 };',
   },
@@ -403,6 +633,9 @@ export const MUTATIONS = [
     file: WAV,
     why: 'a wrong number of planes is accepted, so half a window is filled and the rest is stale',
     aims: 'a wrong number of planes is refused rather than filling half a window',
+    reds: [
+      "...and a wrong number of planes is refused rather than f",
+    ],
     find: '    if (into.length !== fmt.numChannels) {',
     to: '    if (false) {',
   },
@@ -411,8 +644,123 @@ export const MUTATIONS = [
     file: SUITE,
     why: "the header's group list loses `export`, so `node test.js export` would one day assert nothing and exit 0",
     aims: 'THE HEADER’S GROUP LIST IS THE GROUPS THIS FILE ACTUALLY HAS',
+    reds: [
+      "THE HEADER’S GROUP LIST IS THE GROUPS THIS FILE ACTUALLY",
+    ],
     find: " *   export   U11's E1: the six untouched model outputs out of the 32f tier into",
     to: " *   exp0rt   U11's E1: the six untouched model outputs out of the 32f tier into",
+  },
+  {
+    id: 'M39',
+    file: EXPORT,
+    why: 'THE DEFECT ITSELF: the device guard goes back to matching only a title that IS the device, so NUL.wav, Con.Fusion, nul.02, com1.set, aux.1, lpt1.x and prn.mix all reach Windows unescaped and every byte goes to the null device while EXPORT_DONE names six files',
+    aims: '...AND SO IS `<device>.<anything>`',
+    reds: [
+      "...AND SO IS `<device>.<anything>`: NUL.wav, NUL.txt and",
+    ],
+    find: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)/i;',
+    to: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;',
+  },
+  {
+    id: 'M40',
+    file: EXPORT,
+    why: 'the other direction of M39: the guard escapes EVERY title containing a dot, so `a.b.c` and `a.con` are renamed for no reason',
+    aims: 'the lookalike control, and the ordinary-title control',
+    reds: [
+      "...and an ORDINARY title is untouched, so the rule above",
+      "...while a base that only LOOKS like a device is untouch",
+    ],
+    find: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)/i;',
+    to: 'const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\\.|$)|\\./i;',
+  },
+  {
+    id: 'M41',
+    file: EXPORT,
+    why: 'taking the writers and building the encoders throws PAST the abort again — a raw TypeError/RangeError escapes the closed vocabulary and every writable the Host just opened is left neither closed nor aborted',
+    aims: 'A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES; the 4 GiB ceiling',
+    reds: [
+      "A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES IS A NA",
+      "...and a track past the 4 GiB RIFF ceiling is refused BY",
+    ],
+    find: "    } catch (e) {\n      await abortAll(e);\n      throw new ExportError('WRITE_FAILED', `${entry.key}: the destinations could not be prepared — `",
+    to: "    } catch (e) {\n      throw e;\n      // eslint-disable-next-line no-unreachable\n      throw new ExportError('WRITE_FAILED', `${entry.key}: the destinations could not be prepared — `",
+  },
+  {
+    id: 'M42',
+    file: EXPORT,
+    why: 'the abort reaches only the destinations a writer was taken for, so the ones the Host opened and the run never got to are left open',
+    aims: 'A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES (the abort counts)',
+    reds: [
+      "A HOST THAT RETURNS ONE WRITABLE UNDER TWO NAMES IS A NA",
+    ],
+    find: "      await Promise.all(names.slice(writers.length).map(async (n) => {\n        try { await sinks[n].abort(reason); } catch { /* locked above, or already errored */ }\n      }));",
+    to: '      /* the destinations that never got a writer are left alone */',
+  },
+  {
+    id: 'M43',
+    file: EXPORT,
+    why: 'EXPORT_DONE.bytes stops counting the audio — the wire field reports a constant',
+    aims: '...and EXPORT_DONE.bytes IS the number of bytes that reached the destinations',
+    reds: [
+      "...and EXPORT_DONE.bytes IS the number of bytes that rea",
+    ],
+    find: '          this.bytes += bytes.byteLength;',
+    to: '          this.bytes += 0;',
+  },
+  {
+    id: 'M44',
+    file: EXPORT,
+    why: 'EXPORT_DONE.bytes under-reports by the six headers — a plausible number that is wrong by 348 bytes',
+    aims: '...and EXPORT_DONE.bytes IS the number of bytes that reached the destinations',
+    reds: [
+      "...and EXPORT_DONE.bytes IS the number of bytes that rea",
+    ],
+    find: '      for (const [i, w] of writers.entries()) { await w.write(encs[i].header()); this.bytes += encs[i].headerSize; }',
+    to: '      for (const [i, w] of writers.entries()) { await w.write(encs[i].header()); }',
+  },
+  {
+    id: 'M45',
+    file: EXPORT,
+    why: 'etaMs reports 0 rather than null while there is nothing to divide by, so the read tick renders as "finished" the moment the folder dialog opens',
+    aims: '...and etaMs is `null` until something is done and a NUMBER afterwards',
+    reds: [
+      "...and etaMs is `null` until something is done and a NUM",
+    ],
+    find: '      etaMs: pct > 0 ? Math.round(elapsedMs * (1 - pct) / pct) : null,',
+    to: '      etaMs: pct > 0 ? Math.round(elapsedMs * (1 - pct) / pct) : 0,',
+  },
+  {
+    id: 'M46',
+    file: EXPORT,
+    why: 'an export of no stems loses its named refusal and runs — the Host is asked to open zero destinations',
+    aims: 'AN EXPORT OF NO STEMS IS REFUSED',
+    reds: [
+      "AN EXPORT OF NO STEMS IS REFUSED — an empty list is not ",
+    ],
+    find: "    if (!order.length) {\n      throw new ExportError('BAD_STEM', 'an export of no stems is not a smaller export');\n    }",
+    to: '    if (false) { /* an export of no stems is allowed to run */ }',
+  },
+  {
+    id: 'M47',
+    file: EXPORT,
+    why: 'a manifest length that is 0 or fractional is no longer refused up front, so the run opens six readers to discover it',
+    aims: 'A LENGTH THAT IS NOT A POSITIVE INTEGER IS REFUSED',
+    reds: [
+      "A LENGTH THAT IS NOT A POSITIVE INTEGER IS REFUSED — nei",
+    ],
+    find: '    if (!Number.isInteger(frames) || frames <= 0) {',
+    to: '    if (false) {',
+  },
+  {
+    id: 'M48',
+    file: EXPORT,
+    why: 'the cancel check before the folder dialog is dropped, so a cancelled run still opens a dialog and six destinations',
+    aims: 'A CANCEL THAT LANDS BEFORE THE FOLDER DIALOG',
+    reds: [
+      "A CANCEL THAT LANDS BEFORE THE FOLDER DIALOG STOPS THE R",
+    ],
+    find: "    if (this.cancelled) throw new ExportError('CANCELLED', 'the export was stopped before anything was opened');",
+    to: '    /* no pre-sink cancel check */',
   },
 ];
 
@@ -420,23 +768,57 @@ export const MUTATIONS = [
 
 const ANSI = /\x1b\[[0-9;]*m/g;
 
+/**
+ * How many characters of an assertion's line identify it. Long enough that no
+ * two differ only past it — CHECKED, not assumed, on every run — and short
+ * enough that `reds` below stays readable. Measured at the stamp: all 66
+ * assertions in group('export') are distinct within the first 40.
+ */
+const KEY_LEN = 56;
+const keyOf = (line) => line.replace(/^ {2}(PASS|FAIL) /, '').slice(0, KEY_LEN);
+
+/**
+ * A WALL-CLOCK CEILING, because a mutation can make the suite RUN AWAY rather
+ * than fail. Measured: the anchor that builds the encoder at 16 bit takes the
+ * 4 GiB-ceiling fixture under the ceiling, and the run then walks six million
+ * windows — `execFileSync` with no timeout waits for it forever, and a battery
+ * that hangs leaves the tree MUTATED. A timeout is reported as its own verdict:
+ * a mutation that hangs the suite has not been watched red either.
+ */
+const SUITE_TIMEOUT_MS = 120_000;
+
 function runSuite() {
-  let out;
+  let out, timedOut = false;
   try {
-    out = execFileSync(process.execPath, ['test.js', 'export'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    out = execFileSync(process.execPath, ['test.js', 'export'], {
+      cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: SUITE_TIMEOUT_MS, killSignal: 'SIGKILL',
+    });
   } catch (e) {
+    timedOut = e.killed === true || e.signal === 'SIGKILL';
     out = `${(e.stdout || '')}${e.stderr || ''}`;
   }
   const clean = out.replace(ANSI, '');
-  const reds = clean.split('\n').filter((l) => /^ {2}FAIL /.test(l));
+  const lines = clean.split('\n');
+  const reds = lines.filter((l) => /^ {2}FAIL /.test(l));
+  const greens = lines.filter((l) => /^ {2}PASS /.test(l));
   const summary = clean.match(/^(\d+) passed, (\d+) failed$/m);
   return {
     reds: reds.length,
+    keys: reds.map(keyOf),
+    allKeys: [...greens, ...reds].map(keyOf),
     first: reds.length ? reds[0].replace(/^ {2}FAIL /, '').slice(0, 92) : '',
     crashed: summary === null,
+    timedOut,
     passed: summary ? Number(summary[1]) : null,
     failed: summary ? Number(summary[2]) : null,
   };
+}
+
+/** Set difference both ways, in the order the suite printed them. */
+function compare(want, got) {
+  const w = new Set(want), g = new Set(got);
+  return { missing: want.filter((k) => !g.has(k)), extra: got.filter((k) => !w.has(k)) };
 }
 
 function main() {
@@ -463,16 +845,37 @@ function main() {
   }
 
   if (list) {
-    for (const m of chosen) console.log(`  ${m.id.padEnd(4)} ${m.file}\n       ${m.why}\n       -> aims at: ${m.aims}`);
+    for (const m of chosen) {
+      console.log(`  ${m.id.padEnd(4)} ${m.file}\n       ${m.why}\n       -> aims at: ${m.aims}`);
+      const want = m.reds || [];
+      if (!want.length) console.log('       -> DECLARES NO EXPECTED SET — its red count would be a number, not a measurement');
+      else for (const k of want) console.log(`       -> must red: ${JSON.stringify(k)}`);
+    }
     return 0;
   }
 
   const base = runSuite();
-  console.log(`  baseline: ${base.passed} passed, ${base.failed} failed${base.crashed ? ' (NO SUMMARY — the suite crashed before the mutations began)' : ''}\n`);
+  console.log(`  baseline: ${base.passed} passed, ${base.failed} failed${base.crashed ? ' (NO SUMMARY — the suite crashed before the mutations began)' : ''}`);
   if (base.crashed || base.failed !== 0) {
     console.log('  \x1b[31mThe tree is not green before the mutations. Fix that first: every number below would be meaningless.\x1b[0m');
     return 2;
   }
+
+  /**
+   * THE INSTRUMENT'S OWN PRECONDITION. Every assertion must be distinguishable
+   * from every other by its key, or a `reds` set below is a claim about a name
+   * two assertions share — the same failure this suite records for two guards
+   * with one observation, one level further out. It is checked here and it stops
+   * the run.
+   */
+  const dupes = base.allKeys.filter((k, i) => base.allKeys.indexOf(k) !== i);
+  if (dupes.length) {
+    console.log(`\n  \x1b[31mTWO ASSERTIONS SHARE A KEY at ${KEY_LEN} characters — this battery cannot tell them apart,\x1b[0m`);
+    console.log('  \x1b[31mso every `reds` set below is ambiguous. Lengthen KEY_LEN or reword one of them:\x1b[0m');
+    for (const d of [...new Set(dupes)]) console.log(`    ${JSON.stringify(d)}`);
+    return 2;
+  }
+  console.log(`  ${base.allKeys.length} assertions, all distinct within ${KEY_LEN} characters\n`);
 
   const rows = [];
   for (const m of chosen) {
@@ -491,22 +894,38 @@ function main() {
     } finally {
       wr(rel, before);
     }
-    rows.push({ id: m.id, match: true, hits, reds: r.reds, crashed: r.crashed, first: r.first, aims: m.aims, file: rel });
-    const verdict = r.crashed ? '\x1b[31mCRASH\x1b[0m' : r.reds > 0 ? '\x1b[32mRED  \x1b[0m' : '\x1b[31mGREEN\x1b[0m';
-    console.log(`  ${verdict} ${m.id.padEnd(4)} ${String(r.reds).padStart(2)} red  ${m.why}`);
-    if (r.reds) console.log(`             first: ${r.first}`);
-    if (r.crashed) console.log('             the suite produced NO SUMMARY LINE — a mutation that kills the suite is not a watched red');
+    const want = m.reds || [];
+    const { missing, extra } = compare(want, r.keys);
+    const setOk = !r.crashed && !r.timedOut && missing.length === 0 && extra.length === 0 && want.length > 0;
+    rows.push({
+      id: m.id, match: true, hits, reds: r.reds, crashed: r.crashed, timedOut: r.timedOut,
+      first: r.first, aims: m.aims, file: rel, missing, extra, declared: want.length, setOk,
+    });
+    const verdict = r.timedOut ? '\x1b[31mHANG \x1b[0m'
+      : r.crashed ? '\x1b[31mCRASH\x1b[0m'
+        : setOk ? '\x1b[32mRED  \x1b[0m' : '\x1b[31mWRONG\x1b[0m';
+    console.log(`  ${verdict} ${m.id.padEnd(4)} ${String(r.reds).padStart(2)} red / ${String(want.length).padStart(2)} declared  ${m.why}`);
+    if (r.timedOut) console.log(`             the suite did not finish inside ${SUITE_TIMEOUT_MS} ms — a mutation that hangs the suite is not a watched red`);
+    if (r.crashed && !r.timedOut) console.log('             the suite produced NO SUMMARY LINE — a mutation that kills the suite is not a watched red');
+    if (!want.length) console.log('             this anchor DECLARES NO EXPECTED SET, so its red count is a number and not a measurement');
+    for (const k of missing) console.log(`             \x1b[31mMISSING\x1b[0m the declared assertion did not fire: ${JSON.stringify(k)}`);
+    for (const k of extra) console.log(`             \x1b[31mEXTRA  \x1b[0m an assertion fired that this anchor does not claim: ${JSON.stringify(k)}`);
   }
 
   const decayed = rows.filter((r) => !r.match);
-  const silent = rows.filter((r) => r.match && !r.crashed && r.reds === 0);
-  const crashed = rows.filter((r) => r.crashed);
-  const good = rows.filter((r) => r.match && !r.crashed && r.reds > 0);
+  const undeclared = rows.filter((r) => r.match && !r.declared);
+  const crashed = rows.filter((r) => r.crashed || r.timedOut);
+  const wrongSet = rows.filter((r) => r.match && r.declared && !r.crashed && !r.timedOut && !r.setOk);
+  const good = rows.filter((r) => r.setOk);
 
-  console.log(`\n  ${good.length} of ${rows.length} anchors MATCH and RED`);
+  console.log(`\n  ${good.length} of ${rows.length} anchors MATCH and RED EXACTLY THE ASSERTIONS THEY DECLARE`);
   if (decayed.length) console.log(`  ${decayed.length} DECAYED (anchor no longer matches): ${decayed.map((r) => r.id).join(', ')}`);
-  if (silent.length) console.log(`  ${silent.length} MATCH but produce NO RED — decay or real coverage loss, investigate: ${silent.map((r) => r.id).join(', ')}`);
-  if (crashed.length) console.log(`  ${crashed.length} CRASHED the suite rather than reddening it: ${crashed.map((r) => r.id).join(', ')}`);
+  if (undeclared.length) console.log(`  ${undeclared.length} DECLARE NO EXPECTED SET, so nothing was measured for them: ${undeclared.map((r) => r.id).join(', ')}`);
+  if (wrongSet.length) {
+    console.log(`  ${wrongSet.length} RED THE WRONG SET — coverage has moved, or the anchor is broader than its description: ${wrongSet.map((r) => r.id).join(', ')}`);
+    console.log('     A total would have counted every one of these as a watched red.');
+  }
+  if (crashed.length) console.log(`  ${crashed.length} CRASHED or HUNG the suite rather than reddening it: ${crashed.map((r) => r.id).join(', ')}`);
 
   // The tree must be exactly as it was found.
   const dirty = Object.keys(ANCHORED_AT.files).filter((rel) => !ANCHORED_AT.files[rel].startsWith('FILL_') && sha(rd(rel)) !== ANCHORED_AT.files[rel]);
