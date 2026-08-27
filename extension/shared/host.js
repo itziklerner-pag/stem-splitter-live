@@ -381,6 +381,65 @@ export const BUS = Object.freeze({
  *   answer no Host has to lie to give, and a third field with one
  *   implementation and no consumer is the abstraction `CONTRIBUTING.md`'s
  *   engineering bias forbids. A Host must not invent numbers here.
+ *
+ * ---- v1.1, ADDITIVE (U4) ------------------------------------------------
+ * Two duties added after the v1 freeze, which the freeze block above calls a
+ * MINOR change: no v1 name is removed or renamed, and every existing Host is
+ * refused at boot by `assertHost` until it supplies both. That refusal IS the
+ * upgrade notice — a Host that quietly went on booting short of a duty would
+ * fail at the first file the user opened instead.
+ *
+ * @property {(sourceToken: unknown) => Promise<ArrayBuffer>} sourceBytes
+ *   The ENCODED bytes of a Source a token names — the file half of
+ *   `captureStream`.
+ *   THE TOKEN IS THE SAME KIND OF THING `captureStream` TAKES, and that is the
+ *   point: a Host mints one vocabulary of Source tokens and answers whichever
+ *   duty the engine asks. A Host whose Sources are all streams may reject every
+ *   token here; a Host with no streams may reject every token there. What it
+ *   must not do is invent a second token type, because the deck carries one.
+ *   ENCODED, NOT DECODED, and this is the line that keeps a Host honest.
+ *   Handing back planar `Float32Array`s would make every Host own a decoder AND
+ *   a resampler, and a Host that resampled badly would corrupt the source
+ *   before the model saw it with nothing to say so. Reading a file is a thing
+ *   an installer-shaped product can do without lying; matching the model's
+ *   clock is not. The unit decodes, at the model clock, on the one context it
+ *   already has.
+ *   THE UNIT CALLS THIS EXACTLY ONCE PER SOURCE and holds the decoded result
+ *   for the life of the run. That is an obligation on the UNIT, not on the
+ *   Host, and it is written here because it is invisible from either side
+ *   alone: a Host is free to mint a ONE-SHOT token, and a unit that retried a
+ *   failed decode — or re-read the source for a later export — would consume it
+ *   twice and the second failure would present as a corrupt file. Decode once,
+ *   keep it, export from the cache.
+ *   IT MAY BE LARGE. A 10-minute lossless file is ~100 MB and the whole buffer
+ *   is resident. That is the envelope `modelBytes` already sets (109 MB), so it
+ *   is not a new class of allocation — but a Host that can stream a file should
+ *   still not pretend this is free.
+ *   REJECTS RATHER THAN RETURNS EMPTY. A zero-length buffer decodes to a
+ *   zero-length track and caches as a track that is silently not the track —
+ *   the failure `shared/stemcache.js`'s header is written against. Throw.
+ *
+ * @property {(plan: {title: string, files: string[]})
+ *   => Promise<Record<string, WritableStream>>} exportSink
+ *   WHERE A DELIVERABLE GOES. One writable per file, opened together.
+ *   ALL SIX AT ONCE, DELIBERATELY. An export is ONE user gesture over N files,
+ *   and a per-file duty would make the Host correlate six calls back into the
+ *   one folder the user picked — a correlation it has no key for. Asking once
+ *   and answering with the whole map puts the gesture and the answer in the
+ *   same place. `files` are BASE NAMES the unit chose; the Host owns the
+ *   directory, the dialog and any collision policy, and returns a map keyed by
+ *   the same names.
+ *   WHY A `WritableStream` AND NOT A BUFFER. Six 32-bit-float stems of a
+ *   four-minute track are ~508 MB. A duty that took finished bytes would
+ *   require every one of them resident at once, which is not a thing to ask of
+ *   a renderer also holding ~1.7 GB of wasm heap.
+ *   APPEND-ONLY IS ENOUGH, and the unit guarantees that: an ahead-of-time
+ *   export knows its frame count before it starts (the cache entry's `frames`),
+ *   so the RIFF header is written correct on the first chunk and never patched.
+ *   No Host has to supply a seekable handle.
+ *   A REFUSAL IS A THROW. The user cancelling the dialog is the ordinary case
+ *   and it is an error, not an empty map: a map missing a stem exports five of
+ *   six files and calls it done.
  */
 
 /**
@@ -442,6 +501,8 @@ export const ENGINE_HOST_DUTIES = Object.freeze({
   modelCached: 'say whether the weights are already here, without reading them',
   clearModel: 'throw away the stored weights, so the next load goes back to source',
   createBackend: 'build one inference backend — the thing that turns a mix into six stems',
+  sourceBytes: 'hand over the encoded bytes of the Source a token names, for a Source that is a file rather than a stream',
+  exportSink: 'open one writable destination per file of a deliverable, wherever this Host puts one',
 });
 
 /**
