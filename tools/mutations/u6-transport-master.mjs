@@ -126,14 +126,23 @@ const CUT_AGAINST = 'd75a6fd';
 /**
  * ...AND THE REPAIR'S OWN ANCHORS, which are a different commit. M18-M24 patch
  * the `isDeckClock` declaration and the video-lock gate, and none of those
- * lines existed at `d75a6fd`. `HEAD` until the repair lands: the same problem
- * `CUT_AGAINST` has above, said again rather than hidden, and re-stamped at
- * integration to the landed SHA. It is a STRING AND NOT A SHA on purpose — the
- * reachability check below skips what it cannot resolve rather than reporting a
- * commit missing, because "not yet committed" and "rebased away" are opposite
- * findings and must not print the same line.
+ * lines existed at `d75a6fd`. It is `980ef24`, "fix(deck): stop the video lock
+ * taking the deck it IS" — the commit that introduced every line M18-M24 patch,
+ * stamped from the commit AFTER it for the only reason there is: a stamp cannot
+ * name the commit it ships in. That is how M1-M17 got theirs too.
+ *
+ * IT CARRIES THE SAME CAVEAT AS `CUT_AGAINST`, said again rather than hidden:
+ * this is a BRANCH commit, not `main`'s, so a rebase before integration
+ * orphans it. That is not a hole — it is the case the check below was added
+ * for, and it will say so in one line instead of nothing at all. Re-stamp to
+ * the landed SHA at integration.
+ *
+ * THE CHECK STILL HAS ITS THIRD ANSWER and it is not dead code: a stamp that is
+ * prose rather than a SHA prints "nothing to check", because "not yet
+ * committed" and "rebased away" are opposite findings that must not share a
+ * line. This constant was prose until the commit above existed.
  */
-const CUT_REPAIR = 'HEAD (the D1 repair; re-stamp at integration)';
+const CUT_REPAIR = '980ef24';
 
 const SUITES = {
   host: { argv: ['test.js', 'host'], label: 'node test.js host' },
