@@ -3136,6 +3136,133 @@ if (group('live')) {
       lp.out.play(false);
     }
 
+    head('live — the prime and the recording are TWO artefacts with two rules (U7, ruling 34)');
+    /**
+     * THE ONE EVENT WHERE THE TWO RULES DISAGREE, driven through the real
+     * pipeline rather than described.
+     *
+     * A prime abandons on the first passthrough span — a cache entry is a claim
+     * ABOUT A TRACK and a gap in it is a lie that outlives the session. A
+     * recording is a record OF A PASS: the drop ENDS it, and what was captured
+     * up to that point stays deliverable. One writer cannot hold both rules, so
+     * `abort()` on the prime must not reach the recording.
+     *
+     * WHAT IS FAKED AND WHY. The writers are counters, not `CacheWriter`s. The
+     * claim here is about WHICH WRITER GETS WHICH CALL at the boundary — the
+     * seam — and a fake with `append`/`noteDrop`/`abort` measures exactly that.
+     * `CacheWriter`'s own behaviour is gated over real OPFS by the `cache`
+     * group; re-driving it here would test that instead of this, and hide the
+     * seam behind a second subject.
+     */
+    {
+      const lp = mount();
+      const hdr = new Int32Array(capSab, 0, 16);
+      const pl = new Float32Array(capSab, 64, CAP), pr = new Float32Array(capSab, 64 + CAP * 4, CAP);
+      for (let i = 0; i < CAP; i++) { pl[i] = 0.5; pr[i] = -0.5; }
+      Atomics.store(hdr, 0, CAP);
+      const fake = () => ({
+        frames: 0, drops: 0, aborted: false, appends: 0,
+        append(planes, len) { if (this.aborted) return; this.appends++; this.frames += len; },
+        noteDrop(n = 1) { this.drops += n; },
+        abort() { this.aborted = true; },
+      });
+      const prime = fake(), rec = fake();
+      lp.attachCacheWriter(prime);
+      lp.attachRecWriter(rec);
+      ok('attaching a recording writer OPENS the recording  '
+        + '[entry point: extension/offscreen/live.js attachRecWriter()]',
+        lp.recOpen === true && lp.recWriter === rec, `recOpen ${lp.recOpen}`);
+
+      /**
+       * ONE REAL CHUNK FIRST, and it is not scene-setting — it is the control.
+       * The first version of this block forced the drop immediately, so the
+       * recording had 0 appends before the boundary and 0 after, and the
+       * "nothing reaches it after the boundary" assertion was comparing 0 to 0:
+       * it could not tell a CLOSED recording from one that was never open. The
+       * chunk gives it something to have stopped.
+       */
+      await lp.runChunk(chunkPlan(0, lp.plan));
+      quiesce(lp);
+      ok('a running recording ACCUMULATES separated audio, which is what the boundary later stops  '
+        + '[entry point: extension/offscreen/live.js runChunk(), the recWriter append]',
+        rec.appends === 1 && rec.frames > 0 && rec.aborted === false,
+        `${rec.appends} append(s), ${rec.frames} frames — without this the assertions below compare 0 to 0`);
+
+      /**
+       * `skipOne()` DIRECTLY, not `forceDrop()`. `forceDrop` is a dev wrapper
+       * that first checks the span is already captured, and after chunk 0 has
+       * run the next chunk's span is beyond this fixture's 131072-frame ring —
+       * so it declines, and three assertions below went red while two others
+       * passed for the wrong reason: nothing had happened, so "nothing reached
+       * the recording after the boundary" was true of a boundary that did not
+       * exist. `skipOne` is the subject anyway; the wrapper is not.
+       */
+      const primeAppends = prime.appends;
+      /**
+       * THE SPAN THE LADDER WOULD ACTUALLY SKIP — a whole chunk, `emitTo` minus
+       * the commit point. An arbitrary 1000 frames leaves the emitter's grid
+       * misaligned and the NEXT chunk throws `chunk 2 starts at 169785, expected
+       * 84790`, which is the fixture's fault and reads like the pipeline's.
+       */
+      Atomics.store(hdr, 0, lp.baseFrame + chunkPlan(lp.k, lp.plan).emitTo);
+      lp.skipOne(chunkPlan(lp.k, lp.plan).emitTo - lp.emitter.commit);
+      quiesce(lp);
+      ok('a drop ABANDONS THE PRIME — unchanged, and its argument is unchanged with it  '
+        + '[entry point: extension/offscreen/live.js skipOne()]',
+        prime.aborted === true && prime.drops === 1,
+        `aborted ${prime.aborted}, drops ${prime.drops}, ${primeAppends} append(s) before it`);
+      ok('...and DOES NOT abort the recording — "whatever was captured remains exportable" is true in the code, not only in the policy  '
+        + '[entry point: extension/offscreen/live.js skipOne(), the two writers on the same event]',
+        rec.aborted === false,
+        rec.aborted
+          ? 'the recording was aborted with the prime — one writer holding both rules, which is the defect ruling 34 removes'
+          : `prime aborted ${prime.aborted}, recording aborted ${rec.aborted}`);
+      ok('...and the recording IS counted, so its refusal can name how many',
+        rec.drops === 1, `${rec.drops} drop(s) on the recording`);
+      ok('...and the recording is CLOSED at the boundary, so nothing after the gap is appended to it  '
+        + '[entry point: extension/offscreen/live.js endPass(), the drop branch]',
+        lp.recOpen === false && lp.passEnd === 'drop',
+        `recOpen ${lp.recOpen}, passEnd ${JSON.stringify(lp.passEnd)}`);
+
+      /**
+       * A CHUNK AFTER THE BOUNDARY, which is the path `recOpen` actually gates.
+       *
+       * The first version of this drove `fill()` — a passthrough span — and
+       * passed for the wrong reason: `fill()` never appends to a writer at all,
+       * so it was true whatever `recOpen` said, and the mutation that stops the
+       * boundary closing the recording left it green. What `recOpen` gates is
+       * `runChunk()` and `drain()`, the two paths that publish MODEL OUTPUT. A
+       * chunk landing after a drop is the realistic case: the inference that was
+       * already in flight when the ladder gave up on its span.
+       */
+      const appendsAtBoundary = rec.appends;
+      const nextC = chunkPlan(lp.k, lp.plan);
+      Atomics.store(hdr, 0, lp.baseFrame + nextC.inputEnd);
+      Atomics.store(lp.out.hdr, 1, lp.emitter.commit);
+      await lp.runChunk(nextC);
+      quiesce(lp);
+      ok('...and a CHUNK that lands after the boundary does not reach it either — the file cannot contain the gap  '
+        + '[entry point: extension/offscreen/live.js runChunk(), gated on recOpen]',
+        appendsAtBoundary > 0 && rec.appends === appendsAtBoundary,
+        appendsAtBoundary === 0
+          ? 'the recording had nothing before the boundary either, so this compares 0 to 0 and measures nothing'
+          : rec.appends > appendsAtBoundary
+            ? `the recording took ${rec.appends - appendsAtBoundary} more append(s) after the drop — the file now has `
+              + 'separated audio on both sides of a gap it does not contain, which is the silently-wrong file ruling 29 forbids'
+            : `${rec.appends} appends and ${rec.frames} frames, unchanged across a chunk published after the drop`);
+
+      const handed = lp.detachRecWriter();
+      ok('...and detaching still HANDS IT BACK, drop and all — ending is not discarding  '
+        + '[entry point: extension/offscreen/live.js detachRecWriter()]',
+        handed === rec && handed.aborted === false && handed.frames > 0 && lp.recWriter === null,
+        handed !== rec ? 'it returned something else'
+          : handed.frames === 0 ? 'it came back empty — ending WAS discarding'
+            : `returned with ${handed.frames} frames and ${handed.drops} drop(s)`);
+
+      lp.detachCacheWriter();
+      lp.dispose();
+    }
+
     head('live — the output watchdog: "green and silent" has to be self-reporting');
     {
       /**

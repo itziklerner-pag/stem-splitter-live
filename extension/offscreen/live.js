@@ -567,6 +567,31 @@ export class LivePipeline {
      * than features — see runChunk() and skipOne().
      */
     this.cacheWriter = null;
+    /**
+     * THE RECORDING'S WRITER, AND IT IS A SECOND ONE ON PURPOSE (U7, ruling 34).
+     *
+     * The prime and the recording are two artefacts with two rules over the same
+     * audio, and the rules DISAGREE at exactly one event. A prime abandons on
+     * the first passthrough span — no exceptions, `skipOne()` — because a cache
+     * entry is a claim ABOUT A TRACK and a gap in it is a lie that outlives the
+     * session. A recording is a record OF A PASS, so a drop ENDS it and what was
+     * captured up to that point stays deliverable.
+     *
+     * ONE WRITER CANNOT HOLD BOTH RULES. Sharing `cacheWriter` would mean the
+     * `abort()` that is correct for the prime also destroys the recording, and
+     * "whatever was captured up to that point remains exportable" would be a
+     * sentence contradicted by the line two below it. They therefore do not
+     * share a lifetime: each is attached and detached on its own, and what ends
+     * one never disposes the other.
+     */
+    this.recWriter = null;
+    /**
+     * Whether the recording is still accepting audio. See `endPass()` — a DROP
+     * closes it immediately, because the audio from there on is passthrough and
+     * not stems; every other reason ends the pass at the capture's end, so the
+     * drain's final publication still belongs to the recording.
+     */
+    this.recOpen = false;
 
     // scratch, allocated once — the live path must not allocate per chunk.
     // `STEMS.length * 2 channels * SEGMENT frames * 4 bytes per float`: the
@@ -764,6 +789,8 @@ export class LivePipeline {
     this.armMs = 0;
     // A new session must never append into the previous session's prime.
     this.cacheWriter = null;
+    this.recWriter = null;
+    this.recOpen = false;
     this.marginalWarned = false;
     this.inFlight = false;
     this.stopped = false;
@@ -820,6 +847,27 @@ export class LivePipeline {
   }
 
   /**
+   * Record what ended the contiguous pass, ONCE. See `passEnd`.
+   * @param {'stopped'|'ended'|'seek'|'drop'} reason a `PASS_END` member
+   */
+  endPass(reason) {
+    if (this.passEnd !== null) return;
+    this.passEnd = reason;
+    /**
+     * A DROP CLOSES THE RECORDING HERE, before `fill()` publishes the
+     * passthrough span. That is the boundary: the audio from this frame on is
+     * the mix, not stems, and a recording that kept accepting it would be
+     * writing a file with a gap in it — the one thing ruling 29 exists to make
+     * impossible.
+     *
+     * Every OTHER reason ends the pass at the CAPTURE's end rather than here, so
+     * the recording stays open across `stop()` and the drain's final
+     * publication is part of it. `stop()` closes it after the drain.
+     */
+    if (reason === 'drop') this.recOpen = false;
+  }
+
+  /**
    * End the session. **THIS MAY TAKE ONE INFERENCE, and the promise it returns
    * means "drained or honestly abandoned" rather than "drained"** — a Host
    * author calling this from a user gesture needs both halves of that sentence.
@@ -838,14 +886,6 @@ export class LivePipeline {
    *
    * @param {{drain?: boolean}} [opts]
    */
-  /**
-   * Record what ended the contiguous pass, ONCE. See `passEnd`.
-   * @param {'stopped'|'ended'|'seek'|'drop'} reason a `PASS_END` member
-   */
-  endPass(reason) {
-    if (this.passEnd === null) this.passEnd = reason;
-  }
-
   async stop({ drain = true } = {}) {
     if (this.status === 'idle') return;
     // FIRST LINE, before anything can await: everything else bails on this.
@@ -859,6 +899,9 @@ export class LivePipeline {
       this.drainAbandoned++;
       this.drainWhy = 'teardown: a document going away may not wait for an inference';
     }
+    // AFTER the drain, not before: on a clean stop the drain's publication is
+    // the last thing the recording is owed.
+    this.recOpen = false;
     this.status = 'idle';
     this.phase = null;
     // Drop the plan so `hopSec` reports null when nothing is running. It used to
@@ -1106,6 +1149,10 @@ export class LivePipeline {
     // separated audio is ever cached" is a property of the call graph, and
     // moving this line is the way to break it.
     if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
+    // The recording's own writer, on its own rule. `recOpen` is what the
+    // boundary closes; the prime's `aborted` flag is not consulted here and
+    // must not be, or a drop would end both.
+    if (this.recWriter && this.recOpen) this.recWriter.append(e.planes, e.len);
 
     // A4: chunk 0 has landed. If the ladder already armed playback from fill()
     // during priming, it did so with `firstChunkMs` still 0 — i.e. on the
@@ -1189,6 +1236,11 @@ export class LivePipeline {
       this.cacheWriter.noteDrop();
       this.cacheWriter.abort();
     }
+    // THE RECORDING IS COUNTED BUT NOT ABORTED. This is the whole of ruling 34:
+    // the same event, two rules. `endPass('drop')` above already closed it, so
+    // nothing more is appended — but what it has stays committable, which
+    // `abort()` would make impossible.
+    if (this.recWriter) this.recWriter.noteDrop();
     this.fill(n);
     this.k++;
     this.drops++;
@@ -1312,6 +1364,10 @@ export class LivePipeline {
     // may be cached. A drain never publishes passthrough — if it could not
     // separate, it abandoned above rather than appending unseparated audio.
     if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
+    // AND IT BELONGS TO THE RECORDING, when the recording is still open. It is
+    // not on a drop-ended pass: `endPass('drop')` closed `recOpen` at the
+    // boundary, and these frames are after it.
+    if (this.recWriter && this.recOpen) this.recWriter.append(e.planes, e.len);
     this.drainedFrames = e.len;
   }
 
@@ -2348,6 +2404,16 @@ export class LivePipeline {
   attachCacheWriter(w) { this.cacheWriter = w || null; }
   detachCacheWriter() { const w = this.cacheWriter; this.cacheWriter = null; return w; }
 
+  /**
+   * The RECORDING's writer — a separate lifetime from the prime's, and the
+   * separation is the point (ruling 34). Attaching one opens the recording;
+   * detaching hands it back however the pass ended, aborted or not, because
+   * "whatever was captured up to that point remains exportable" is only true if
+   * the caller can still reach it.
+   */
+  attachRecWriter(w) { this.recWriter = w || null; this.recOpen = !!w; }
+  detachRecWriter() { const w = this.recWriter; this.recWriter = null; this.recOpen = false; return w; }
+
   /** Live stats for the harness — not part of the UI contract. */
   stats() {
     const s = this.chunkMs.slice().sort((a, b) => a - b);
@@ -2356,6 +2422,12 @@ export class LivePipeline {
       // A prime that has been abandoned looks exactly like one that is going
       // fine, right up until commit() returns null. Put it on the wire.
       caching: this.cacheWriter ? { active: !this.cacheWriter.aborted, frames: this.cacheWriter.frames } : null,
+      // The recording is a DIFFERENT artefact and reports separately: a drop
+      // shows here as a closed pass with its frames intact, and in `caching`
+      // above as an abandoned prime. One line for both would hide the ruling.
+      recording: this.recWriter
+        ? { open: this.recOpen, frames: this.recWriter.frames, drops: this.recWriter.drops, endedBy: this.passEnd }
+        : null,
       hopSeconds: this.plan ? this.plan.hopSeconds : null,
       demotions: this.demotions,
       // The engine changes this on its own when a second deck loads, so it must
