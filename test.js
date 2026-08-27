@@ -30,6 +30,12 @@
  *            overruns under a simulated slow producer, and neither a stop
  *            mid-inference nor an L3 demotion leaves a scratch buffer detached
  *   cache    the prime-then-play stem cache: keys, eviction, refusals, resume
+ *   export   U11's E1: the six untouched model outputs out of the 32f tier into
+ *            a Host's exportSink — base names that cannot leave the chosen
+ *            folder, 32f/44.1k/stereo in the emitted header, samples bit-identical
+ *            to what the cache holds, a cancelled run that leaves no partial
+ *            file, a windowed read whose peak does not grow with the track, and
+ *            the closed EXPORT_ERROR vocabulary
  *   mix      fader law round trip, mute/solo truth table, per-sample gain
  *            smoothing settle time, soft clipper transfer function
  *   xf       the crossfader: curves, targets, and the per-stem assignment
@@ -82,12 +88,15 @@
  * construction. When you add a test, say which kind it is.
  */
 
-import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter } from './extension/shared/wav.js';
+import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter, WavWindowReader } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
   videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR,
   CACHE_DIR_32F, separationRefusal,
   fileIdFromBytes, fileIdentity, fileRefusal, fileCommitRefusal } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
+import {
+  ExportRun, ExportError, EXPORT_CODES, checkExportCode, safeTitle, exportFileNames,
+} from './extension/engine/export.js';
 // The transpose lanes' group delay, IMPORTED and never re-typed. It is a term in
 // the latency assertion below, and a second copy of 3072 in this file is a second
 // place for the assertion to disagree with the code it is checking.
@@ -222,9 +231,22 @@ function noise(n, seed = 1) {
  *              "manifest is written last" claim is checked rather than believed.
  *   `failOn`   file names whose next close() throws, to interrupt a put mid-way
  *              and see what a crash leaves behind.
+ *   `reads`    every READ, with its byte range, which is how U11's "peak
+ *              resident does not scale with track length" is MEASURED rather
+ *              than argued from the shape of the code. A `WavWindowReader` that
+ *              quietly slurped each file would satisfy every sample assertion in
+ *              group('export'); it cannot satisfy this one.
+ *
+ * `getFile()` HANDS BACK A REAL `Blob`, wrapped only so the ranges can be
+ * recorded. The wrapper does not implement `slice` — it delegates to the
+ * platform's — because a hand-rolled `slice` that ignored its arguments and
+ * returned the whole file would make the windowed reader look like it worked
+ * while reading everything, which is exactly the failure `reads` exists to
+ * catch. The instrument must not be able to fake the thing it measures.
  */
 function installOpfs() {
   const written = [];
+  const reads = [];
   const failOn = new Set();
   const toBytes = (d) => {
     if (d instanceof Uint8Array) return new Uint8Array(d);
@@ -245,10 +267,12 @@ function installOpfs() {
           async getFile() {
             const b = files.get(n);
             if (!b) throw new Error(`NotFoundError: ${n}`);
+            const blob = new Blob([b]);
             return {
-              size: b.byteLength,
-              async text() { return Buffer.from(b).toString('utf8'); },
-              async arrayBuffer() { return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); },
+              size: blob.size,
+              async text() { return blob.text(); },
+              async arrayBuffer() { reads.push({ name: n, at: 0, bytes: blob.size }); return blob.arrayBuffer(); },
+              slice(start, end) { reads.push({ name: n, at: start, bytes: end - start }); return blob.slice(start, end); },
             };
           },
           async createWritable() {
@@ -286,7 +310,7 @@ function installOpfs() {
     value: { storage: { getDirectory: async () => root } }, configurable: true, writable: true,
   });
   return {
-    root, dirs, written, failOn,
+    root, dirs, written, failOn, reads,
     cacheDir: () => root.getDirectoryHandle(CACHE_DIR, { create: true }),
     /** What is actually on disk in one directory, sorted. */
     names: (d = CACHE_DIR) => (dirs.has(d) ? [...dirs.get(d).files.keys()].sort() : []),
@@ -724,6 +748,882 @@ if (group('wavstream')) {
       + '[entry point: new WavStreamEncoder]',
       msg !== null && /count/i.test(msg) && /2 planes/.test(msg),
       msg === null ? 'ACCEPTED an array of planes as a channel count' : msg);
+  }
+}
+
+// ===========================================================================
+/**
+ * U11 — E1, THE DELIVERABLE. The six untouched model outputs read out of the
+ * 32-bit-float tier and written into the writables a Host's `exportSink` hands
+ * back: names, header, bytes, cancellation, and the closed error vocabulary.
+ *
+ * WHAT THIS GROUP IS FOR. Export is the product's defining capability and the
+ * one deliverable that leaves the machine, so the claims here are about BYTES
+ * ON SOMEONE'S DISK rather than about a shape in memory. Three of them are the
+ * whole point:
+ *
+ *   1. THE HEADER IS PARSED OUT OF WHAT WAS EMITTED, never read back off the
+ *      options that were passed in. An assertion that checks its own input has
+ *      measured the test and not the encoder.
+ *   2. THE SAMPLES ARE BIT-IDENTICAL to what the cache holds — `===` on every
+ *      float, not "close to". Any gain, dither or normalisation on this path is
+ *      a defect, and "approximately equal" is exactly the tolerance a −0.1 dB
+ *      trim would hide in.
+ *   3. A CANCELLED EXPORT LEAVES NO PARTIAL FILE, asserted on all six sinks
+ *      rather than on the one that happened to be open, with an INDEPENDENCE
+ *      CHECK that bytes really had reached them first — a cancel that fired
+ *      before anything was written would satisfy every "no partial file"
+ *      assertion here having observed nothing at all.
+ *
+ * WHY `WavWindowReader`'S OWN ASSERTIONS ARE HERE rather than in
+ * `group('window')`: it exists for this path and its claim is this path's claim.
+ * Streaming the WRITE while materialising the READ moves E1's memory ceiling
+ * instead of removing it, so "peak resident does not scale with track length" is
+ * a statement about the pair and is asserted where the pair runs. It is MEASURED
+ * on the shim's recorded `slice()` ranges, not asserted from the code's shape:
+ * a reader that quietly slurped the whole file would satisfy every sample
+ * assertion in this group.
+ *
+ * RENDERING vs REACHABILITY (the rule at the head of this file): NOT
+ * rendering-only. The production `StemCache.put()` writes the entry, the
+ * production `StemCache.stemFile()` opens it, the production `WavWindowReader`
+ * reads it, the production `WavStreamEncoder` encodes it and a real
+ * `WritableStream` receives it. The two things this cannot reach are the Chrome
+ * offscreen document's own boot and a real folder on a real disk; the first is
+ * covered by reading `offscreen/engine.js` as text below, and the second is the
+ * Host's half of the seam by design.
+ *
+ * ---- EVERY ASSERTION ADDED HERE, WATCHED RED --------------------------------
+ * AGENTS.md: "An assertion never observed failing is one whose ability to fail
+ * is an assumption." All 57 assertions in this group were watched red, by the
+ * 38 mutations below. THE BATTERY IS IN THE REPOSITORY —
+ * `qa/u11-export-mutations.mjs` — because a measurement whose instrument was
+ * thrown away cannot be repeated or disputed, and because a battery decays
+ * SILENTLY when a later slice rewrites the lines its anchors patch. Run it:
+ *
+ *     node qa/u11-export-mutations.mjs
+ *
+ * It reports TWO things per anchor and never one number: does the anchor still
+ * MATCH (if not, the instrument decayed — re-cut it) and does the mutation still
+ * RED (if not, that is decay OR real coverage loss, and they need opposite
+ * responses). It carries one SHA-256 per anchored file, so drift is named before
+ * anything else is read. `file:line` below is where the mutation was MADE.
+ *
+ *   M1  export.js:244  exportFileNames returns the caller's order, not STEMS order
+ *                      -> 2 red: the reversed-request and the subset order
+ *   M2  export.js:171  safeTitle stops substituting `/`, `\`, `:` and the control range
+ *                      -> 4 red: the escape assertion, the folder name in the plan,
+ *                      the reduces-to-nothing name, and the end-to-end block
+ *   M3  export.js:223  safeTitle returns the constant 'export'
+ *                      -> 11 red: every naming assertion INCLUDING the independence
+ *                      control, which is the point of that control existing
+ *   M4  export.js:211  safeTitle stops stripping leading and trailing dots, so `..` survives
+ *                      -> 2 red: the escape assertion (`..` resolves OUT of the folder)
+ *   M5  export.js:173  the Windows device-name guard never matches
+ *                      -> 1 red: a device name is escaped
+ *   M6  export.js:180  the 200-byte title cap is removed
+ *                      -> 1 red: a long title fits a 255-byte name
+ *   M7  export.js:396  a cancelled run CLOSES the destinations instead of aborting them
+ *                      — literally "cancel stops writing without discarding"
+ *                      -> 2 red: aborts every destination and closes none; and the
+ *                      mid-write refusal, which shares the same abort path
+ *   M8  export.js:405  the cancel flag is never checked
+ *                      -> 4 red: all four cancellation assertions
+ *   M9  export.js:402  the six files are written ONE AFTER ANOTHER, not in lockstep
+ *                      -> 1 red: the six advance together. NOTE the shape of this one:
+ *                      "no partial file" alone stayed GREEN, because the cancel landed
+ *                      before the first stem finished. The spread assertion is what
+ *                      sees it, and it exists for that reason.
+ *   M10 export.js:386  the encoder is built at 16-bit PCM
+ *                      -> 4 red: the header, and all three identity assertions
+ *   M11 export.js:410  A GAIN OF 0.999 IS APPLIED to every window before it is encoded
+ *                      — the defect this whole slice exists to make impossible
+ *                      -> 3 red: sample identity, the out-of-range control, data-chunk
+ *                      identity. A "close to" tolerance would have passed all three.
+ *   M12 export.js:351  the opened file's own header is no longer checked
+ *                      -> 1 red: a row saying 32 over bytes that are 16
+ *   M13 export.js:357  the manifest frame count is no longer checked against the file
+ *                      -> 1 red: an entry that disagrees with itself
+ *   M14 export.js:371  a refused exportSink is swallowed and the run carries on
+ *                      -> 2 red: the refusal, and "every declared code is reachable"
+ *   M15 export.js:373  a short sink map is accepted
+ *                      -> 2 red: the SINK_SHORT refusal and the abort of what did open
+ *   M16 export.js:322  the requested format is silently ignored
+ *                      -> 1 red: a non-32f format is refused by name
+ *   M17 export.js:308  the manifest row's depth is no longer consulted
+ *                      -> 1 red: a 16-bit entry is not a deliverable. THIS ONE WAS
+ *                      GREEN AT FIRST: the file-header check (M12) caught the same
+ *                      case with the same code, so the assertion could not tell which
+ *                      guard fired. It now counts the stem files OPENED — the row
+ *                      check refuses before any — and M17 reds.
+ *   M18 export.js:295  a run can be started twice
+ *                      -> 1 red: a run cannot be started twice
+ *   M19 export.js:123  checkExportCode accepts every code
+ *                      -> 2 red: an unknown code is refused; the message names the set
+ *   M20 wav.js:346     the reader answers a DEFAULT format when open() has not run
+ *                      -> 1 red: a reader that has read no header reports nothing
+ *   M21 wav.js:376     the windowed reader SLURPS the whole file and slices in memory
+ *                      -> 3 red: all three memory assertions — and NOT ONE sample
+ *                      assertion, which is exactly why the memory claim needs its own
+ *                      instrument rather than riding on the identity ones
+ *   M22 wav.js:375     the window is read one byte late
+ *                      -> 16 red: most of the group, sample identity first
+ *   M23 wav.js:365     a read past the end comes back short instead of being refused
+ *                      -> 1 red: the read-past-the-end refusal
+ *   M24 stemcache.js:654  stemFile ignores which stem it was asked for — the
+ *                      six-identical-stems fan-out, at its source
+ *                      -> 1 red: sample identity, per stem against its OWN source
+ *   M25 engine.js:225  the engine stops checking the code it sends
+ *                      -> 1 red: one checkExportCode() per EXPORT_ERROR
+ *   M26 export.js:48   the deliverable path imports engine/mixer.js
+ *                      -> 1 red: the import list — there is nowhere for a fader
+ *   M27 export.js:369  the Host is asked TWICE for the same deliverable
+ *                      -> 6 red: asked once, for all six together, first
+ *   M28 export.js:414  progress reports a 0-based file index into a 1..files range
+ *                      -> 1 red: every tick names a file within the set it declares
+ *   M29 export.js:328  a stem the six-stem contract has no name for is accepted
+ *                      -> 1 red: the BAD_STEM refusal
+ *   M30 export.js:300  a key that names nothing is no longer refused up front
+ *                      -> 1 red: refused before a single file or destination is opened
+ *   M31 export.js:345  a stem file that will not open is swallowed
+ *                      -> 1 red: the READ_FAILED refusal
+ *   M32 stemcache.js:676  StemCache.get() stops reading whole files
+ *                      -> 1 red: the CONTRAST the memory numbers are measured against.
+ *                      Without it "one window" is a number with no scale beside it.
+ *   M33 export.js:123  checkExportCode cries wolf on every LEGAL code — the OTHER
+ *                      direction of M19, and the question a "can it fail?" review
+ *                      never asks: CAN IT PASS?
+ *                      -> 1 red: every member passes silently
+ *   M34 export.js:295  the runner throws a code that is not in the declared set
+ *                      -> 2 red: the declared-member scan, and the BUSY refusal
+ *   M35 engine.js:1371 the engine stops wiring EXPORT_CANCEL
+ *                      -> 1 red: the engine really wires both cases to the runner
+ *   M36 wav.js:333     the reader reports a sample rate it did not read out of the file
+ *                      -> 17 red: the reader's format assertion, then the whole run
+ *   M37 wav.js:368     a wrong number of planes is accepted
+ *                      -> 1 red: the plane-count refusal
+ *   M38 test.js:33     this file's own header list loses `export`
+ *                      -> 1 red: the header list is the groups this file has, so
+ *                      `node test.js export` cannot become a run that asserts nothing
+ *
+ * THE THIRD WAY A GATE FAILS — "if I break this, does the number get WORSE?" —
+ * is what the four CONTROLS in this group are for, and each control is itself
+ * watched red above. `finished.length === 0` ("no partial file") is satisfied by
+ * a run that writes NOTHING, so it is paired with an independence check that
+ * bytes really reached all six sinks (M8 reds it). `escapes.length === 0` is
+ * satisfied by a `safeTitle` that returns a constant, so it is paired with an
+ * ordinary title surviving untouched (M3 reds it). "all six aborted" is
+ * satisfied by aborting always, so it is paired with a clean run closing each
+ * one exactly once (M22 reds it). And "the biggest read is one window" is
+ * satisfied by reading nothing, so it is paired with the exact audio byte total
+ * and with `get()`'s whole-file reads beside it (M21 and M32 red them).
+ */
+if (group('export')) {
+  head('export — E1: the six untouched model outputs, 32f / 44 100 Hz / stereo (U11)');
+  const { readFileSync } = await import('node:fs');
+  const nodePath = await import('node:path');
+  const path = nodePath.default || nodePath;
+
+  const F32_TIER = { depth: 32, geometry: 'offline' };
+  const CAP = 200 * 1024 * 1024;
+  /** Small enough that a short track spans many windows, so a cancel has somewhere to land. */
+  const CHUNK = 100;
+
+  /**
+   * Deterministic, DIFFERENT PER STEM, and deliberately outside ±1.0 in two
+   * places. The out-of-range samples are load-bearing: `wav.js`'s float path
+   * does not clamp because htdemucs outputs are not bounded, and a clamp
+   * introduced anywhere on this path is invisible to a fixture that stays inside
+   * the range.
+   */
+  const stemPlanes = (frames, seed) => {
+    const l = noise(frames, seed), r = noise(frames, seed + 1);
+    l[0] = 1.7; r[1] = -1.42;
+    return [l, r];
+  };
+  const sixStems = (frames) => {
+    const out = {};
+    STEMS.forEach((s, i) => { out[s] = stemPlanes(frames, 400 + i * 2); });
+    return out;
+  };
+
+  /**
+   * A REAL `WritableStream` with a recording underlying sink — not a hand-rolled
+   * fake. `getWriter()`, the writer lock, `close()` and `abort()` are then the
+   * platform's semantics rather than this file's opinion of them, which matters
+   * because "aborted, not closed" is a claim about exactly those semantics.
+   */
+  const makeSink = () => {
+    const rec = { parts: [], closed: 0, aborted: 0, reason: null, failAt: -1, writes: 0 };
+    rec.stream = new WritableStream({
+      write(chunk) {
+        rec.writes++;
+        if (rec.writes === rec.failAt) throw new Error('simulated destination failure');
+        rec.parts.push(new Uint8Array(chunk));
+      },
+      close() { rec.closed++; },
+      abort(r) { rec.aborted++; rec.reason = r; },
+    });
+    rec.bytes = () => {
+      const total = rec.parts.reduce((a, p) => a + p.length, 0);
+      const out = new Uint8Array(total);
+      let p = 0;
+      for (const q of rec.parts) { out.set(q, p); p += q.length; }
+      return out;
+    };
+    return rec;
+  };
+
+  /** The RIFF fields, read out of the emitted bytes and nothing else. */
+  const readHeader = (u8) => {
+    const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const tag = (o) => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+    const h = { riff: tag(0), riffSize: dv.getUint32(4, true), wave: tag(8), fact: null, data: null, fmt: null };
+    let p = 12;
+    while (p + 8 <= u8.length) {
+      const id = tag(p), size = dv.getUint32(p + 4, true), body = p + 8;
+      if (id === 'fmt ') {
+        h.fmt = {
+          size,
+          format: dv.getUint16(body, true),
+          channels: dv.getUint16(body + 2, true),
+          sampleRate: dv.getUint32(body + 4, true),
+          byteRate: dv.getUint32(body + 8, true),
+          blockAlign: dv.getUint16(body + 12, true),
+          bitDepth: dv.getUint16(body + 14, true),
+        };
+      } else if (id === 'fact') h.fact = dv.getUint32(body, true);
+      else if (id === 'data') h.data = { offset: body, size };
+      p = body + size + (size & 1);
+    }
+    return h;
+  };
+
+  const strip = (src) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+
+  /**
+   * Drive one whole export over a cache the caller has already filled.
+   * Everything the run needs from outside is here so a block can replace exactly
+   * one piece — the sink map, one reader, the format — and leave the rest real.
+   */
+  const drive = async (cache, key, opts = {}) => {
+    const entry = opts.entry !== undefined ? opts.entry : await cache.entry(key);
+    const recs = {};
+    const plans = [];
+    const progress = [];
+    /** How many stem files the run actually opened — a COUNT, so "refused before
+     *  it opened anything" is a measurement and not a reading of the code. */
+    const opens = [];
+    const open = opts.openStem || (async (stem) => new WavWindowReader(await cache.stemFile(key, stem)).open());
+    let run;
+    run = new ExportRun({
+      entry,
+      stems: opts.stems,
+      format: opts.format,
+      chunkFrames: opts.chunkFrames || CHUNK,
+      openStem: (stem) => { opens.push(stem); return open(stem); },
+      exportSink: opts.exportSink || (async (plan) => {
+        plans.push(plan);
+        const map = {};
+        for (const n of plan.files) { recs[n] = makeSink(); if (opts.sinkFailAt) recs[n].failAt = opts.sinkFailAt; map[n] = recs[n].stream; }
+        if (opts.dropFile) delete map[opts.dropFile];
+        return map;
+      }),
+      onProgress: (p) => { progress.push(p); if (opts.onTick) opts.onTick(p, run, recs); },
+    });
+    let result = null, err = null;
+    try { result = await run.run(); } catch (e) { err = e; }
+    return { run, result, err, recs, plans, progress, opens };
+  };
+
+  // ---------------------------------------------------------------- names
+  {
+    const names = exportFileNames('My Track');
+    ok('SIX FILES, ONE PER STEM, IN `STEMS` ORDER  '
+      + "[entry point: exportFileNames(title) — the base names handed to the Host's exportSink]",
+      names.length === STEMS.length && names.every((n, i) => n === `My Track - ${STEMS[i]}.wav`),
+      names.join(' | '));
+
+    const reversed = exportFileNames('My Track', STEMS.slice().reverse());
+    ok("...and the CALLER'S order is ignored: a reversed request comes back in `STEMS` order, "
+      + 'because every other list of stems in this product is indexed that way',
+      same(reversed, names), reversed.join(' | '));
+
+    const two = exportFileNames('My Track', ['vocals', 'drums']);
+    ok('...and a SUBSET is still in `STEMS` order, so index 0 is the earlier stem and not the first one asked for',
+      two.length === 2 && two[0] === 'My Track - drums.wav' && two[1] === 'My Track - vocals.wav', two.join(' | '));
+  }
+
+  // ------------------------------------------------- the escape (issue #6)
+  /**
+   * A TITLE MUST NOT BE ABLE TO LEAVE THE FOLDER THE USER PICKED.
+   *
+   * WHO OWNS THIS, said here because the assertion is only half the answer: the
+   * UNIT chooses the base names and guarantees each one is a SINGLE PATH
+   * COMPONENT; the HOST owns the directory and joins them. Both halves are
+   * needed and neither is sufficient — the unit cannot know the Host's
+   * filesystem, and the Host cannot know what the unit meant by a title.
+   *
+   * THE INSTRUMENT IS `node:path`, NOT A RE-READING OF `safeTitle`'s RULES. A
+   * check that re-applied the same regular expression would agree with the code
+   * by construction and could not disagree with it. `resolve` is what a Host
+   * actually does, and it is run in BOTH flavours because the escapes differ:
+   * `a\b` is one component on posix and two on win32, and `C:x` is a
+   * drive-relative path on win32 only.
+   */
+  {
+    const HOSTILE = ['a/b', 'a\\b', 'C:foo', 'x.', '..', '.', '../../etc/passwd', '..\\..\\windows',
+      'con', 'NUL', 'a:b:c', 'x ', '', null, 'tail...', '/leading', 'a\u0000b'];
+    const DIR = { posix: '/home/u/Music/set', win32: 'C:\\Users\\u\\Music\\set' };
+    const escapes = [];
+    const unchanged = [];
+    for (const t of HOSTILE) {
+      const title = safeTitle(t);
+      for (const n of [...exportFileNames(t), title]) {
+        const p = path.posix.resolve(DIR.posix, n);
+        const w = path.win32.resolve(DIR.win32, n);
+        if (!p.startsWith(`${DIR.posix}/`) || p.slice(DIR.posix.length + 1).includes('/')
+          || !w.toLowerCase().startsWith(`${DIR.win32.toLowerCase()}\\`) || w.slice(DIR.win32.length + 1).includes('\\')) {
+          escapes.push(`${JSON.stringify(t)} -> ${JSON.stringify(n)} -> ${p} | ${w}`);
+        }
+      }
+    }
+    ok('A TITLE CANNOT ESCAPE THE CHOSEN FOLDER — every base name AND the folder name resolve to one component inside it  '
+      + `[entry point: safeTitle/exportFileNames, resolved with node:path posix AND win32, over ${HOSTILE.length} hostile titles]`,
+      escapes.length === 0 && HOSTILE.length > 10,
+      escapes.length ? escapes.slice(0, 4).join('  //  ') : `${HOSTILE.length} titles, ${HOSTILE.length * (STEMS.length + 1)} names, none escaped`);
+
+    /**
+     * INDEPENDENCE. Every assertion above is satisfied by a `safeTitle` that
+     * returns the constant `'export'`, which would silently rename every file
+     * the user ever exported. This is the control: an ordinary title survives
+     * untouched, and that is what makes the escapes above a claim about escapes.
+     */
+    for (const t of ['Track 01', 'Björk — Jóga (Live)', 'a.b.c', '日本語のタイトル', "Don't Stop"]) {
+      if (safeTitle(t) !== t) unchanged.push(`${JSON.stringify(t)} -> ${JSON.stringify(safeTitle(t))}`);
+    }
+    ok('...and an ORDINARY title is untouched, so the rule above is about escapes and not about renaming everything  '
+      + '[the control: a safeTitle() that returned a constant would pass every assertion above]',
+      unchanged.length === 0, unchanged.join('  //  ') || 'dots, dashes, apostrophes, accents and CJK all survive');
+
+    ok('...a title that reduces to nothing still yields a name, rather than an empty path component',
+      safeTitle('///') === '___' && safeTitle('') === 'export' && safeTitle('..') === 'export',
+      `${JSON.stringify(safeTitle('///'))} ${JSON.stringify(safeTitle(''))} ${JSON.stringify(safeTitle('..'))}`);
+
+    ok('...a Windows DEVICE name is escaped — `NUL.wav` accepts every byte and keeps none',
+      safeTitle('NUL') === '_NUL' && safeTitle('com1') === '_com1' && safeTitle('conch') === 'conch',
+      `${safeTitle('NUL')} ${safeTitle('com1')} ${safeTitle('conch')}`);
+
+    const long = exportFileNames('é'.repeat(400))[0];
+    ok('...and a very long title is cut to fit a 255-BYTE name, on a code-point boundary  '
+      + '[entry point: safeTitle, measured in UTF-8 bytes — 400 two-byte characters]',
+      new TextEncoder().encode(long).length <= 255 && !/\uFFFD/.test(long) && long.endsWith(` - ${STEMS[0]}.wav`),
+      `${new TextEncoder().encode(long).length} bytes`);
+  }
+
+  // ------------------------------------------- the whole path, end to end
+  {
+    const o = installOpfs();
+    try {
+      const frames = 1000;
+      const cache = new StemCache(CAP, CACHE_DIR_32F, F32_TIER);
+      const src = sixStems(frames);
+      await cache.put('k32', { title: 'Some/Track:', seconds: frames / SR }, src);
+
+      const { result, err, recs, plans, progress } = await drive(cache, 'k32');
+      ok('THE RUN COMPLETES over a real StemCache in the 32f tier  '
+        + '[entry point: ExportRun.run() -> StemCache.stemFile -> WavWindowReader -> WavStreamEncoder -> WritableStream]',
+        err === null && result !== null && result.files.length === STEMS.length,
+        err ? `${err.code}: ${err.message}` : `${result.files.length} files, ${result.bytes} bytes`);
+
+      ok('...the Host was asked ONCE, for all six destinations together  '
+        + '[entry point: the exportSink duty — one user gesture over N files]',
+        plans.length === 1 && plans[0].files.length === STEMS.length,
+        `${plans.length} call(s), ${plans.length ? plans[0].files.length : 0} file(s) in the plan`);
+
+      ok('...and the sanitised title travels WITH the plan, because the Host makes a FOLDER out of it',
+        plans.length === 1 && plans[0].title === 'Some_Track_', plans.length ? JSON.stringify(plans[0].title) : 'no plan');
+
+      ok('...EXPORT_DONE reports exactly the names the Host was given, in the same order',
+        result !== null && same(result.files, plans[0].files), result ? result.files.join(' | ') : 'no result');
+
+      // ---- the header, parsed out of the bytes that were emitted ----------
+      const bad = [];
+      for (const [i, s] of STEMS.entries()) {
+        const name = `Some_Track_ - ${s}.wav`;
+        const u8 = recs[name] ? recs[name].bytes() : new Uint8Array(0);
+        const h = readHeader(u8);
+        const want = {
+          riff: 'RIFF', wave: 'WAVE', format: 3, channels: 2, sampleRate: 44100,
+          bitDepth: 32, blockAlign: 8, byteRate: 44100 * 8,
+        };
+        const wrong = [];
+        if (h.riff !== want.riff || h.wave !== want.wave) wrong.push(`tags ${h.riff}/${h.wave}`);
+        if (!h.fmt) wrong.push('no fmt chunk');
+        else {
+          if (h.fmt.format !== want.format) wrong.push(`fmt tag ${h.fmt.format} (want 3, IEEE float)`);
+          if (h.fmt.bitDepth !== want.bitDepth) wrong.push(`bits ${h.fmt.bitDepth}`);
+          if (h.fmt.sampleRate !== want.sampleRate) wrong.push(`rate ${h.fmt.sampleRate}`);
+          if (h.fmt.channels !== want.channels) wrong.push(`channels ${h.fmt.channels}`);
+          if (h.fmt.blockAlign !== want.blockAlign) wrong.push(`blockAlign ${h.fmt.blockAlign}`);
+          if (h.fmt.byteRate !== want.byteRate) wrong.push(`byteRate ${h.fmt.byteRate}`);
+        }
+        if (h.fact !== frames) wrong.push(`fact ${h.fact} (want ${frames})`);
+        if (!h.data || h.data.size !== frames * 8) wrong.push(`data ${h.data ? h.data.size : 'absent'} (want ${frames * 8})`);
+        if (h.riffSize !== u8.length - 8) wrong.push(`riffSize ${h.riffSize} vs fileSize-8 ${u8.length - 8}`);
+        if (wrong.length) bad.push(`${s}[${i}]: ${wrong.join(', ')}`);
+      }
+      ok('EVERY FILE SAYS 32-BIT FLOAT, 44 100 Hz, STEREO IN ITS OWN HEADER, with a `fact` chunk and data = frames * 8  '
+        + '[entry point: the emitted bytes, parsed — NOT the options that were passed in]',
+        bad.length === 0 && Object.keys(recs).length === STEMS.length,
+        bad.length ? bad.join('  //  ') : `${STEMS.length} files, fact ${frames}, data ${frames * 8} B, riff = fileSize-8`);
+
+      // ---- bit identity against what the cache holds ----------------------
+      const drift = [];
+      for (const s of STEMS) {
+        const name = `Some_Track_ - ${s}.wav`;
+        const out = decodeWav(recs[name].bytes().buffer.slice(0));
+        for (let c = 0; c < 2; c++) {
+          for (let i = 0; i < frames; i++) {
+            if (out.channels[c][i] !== src[s][c][i]) {
+              drift.push(`${s} ch${c} frame ${i}: ${out.channels[c][i]} != ${src[s][c][i]}`);
+              break;
+            }
+          }
+        }
+      }
+      ok('THE STEMS ARE THE MODEL\u2019S, UNMODIFIED: every sample of every file is `===` to what went into the cache  '
+        + '[entry point: decodeWav over the exported bytes vs the Float32Arrays put(); NOT "approximately equal"]',
+        drift.length === 0 && frames > 0,
+        drift.length ? drift.slice(0, 3).join('  //  ') : `${STEMS.length * 2 * frames} samples, exact`);
+
+      ok('...INCLUDING the out-of-range samples — no clamp, no rescale, no normalisation on the deliverable path  '
+        + '[the control: a fixture inside \u00b11.0 cannot tell a clamping export from an honest one]',
+        (() => {
+          const out = decodeWav(recs[`Some_Track_ - ${STEMS[0]}.wav`].bytes().buffer.slice(0));
+          return out.channels[0][0] === Math.fround(1.7) && out.channels[1][1] === Math.fround(-1.42);
+        })(),
+        `read back ${decodeWav(recs[`Some_Track_ - ${STEMS[0]}.wav`].bytes().buffer.slice(0)).channels[0][0]}`);
+
+      const bitwise = [];
+      for (const s of STEMS) {
+        const name = `Some_Track_ - ${s}.wav`;
+        const cached = new Uint8Array(await (await cache.stemFile('k32', s)).arrayBuffer());
+        const written = recs[name].bytes();
+        const ch = readHeader(cached).data, wh = readHeader(written).data;
+        const a = cached.subarray(ch.offset, ch.offset + ch.size);
+        const b = written.subarray(wh.offset, wh.offset + wh.size);
+        if (!same(a, b)) bitwise.push(`${s}: data chunks differ`);
+      }
+      ok('...and the DATA CHUNK is byte-identical to the cache file it came from, so the copy is a copy  '
+        + '[entry point: the exported data bytes vs the 32f cache entry\u2019s own data bytes]',
+        bitwise.length === 0, bitwise.join('  //  ') || `${STEMS.length} data chunks, byte-identical`);
+
+      // ---- determinism: no dither anywhere on the float path ---------------
+      const again = await drive(cache, 'k32');
+      const nondet = STEMS.filter((s) => {
+        const n = `Some_Track_ - ${s}.wav`;
+        return !same(recs[n].bytes(), again.recs[n].bytes());
+      });
+      ok('...two exports of the same entry are byte-identical — the float path is NOT dithered  '
+        + '[entry point: two ExportRun.run() over one cache entry; wav.js dithers only at 16-bit]',
+        again.err === null && nondet.length === 0, nondet.length ? nondet.join(', ') : `${STEMS.length} files, identical twice`);
+
+      // ---- every sink was CLOSED exactly once on a clean run ---------------
+      const notClosed = STEMS.filter((s) => recs[`Some_Track_ - ${s}.wav`].closed !== 1);
+      const anyAborted = STEMS.filter((s) => recs[`Some_Track_ - ${s}.wav`].aborted !== 0);
+      ok('...and a SUCCESSFUL export closes every destination exactly once and aborts none  '
+        + '[the control for the cancellation assertions below: without it, "all six aborted" is satisfied by aborting always]',
+        notClosed.length === 0 && anyAborted.length === 0,
+        `${STEMS.length - notClosed.length} closed once, ${anyAborted.length} aborted`);
+
+      // ---- progress ---------------------------------------------------------
+      const windows = Math.ceil(frames / CHUNK);
+      const writes = progress.filter((p) => p.stage === 'write');
+      const reads = progress.filter((p) => p.stage === 'read');
+      ok('PROGRESS IS ONE MESSAGE PER STEM PER WINDOW, plus one for the read  '
+        + '[entry point: ExportRun onProgress — a COUNT, not a clock]',
+        reads.length === 1 && writes.length === windows * STEMS.length,
+        `${reads.length} read + ${writes.length} write, wanted 1 + ${windows} * ${STEMS.length} = ${windows * STEMS.length}`);
+      ok('...pct never goes backwards and ends at exactly 1',
+        writes.length > 0 && writes.every((p, i) => i === 0 || p.pct >= writes[i - 1].pct)
+        && writes[writes.length - 1].pct === 1,
+        writes.length ? `${writes[0].pct.toFixed(4)} .. ${writes[writes.length - 1].pct}` : 'no ticks');
+      ok('...and every tick names a file within the set it declares',
+        writes.every((p) => p.files === STEMS.length && p.file >= 1 && p.file <= STEMS.length),
+        `files=${writes.length ? writes[0].files : 0}`);
+    } catch (e) {
+      blockThrew('export — the whole path, end to end', e);
+    } finally { o.restore(); }
+  }
+
+  // --------------------------------------------------- a cancelled export
+  {
+    const o = installOpfs();
+    try {
+      const frames = 1000;
+      const cache = new StemCache(CAP, CACHE_DIR_32F, F32_TIER);
+      await cache.put('kc', { title: 'Cancelled' }, sixStems(frames));
+      const complete = 58 + frames * 8;
+
+      let ticks = 0;
+      const { result, err, recs } = await drive(cache, 'kc', {
+        onTick: (p, run) => { if (p.stage === 'write' && ++ticks === 7) run.cancel(); },
+      });
+
+      const names = STEMS.map((s) => `Cancelled - ${s}.wav`);
+      const closed = names.filter((n) => recs[n].closed !== 0);
+      const aborted = names.filter((n) => recs[n].aborted === 1);
+      /**
+       * INDEPENDENCE, and this is the assertion that makes the two below mean
+       * anything: bytes really had reached the destinations before the cancel.
+       * A cancel that fired before the first write would satisfy "nothing
+       * partial was left behind" having left nothing at all.
+       */
+      const withBytes = names.filter((n) => recs[n].bytes().length > 0);
+      const finished = names.filter((n) => recs[n].bytes().length >= complete);
+
+      ok('A CANCELLED EXPORT ABORTS EVERY DESTINATION AND CLOSES NONE  '
+        + '[entry point: EXPORT_CANCEL -> ExportRun.cancel(), checked between windows]',
+        closed.length === 0 && aborted.length === STEMS.length,
+        `${closed.length} closed, ${aborted.length} of ${STEMS.length} aborted`);
+
+      ok('...and the run really was under way when it was cancelled, so the assertion above measured something  '
+        + '[the independence check: bytes on the sinks before the cancel]',
+        withBytes.length === STEMS.length && ticks === 7,
+        `${withBytes.length} of ${STEMS.length} destinations had bytes; ${ticks} windows written`);
+
+      ok('...NO PARTIAL FILE IS LEFT: not one destination holds a whole file\u2019s worth of bytes  '
+        + `[a complete file here is 58 + ${frames} * 8 = ${complete} bytes]`,
+        finished.length === 0,
+        `largest destination held ${Math.max(...names.map((n) => recs[n].bytes().length))} of ${complete} bytes`);
+
+      ok('...and it fails by NAME, on the declared vocabulary, rather than resolving as if it had finished',
+        err instanceof ExportError && err.code === 'CANCELLED' && result === null,
+        err ? `${err.code}: ${err.message}` : 'the run RESOLVED');
+
+      /**
+       * ALL SIX ARE WRITTEN IN LOCKSTEP. Writing them one after another would
+       * have left the earlier stems COMPLETE on the user's disk after a cancel,
+       * and every assertion above would still pass for the file that happened to
+       * be open. The spread between the longest and shortest destination is what
+       * says the six advance together: at most one window apart.
+       */
+      const lens = names.map((n) => recs[n].bytes().length);
+      ok('...because the six files advance TOGETHER, never one finished at a time  '
+        + '[entry point: the interleaved write loop — at most one window of spread across the six]',
+        Math.max(...lens) - Math.min(...lens) <= CHUNK * 8,
+        `spread ${Math.max(...lens) - Math.min(...lens)} B over a ${CHUNK * 8} B window`);
+    } catch (e) {
+      blockThrew('export — a cancelled export', e);
+    } finally { o.restore(); }
+  }
+
+  // ------------------------------------------------------- every refusal
+  {
+    const o = installOpfs();
+    try {
+      const frames = 400;
+      const cache = new StemCache(CAP, CACHE_DIR_32F, F32_TIER);
+      await cache.put('kr', { title: 'Refusals' }, sixStems(frames));
+
+      const sinkRefused = await drive(cache, 'kr', {
+        exportSink: async () => { throw new Error('the user cancelled the folder dialog'); },
+      });
+      ok('A REFUSED `exportSink` IS AN ERROR, NOT A SILENT NO-OP  '
+        + '[entry point: the exportSink duty rejecting \u2014 the ordinary case is the user cancelling the dialog]',
+        sinkRefused.err instanceof ExportError && sinkRefused.err.code === 'SINK_REFUSED'
+        && /cancelled the folder dialog/.test(sinkRefused.err.message),
+        sinkRefused.err ? `${sinkRefused.err.code}: ${sinkRefused.err.message}` : 'the run RESOLVED');
+
+      const short = await drive(cache, 'kr', { dropFile: `Refusals - ${STEMS[3]}.wav` });
+      const openedAndAborted = STEMS.filter((s) => {
+        const r = short.recs[`Refusals - ${s}.wav`];
+        return r && r.aborted === 1;
+      });
+      ok('A SINK MAP THAT IS SHORT ONE STEM IS REFUSED \u2014 five of six files is a broken export, not a smaller one  '
+        + '[entry point: ExportRun.run(), the map returned by exportSink]',
+        short.err instanceof ExportError && short.err.code === 'SINK_SHORT'
+        && short.err.message.includes(STEMS[3]),
+        short.err ? `${short.err.code}: ${short.err.message}` : 'the run RESOLVED');
+      ok('...and the destinations the Host DID open are aborted, so it is not left holding files no export will finish',
+        openedAndAborted.length === STEMS.length - 1,
+        `${openedAndAborted.length} of ${STEMS.length - 1} aborted`);
+
+      const badStem = await drive(cache, 'kr', { stems: ['vocals', 'trumpet'] });
+      ok('A STEM THE SIX-STEM CONTRACT HAS NO NAME FOR IS REFUSED, naming it and the legal set',
+        badStem.err instanceof ExportError && badStem.err.code === 'BAD_STEM'
+        && /trumpet/.test(badStem.err.message) && /guitar/.test(badStem.err.message),
+        badStem.err ? `${badStem.err.code}: ${badStem.err.message}` : 'the run RESOLVED');
+
+      const badFmt = await drive(cache, 'kr', { format: { bitDepth: 16, float: false } });
+      ok('A FORMAT OTHER THAN 32-BIT FLOAT IS REFUSED BY NAME rather than silently ignored  '
+        + '[entry point: EXPORT_START { format } \u2014 E1 is DEFINED as the untouched output, so 16-bit is a different deliverable]',
+        badFmt.err instanceof ExportError && badFmt.err.code === 'BAD_FORMAT' && /16/.test(badFmt.err.message),
+        badFmt.err ? `${badFmt.err.code}: ${badFmt.err.message}` : 'the run RESOLVED');
+      const goodFmt = await drive(cache, 'kr', { format: { bitDepth: 32, float: true } });
+      ok('...while the format it DOES write is accepted, so the refusal is about the depth and not about the field',
+        goodFmt.err === null, goodFmt.err ? `${goodFmt.err.code}: ${goodFmt.err.message}` : 'accepted');
+
+      // A 16-bit entry, in the LIVE tier, asked for as a deliverable.
+      const live = new StemCache(CAP);
+      await live.put('k16', { title: 'Live copy' }, sixStems(frames));
+      const wrongTier = await drive(live, 'k16');
+      ok('A 16-BIT ENTRY IS NOT A DELIVERABLE \u2014 exporting one would present a re-quantisation as the model\u2019s own samples  '
+        + '[entry point: the manifest row\u2019s `depth`, BEFORE a single stem file is opened]',
+        wrongTier.err instanceof ExportError && wrongTier.err.code === 'WRONG_TIER'
+        && /16-bit/.test(wrongTier.err.message) && wrongTier.opens.length === 0,
+        wrongTier.err
+          ? `${wrongTier.err.code} after opening ${wrongTier.opens.length} stem file(s): ${wrongTier.err.message}`
+          : 'the run RESOLVED');
+
+      /**
+       * THE FILE'S OWN HEADER OUTRANKS THE MANIFEST ROW. A row saying 32 over
+       * bytes that are 16 is exactly the "stale but plausible" entry
+       * `shared/stemcache.js`'s header calls the worst bug this project can
+       * ship, and the manifest is the half that cannot notice.
+       */
+      const liar = await drive(cache, 'kr', {
+        entry: { ...(await cache.entry('kr')), depth: 32 },
+        openStem: async (stem) => new WavWindowReader(await live.stemFile('k16', stem)).open(),
+      });
+      ok('...and a row that says 32 over bytes that are 16 is caught by READING THE FILE\u2019S HEADER, not the row  '
+        + '[entry point: ExportRun.run() checking each opened reader against EXPORT_FORMAT]',
+        liar.err instanceof ExportError && liar.err.code === 'WRONG_TIER' && /own header/.test(liar.err.message),
+        liar.err ? `${liar.err.code}: ${liar.err.message}` : 'the run RESOLVED');
+
+      const shortFile = await drive(cache, 'kr', { entry: { ...(await cache.entry('kr')), frames: frames + 1 } });
+      ok('AN ENTRY THAT DISAGREES WITH ITSELF IS REFUSED \u2014 neither frame count can go into a header  '
+        + '[entry point: the manifest\u2019s `frames` against the stem file\u2019s own]',
+        shortFile.err instanceof ExportError && shortFile.err.code === 'READ_FAILED'
+        && shortFile.err.message.includes(String(frames)),
+        shortFile.err ? `${shortFile.err.code}: ${shortFile.err.message}` : 'the run RESOLVED');
+
+      const noEntry = await drive(cache, 'kr', { entry: null });
+      ok('A KEY THAT NAMES NOTHING IS REFUSED before a single file or destination is opened',
+        noEntry.err instanceof ExportError && noEntry.err.code === 'NO_ENTRY'
+        && noEntry.plans.length === 0 && noEntry.opens.length === 0,
+        noEntry.err
+          ? `${noEntry.err.code} after ${noEntry.opens.length} open(s) and ${noEntry.plans.length} sink call(s)`
+          : 'the run RESOLVED');
+
+      const gone = await drive(cache, 'kr', {
+        openStem: async (stem) => { if (stem === STEMS[2]) throw new Error('NotFoundError'); return new WavWindowReader(await cache.stemFile('kr', stem)).open(); },
+      });
+      ok('A STEM FILE THAT WILL NOT OPEN IS A NAMED REFUSAL, and no destination is opened for the other five  '
+        + '[entry point: openStem rejecting \u2014 the readers are all opened BEFORE the dialog]',
+        gone.err instanceof ExportError && gone.err.code === 'READ_FAILED'
+        && gone.err.message.includes(STEMS[2]) && gone.plans.length === 0,
+        gone.err ? `${gone.err.code} after ${gone.plans.length} sink call(s)` : 'the run RESOLVED');
+
+      const wrote = await drive(cache, 'kr', { sinkFailAt: 3 });
+      const closedAfterFail = STEMS.filter((s) => wrote.recs[`Refusals - ${s}.wav`].closed !== 0);
+      ok('A DESTINATION THAT REJECTS MID-WRITE IS A NAMED REFUSAL and closes nothing  '
+        + '[entry point: the WritableStream rejecting \u2014 a full disk, a folder deleted under the run]',
+        wrote.err instanceof ExportError && wrote.err.code === 'WRITE_FAILED' && closedAfterFail.length === 0,
+        wrote.err ? `${wrote.err.code}, ${closedAfterFail.length} closed` : 'the run RESOLVED');
+
+      const twice = await drive(cache, 'kr');
+      const again = await twice.run.run().then(() => null, (e) => e);
+      ok('A RUN CANNOT BE STARTED TWICE \u2014 two runs would write windows into each other\u2019s destinations',
+        twice.err === null && again instanceof ExportError && again.code === 'BUSY',
+        again ? `${again.code}: ${again.message}` : 'the second run RESOLVED');
+    } catch (e) {
+      blockThrew('export — every refusal', e);
+    } finally { o.restore(); }
+  }
+
+  // -------------------------------------- the memory claim, MEASURED
+  /**
+   * PEAK RESIDENT DOES NOT SCALE WITH TRACK LENGTH. This is U1's whole reason
+   * and `WavWindowReader`'s, and it is measured on the reads the shim RECORDS
+   * rather than argued from the shape of the code — a reader that quietly
+   * slurped each file would satisfy every sample assertion above.
+   *
+   * THE ESTIMATOR IS TAKEN TWICE, AT TWO TRACK LENGTHS. The claim is "does not
+   * scale", so one measurement cannot carry it: it would be a constant the test
+   * chose for itself. 500 frames and 2000 frames, same window, same numbers.
+   */
+  {
+    const o = installOpfs();
+    try {
+      /** Where the audio starts in a 32f stereo file, DERIVED rather than typed. */
+      const DATA_AT = readHeader(new Uint8Array(encodeWav(
+        [new Float32Array(1), new Float32Array(1)], { sampleRate: SR, bitDepth: 32, float: true },
+      ))).data.offset;
+      const WINDOW = 128;
+      const readsFor = async (frames) => {
+        const cache = new StemCache(CAP, CACHE_DIR_32F, F32_TIER);
+        await cache.put(`km${frames}`, { title: `M${frames}` }, sixStems(frames));
+        const before = o.reads.length;
+        const r = await drive(cache, `km${frames}`, { chunkFrames: WINDOW });
+        const mine = o.reads.slice(before).filter((x) => x.name.startsWith(`km${frames}.`));
+        const audio = mine.filter((x) => x.at >= DATA_AT);
+        return {
+          err: r.err,
+          biggest: Math.max(...mine.map((x) => x.bytes)),
+          audioBytes: audio.reduce((a, x) => a + x.bytes, 0),
+          audioReads: audio.length,
+        };
+      };
+      const a = await readsFor(500);
+      const b = await readsFor(2000);
+      ok('THE BIGGEST SINGLE READ IS ONE WINDOW, AND IT DOES NOT GROW WITH THE TRACK  '
+        + `[entry point: WavWindowReader.read over the OPFS shim with its byte ranges recorded; ${500} frames vs ${2000}]`,
+        a.err === null && b.err === null && a.biggest === b.biggest && b.biggest === WINDOW * 8,
+        `biggest read ${a.biggest} B at 500 frames, ${b.biggest} B at 2000 — one ${WINDOW}-frame stereo 32f window is ${WINDOW * 8} B`);
+
+      ok('...and the audio is read EXACTLY ONCE end to end, so that number is not small because something was re-read  '
+        + '[the control: a reader that halved its window and re-read the overlap would pass the assertion above]',
+        b.audioBytes === STEMS.length * 2000 * 8 && a.audioBytes === STEMS.length * 500 * 8,
+        `${b.audioBytes} B read for ${STEMS.length} x 2000 frames x 8 B = ${STEMS.length * 2000 * 8} B, `
+        + `over ${b.audioReads} reads`);
+
+      ok('...and the read COUNT scales while the read SIZE does not, which is what "windowed" means  '
+        + '[500 frames vs 2000 at a 128-frame window: 4 windows per stem vs 16]',
+        b.audioReads === Math.ceil(2000 / WINDOW) * STEMS.length && a.audioReads === Math.ceil(500 / WINDOW) * STEMS.length,
+        `${a.audioReads} reads at 500 frames, ${b.audioReads} at 2000`);
+
+      ok('...while `StemCache.get()` takes each stem WHOLE, which is why the export does not call it  '
+        + '[the contrast that gives the numbers above a scale: get() decodes all six stems whole, ~508 MB at four minutes]',
+        await (async () => {
+          const cache = new StemCache(CAP, CACHE_DIR_32F, F32_TIER);
+          await cache.put('kg', { title: 'G' }, sixStems(500));
+          const before = o.reads.length;
+          await cache.get('kg');
+          const mine = o.reads.slice(before).filter((x) => x.name.startsWith('kg.'));
+          return mine.length === STEMS.length && mine.every((x) => x.bytes >= DATA_AT + 500 * 8);
+        })(),
+        `get() reads ${STEMS.length} whole files; the export reads ${b.audioReads / STEMS.length} windows per stem`);
+    } catch (e) {
+      blockThrew('export — the memory claim', e);
+    } finally { o.restore(); }
+  }
+
+  // ---------------------------------------- the closed error vocabulary (#29)
+  /**
+   * `console.error` IS SWAPPED FOR THE ONE CALL and put back before the `ok()`
+   * that reads the result \u2014 never around the block. `ok()` reports a failure
+   * through `console.log`, but a capture that spanned the assertions would still
+   * swallow anything else this file wants to say, and the shape is the one
+   * `ui/dev/selftest.mjs` established for `checkArmCode` after a capture around
+   * the block turned seven mutations green.
+   */
+  {
+    const say = (code, where) => {
+      const captured = [];
+      const real = console.error;
+      console.error = (m) => captured.push(String(m));
+      let out;
+      try { out = checkExportCode(code, where); } finally { console.error = real; }
+      return { out, captured };
+    };
+
+    let cried = 0;
+    for (const c of EXPORT_CODES) { const r = say(c); cried += r.captured.length; }
+    ok('EVERY MEMBER OF THE EXPORT VOCABULARY PASSES SILENTLY  '
+      + `[entry point: checkExportCode over all ${EXPORT_CODES.size} members]`,
+      cried === 0, `${cried} line(s) from ${EXPORT_CODES.size} legal codes`);
+
+    const bad = say('EXPORT_FAILED', 'EXPORT_ERROR from the Host');
+    ok('AN UNKNOWN CODE IS REFUSED rather than accepted in silence \u2014 #29\u2019s lesson, applied before it can be repeated',
+      typeof bad.out === 'string' && bad.captured.length === 1,
+      `${bad.captured.length} line(s), returned ${typeof bad.out}`);
+    const logged = bad.captured[0] || '';
+    const absent = [...EXPORT_CODES].filter((c) => !logged.includes(c));
+    ok('...and the message names the offending value, the entry point, and THE WHOLE LEGAL SET, so it is a repair instruction',
+      logged.includes('EXPORT_FAILED') && logged.includes('EXPORT_ERROR from the Host') && absent.length === 0,
+      absent.length ? `missing ${absent.join(', ')}` : `all ${EXPORT_CODES.size} named`);
+
+    const exportSrc = strip(readFileSync(new URL('./extension/engine/export.js', import.meta.url), 'utf8'));
+    const thrown = [...exportSrc.matchAll(/new ExportError\('(\w+)'/g)].map((m) => m[1]);
+    const undeclared = [...new Set(thrown)].filter((c) => !EXPORT_CODES.has(c));
+    ok('EVERY CODE THE RUNNER CAN THROW IS A DECLARED MEMBER  '
+      + '[entry point: extension/engine/export.js read as text, comments stripped \u2014 a typo\u2019d code no test happened to reach]',
+      thrown.length > 5 && undeclared.length === 0,
+      thrown.length === 0 ? 'this scan found no throws at all, so it inspected nothing' : undeclared.length
+        ? `undeclared: ${undeclared.join(', ')}` : `${new Set(thrown).size} distinct codes thrown, all declared`);
+
+    const engineSrc = strip(readFileSync(new URL('./extension/offscreen/engine.js', import.meta.url), 'utf8'));
+    const emitted = [...engineSrc.matchAll(/exportFailed\([^,]+,\s*'(\w+)'/g)].map((m) => m[1]);
+    const dead = [...EXPORT_CODES].filter((c) => !thrown.includes(c) && !emitted.includes(c));
+    ok('...and every declared member is REACHABLE, so the vocabulary cannot grow a code nothing can send',
+      emitted.length > 0 && dead.length === 0,
+      dead.length ? `declared but unreachable: ${dead.join(', ')}` : `${EXPORT_CODES.size} members, all reachable`);
+
+    /**
+     * ...AND THE ENGINE REALLY CALLS THE CHECK. `checkExportCode` working proves
+     * nothing about anything calling it \u2014 the same gap this file records for
+     * `assertHost`, where review deleted the module-scope call and watched the
+     * whole tree stay green.
+     */
+    const calls = (engineSrc.match(/\bcheckExportCode\s*\(/g) || []).length;
+    const sends = (engineSrc.match(/type: 'EXPORT_ERROR'/g) || []).length;
+    ok('...AND `offscreen/engine.js` CHECKS EVERY CODE IT SENDS: one checkExportCode() per EXPORT_ERROR, in the same function  '
+      + '[entry point: extension/offscreen/engine.js read as text, comments stripped]',
+      calls === 1 && sends === 1 && /import \{[^}]*checkExportCode[^}]*\} from '\.\.\/engine\/export\.js'/.test(engineSrc),
+      `${calls} check(s), ${sends} EXPORT_ERROR send(s)`);
+
+    ok('...and the engine really wires `EXPORT_START` and `EXPORT_CANCEL` to the runner  '
+      + '[entry point: the case labels and the ExportRun construction in offscreen/engine.js]',
+      engineSrc.includes("case 'EXPORT_START'") && engineSrc.includes("case 'EXPORT_CANCEL'")
+      && /new ExportRun\(/.test(engineSrc) && /host\.exportSink\(/.test(engineSrc)
+      && /\.cancel\(\)/.test(engineSrc),
+      'EXPORT_START, EXPORT_CANCEL, new ExportRun, host.exportSink, cancel()');
+
+    /**
+     * NOTHING THE DECK DID IS APPLIED, asserted STRUCTURALLY because there is no
+     * fader to move in a Node suite. The import list is the whole surface: a
+     * gain, a mute or a crossfader position could only reach this path through
+     * one of these two modules, and neither has one.
+     */
+    const imports = [...exportSrc.matchAll(/from '([^']+)'/g)].map((m) => m[1]).sort();
+    ok('THE DELIVERABLE PATH IMPORTS NO MIXER, NO DECK AND NO WORKLET \u2014 there is nowhere for a fader to be applied  '
+      + '[entry point: extension/engine/export.js\u2019s own import list; a Bounce is a different deliverable, upstream #17]',
+      imports.length === 2 && imports[0] === '../shared/config.js' && imports[1] === '../shared/wav.js',
+      imports.join(', ') || 'this scan read no imports at all');
+  }
+
+  // ------------------------------------------- the reader, on its own terms
+  {
+    const frames = 777;
+    const l = noise(frames, 91), r = noise(frames, 93);
+    l[5] = 2.5;
+    const buf = encodeWav([l, r], { sampleRate: SR, bitDepth: 32, float: true });
+    const rd = new WavWindowReader(new Blob([buf]));
+    const opened = await rd.open();
+    ok('THE WINDOWED READER REPORTS THE FILE\u2019S OWN FORMAT  '
+      + '[entry point: WavWindowReader.open() over a Blob \u2014 the read half of the memory claim]',
+      opened === rd && rd.frames === frames && rd.sampleRate === SR && rd.bitDepth === 32
+      && rd.float === true && rd.channels === 2,
+      `${rd.frames} frames, ${rd.bitDepth}-bit ${rd.float ? 'float' : 'fixed'}, ${rd.sampleRate} Hz, ${rd.channels} ch`);
+
+    const L = new Float32Array(64), R = new Float32Array(64);
+    await rd.read(100, 64, [L, R]);
+    let off = 0;
+    for (let i = 0; i < 64; i++) if (L[i] !== l[100 + i] || R[i] !== r[100 + i]) { off++; }
+    ok('...and a window in the MIDDLE of the file is the same samples `decodeWav` reads there  '
+      + '[entry point: WavWindowReader.read(from, count) vs decodeWav over the whole file]',
+      off === 0, `${off} of 64 frames differ at offset 100`);
+
+    const noOpen = new WavWindowReader(new Blob([buf]));
+    let threwUnopened = null;
+    try { noOpen.frames; noOpen.sampleRate; } catch (e) { threwUnopened = e.message; }
+    ok('...a reader that has read no header REPORTS NOTHING rather than a default  '
+      + '[fail when you cannot look: a defaulted format is agreement that was never checked]',
+      threwUnopened !== null && /open\(\)/.test(threwUnopened), threwUnopened || 'it answered anyway');
+
+    let past = null;
+    try { await rd.read(frames - 10, 64, [L, R]); } catch (e) { past = e.message; }
+    ok('...and a read past the end is REFUSED, naming both counts, rather than coming back short  '
+      + '[entry point: WavWindowReader.read \u2014 a short read taken for a complete one writes a file whose header over-promises]',
+      past !== null && past.includes(String(frames)), past || 'it returned a short read');
+
+    let planes = null;
+    try { await rd.read(0, 64, [L]); } catch (e) { planes = e.message; }
+    ok('...and a wrong number of planes is refused rather than filling half a window',
+      planes !== null && /1 planes/.test(planes), planes || 'it accepted one plane for a stereo file');
   }
 }
 
@@ -6329,7 +7229,12 @@ if (group('host')) {
    */
   const DECLARED_AHEAD_OF_ITS_CONSUMER = Object.freeze({
     sourceBytes: 'the ahead-of-time separation runner, which reads a Source that is a file',
-    exportSink: 'the export path, which opens one writable per stem of a deliverable',
+    // `exportSink` WAS HERE, and U11 (#42) deleted it in the same commit as its
+    // caller, which is the discipline the assertion below exists to enforce:
+    // `offscreen/engine.js`'s EXPORT_START case now calls `host.exportSink(plan)`,
+    // so leaving the line would have gone on exempting a duty from the check
+    // that says every declared duty is reached for. The red that named it —
+    // "exportSink HAS a caller now" — was watched before the line came out.
   });
   const ahead = Object.keys(DECLARED_AHEAD_OF_ITS_CONSUMER);
   const unreached = duties.filter((k) => !reached.includes(k) && !ahead.includes(k));

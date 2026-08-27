@@ -611,6 +611,49 @@ export class StemCache {
     return (await this.list()).some((e) => e.key === key);
   }
 
+  /**
+   * The manifest entry for one key, or null. `has()` answers whether; this
+   * answers WHAT — `frames`, `depth`, `geometry`, `title` — and an export needs
+   * all four before it opens a single file: the frame count goes into a RIFF
+   * header that is final on the first chunk, and the depth is what says whether
+   * this entry is the untouched 32-bit-float model output or a 16-bit listen
+   * copy that would be a re-quantisation dressed as a deliverable.
+   */
+  async entry(key) {
+    return (await this.list()).find((e) => e.key === key) || null;
+  }
+
+  /**
+   * ONE STEM FILE, UNDECODED — the `File` the platform holds, not its samples.
+   *
+   * THIS IS NOT A SMALLER `get()`, IT IS A DIFFERENT SHAPE. `get()` decodes all
+   * six stems whole (~508 MB for four minutes) because a deck genuinely needs
+   * the whole track resident. An export needs each frame exactly once and in
+   * order, so it takes the file and reads windows out of it with
+   * `WavWindowReader`, and its peak stays flat as the track gets longer. Calling
+   * `get()` from the export path would have made U1's streaming writer pointless
+   * — the ceiling would simply have moved to the read side.
+   *
+   * IT DOES NOT TOUCH `usedAt`, and that is deliberate rather than an omission:
+   * `get()` touches it because playing a track is evidence you want to keep it,
+   * while an export is a one-shot read that says nothing about what to keep. The
+   * protection an export needs is a PIN for as long as it runs, which is
+   * `planEviction`'s pin set and belongs to whoever owns the run.
+   *
+   * REJECTS ON A MISSING FILE rather than answering null, because the two
+   * callers want opposite things from that case: `get()` treats a missing file
+   * as a lying manifest entry and deletes the whole entry, and an export must
+   * NOT delete the thing it was asked to write out. The rejection carries the
+   * platform's own NotFoundError.
+   */
+  async stemFile(key, stem) {
+    if (!STEMS.includes(stem)) {
+      throw new Error(`stem cache: ${JSON.stringify(stem)} is not one of the ${STEMS.length} stems — ${STEMS.join(', ')}`);
+    }
+    const d = await dir(this.dirName);
+    return (await d.getFileHandle(`${key}.${stem}.wav`)).getFile();
+  }
+
   /** Total bytes tracked by the manifest. */
   async size() {
     return (await this.list()).reduce((a, e) => a + e.bytes, 0);

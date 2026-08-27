@@ -923,11 +923,25 @@ Different rules — see §5.3. **Do not soft-clip exported stems.** Export 32-bi
 
 Reference: [`docs/snippets/wav.js`](./snippets/wav.js).
 
-> Stem Splitter Live no longer writes files for the user. `shared/wav.js` survives as the
-> STEM CACHE's on-disk format in OPFS, and §5.4's byte map is what
-> `node test.js wav` round-trips. §5.1–§5.3 are the offline-export policy and are
-> retained as the reasoning behind 32-bit float, not as a description of a
-> feature that exists.
+> **The Chrome extension writes no files for the user, and the UNIT now has an
+> export path anyway.** Those are two different statements and the difference is
+> the Host seam. `extension/engine/export.js` (E1, upstream #42) reads the six
+> untouched model outputs out of the 32-bit-float cache tier and streams them
+> into whatever writables a Host's `exportSink` duty hands back; this build's
+> Host rejects that duty, because the extension declares no `downloads`
+> permission and its offscreen document could not reach one. So §5.1–§5.3 are
+> the policy the export path IMPLEMENTS, not retained reasoning — and §5.4's
+> byte map is still what `node test.js window` round-trips and what the STEM
+> CACHE writes to OPFS.
+>
+> **WHAT "EXPORT" MEANS HERE, said once so the term is not read as having been
+> redefined.** Export is the six model outputs — `STEMS` order, 32-bit float,
+> 44 100 Hz, stereo — **untouched BY THE DECK**: no faders, no mute or solo, no
+> crossfader, no transpose, no speed. A fader pulled to −20 dB before an export
+> changes nothing in the written file. The other deliverable — what you are
+> actually hearing, everything baked in — is a **BOUNCE**, it is a different
+> thing for a different person, and it is not this (upstream #17). Never call
+> raw stems "the mix".
 
 ### 5.1 Bit depth: 32-bit IEEE float (default), 24-bit PCM (option), 16-bit PCM (compatibility)
 

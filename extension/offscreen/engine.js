@@ -60,17 +60,18 @@
 
 import { SR, SEGMENT, STEMS, MODEL, OPFS_DIR, OPFS_DEV_INPUT, OPFS_LIVE_TAP,
   DECKS, DECK_DEFAULT, XF_CURVES, XF_CURVE_DEFAULT, XF_POSITION_DEFAULT, DUAL_MASTER_TRIM_DB,
-  XF_TARGETS, RING_FRAMES, STEM_CACHE_MAX_BYTES } from '../shared/config.js';
+  XF_TARGETS, RING_FRAMES, STEM_CACHE_MAX_BYTES, STEM_CACHE_32F_MAX_BYTES } from '../shared/config.js';
 import { RingConsumer, ringByteLength } from '../shared/ring.js';
 import { loadModel } from '../shared/modelcache.js';
-import { encodeWav, decodeWav } from '../shared/wav.js';
+import { encodeWav, decodeWav, WavWindowReader } from '../shared/wav.js';
 import { GpuScheduler } from '../engine/scheduler.js';
 import { masterTrimDb } from '../engine/mixer.js';
 import { MasterBus } from './master.js';
 import { Deck } from './deck.js';
 import { CachedDeck, resumeSeek } from './cacheddeck.js';
 import { StemCache, CacheWriter, cacheKey, videoIdFromUrl,
-  primeRefusal, commitRefusal } from '../shared/stemcache.js';
+  primeRefusal, commitRefusal, CACHE_DIR_32F } from '../shared/stemcache.js';
+import { ExportRun, ExportError, checkExportCode } from '../engine/export.js';
 // The transpose's accepted range, imported for the REFUSAL MESSAGE and nothing
 // else. A hard-coded "[-6, +6]" in a log line is a second copy of a contract
 // that lives in engine/pitch.js, and the day the range moves it becomes a log
@@ -199,6 +200,31 @@ function fail(stage, err) {
   if (stage === 'model') { state.model.status = 'error'; state.model.error = message; }
   else { state.job.status = 'error'; state.job.error = message; state.job.stage = stage; }
   push(true);
+}
+
+/**
+ * THE ONE PLACE AN `EXPORT_ERROR` LEAVES THIS ENGINE, and the only place its
+ * code is checked.
+ *
+ * `code` is drawn from a CLOSED VOCABULARY the unit owns (`engine/export.js`
+ * EXPORT_CODES), and `checkExportCode` is what says so out loud at the moment it
+ * is wrong. That is #29's lesson applied before it can be repeated: `ARM_CODES`
+ * was a closed set of eight that nothing ever checked, and a Host that invented
+ * a plausible-looking member got an undismissable banner with a dead Restart
+ * button and nothing red anywhere.
+ *
+ * IT DOES NOT USE `fail()`. `fail()` writes `state.job` and pushes the whole
+ * snapshot; the export vocabulary rides its own message precisely so a run's
+ * progress and its failures do not go through the coalescing snapshot push.
+ *
+ * The check does not throw and does not change what is sent: the user's export
+ * has already failed, and replacing their problem with ours about a spelling
+ * would take the first one off the screen.
+ */
+function exportFailed(deckId, code, message) {
+  checkExportCode(code, `EXPORT_ERROR on deck ${deckId}`);
+  log(`export failed [${code}] ${message}`);
+  send({ type: 'EXPORT_ERROR', deck: deckId, code, message });
 }
 
 // ------------------------------------------------------- shared model loader
@@ -511,6 +537,38 @@ const deckLoaded = (d) => !!d && (d.status === 'recording' ||
  */
 const cache = new StemCache(STEM_CACHE_MAX_BYTES);
 
+/**
+ * THE 32-BIT-FLOAT TIER — the DELIVERABLE's cache, and a different thing from
+ * the one above with a different lifetime, its own directory and its own cap.
+ * `shared/config.js` STEM_CACHE_32F_MAX_BYTES carries the arithmetic; the short
+ * version is that a File source's working set is ALSO the export source, and
+ * evicting it mid-export is catastrophic in a way evicting a prepared listen is
+ * not, so the two must not compete for one budget.
+ *
+ * NOTHING IN THIS BUILD WRITES TO IT. The ahead-of-time separation runner is the
+ * writer and it is a later slice; this engine only ever READS the tier, through
+ * `EXPORT_START`. Constructing it here anyway is what makes the export path
+ * complete for a second Host, which supplies `exportSink` and drives the same
+ * message.
+ *
+ * WHEN A WRITER ARRIVES IT MUST PIN THE EXPORT'S KEY. `put()` calls `evict()`
+ * after writing, `planEviction` takes a pin SET, and the key of the run in
+ * flight is `exportRun.entry.key` right here. There is deliberately no pin set
+ * yet: nothing in this file calls `cache32.evict()`, and a pin nobody reads is a
+ * variable that looks like a guarantee.
+ */
+const cache32 = new StemCache(STEM_CACHE_32F_MAX_BYTES, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
+
+/**
+ * THE ONE EXPORT IN FLIGHT, or null. One at a time, on purpose: two runs would
+ * interleave windows into each other's sinks, and `EXPORT_CANCEL` carries no way
+ * to say WHICH run it means. A second `EXPORT_START` is refused by name (`BUSY`)
+ * rather than queued, because a queued export whose folder dialog opened ten
+ * minutes after the gesture is not the export the user asked for.
+ * @type {ExportRun|null}
+ */
+let exportRun = null;
+
 /** 'A' | 'B'. An absent deck field means A, the single-deck engine's convention. */
 const normalizeDeckId = (id) => (DECKS.includes(id) ? id : DECK_DEFAULT);
 
@@ -611,11 +669,18 @@ async function startCached(d, t) {
   /**
    * THE CAPTURE GOES TO `live` MODE EVEN THOUGH NOTHING WILL READ IT, and this
    * is not cosmetic. In `export` mode `deck.js` pushes every capture block into
-   * `blocks` and keeps it — that is what a later EXPORT_START drains. Cached
-   * playback consumes nothing, so those blocks would accumulate for the whole
-   * track: ~127 MB across six minutes, retained, for audio no one will ever
-   * look at. In `live` mode the capture writes into the fixed-size ring instead
-   * and nothing grows.
+   * `blocks` and keeps it — that is what `drainCaptured()` returns, and its one
+   * caller in this tree is `DEV_DUMP`. Cached playback consumes nothing, so
+   * those blocks would accumulate for the whole track: ~127 MB across six
+   * minutes, retained, for audio no one will ever look at. In `live` mode the
+   * capture writes into the fixed-size ring instead and nothing grows.
+   *
+   * `EXPORT_START` DOES NOT READ THIS, and the sentence that said it did stood
+   * here for a long time describing a path that had been removed. An export
+   * reads the 32-bit-float CACHE ENTRY — the untouched model outputs — never a
+   * deck's captured input, which is the mix and not the stems. `Deck.mode`'s
+   * `'export'` name is about the drain discipline in `deck.js` and has meant
+   * nothing about exporting since.
    *
    * The capture stays ATTACHED on purpose: it is what holds Chrome's tab mute,
    * so the page's own audio cannot play underneath the stems.
@@ -879,9 +944,11 @@ async function startLive(d) {
   if (t && pageVideo[d.id] && await cache.has(t.key) && await startCached(d, t)) return;
 
   d.mode = 'live';
-  // Anything already drained belongs to an export that is not going to happen.
-  // Drop it rather than let a later EXPORT_START ship a stale fragment (QA-01 is
-  // the same class of bug).
+  // Anything already captured belongs to a prime that is not going to happen.
+  // Drop it rather than let a later `DEV_DUMP` write out a stale fragment
+  // (QA-01 is the same class of bug). This used to name EXPORT_START, from the
+  // removed job path; an export reads the 32f cache entry and never touches
+  // `blocks`.
   d.blocks = [];
   d.capturedFrames = 0;
   const why = beginPrime(d, t);
@@ -1227,6 +1294,83 @@ async function handle(m) {
         await cache.clear();
         log('stem cache cleared');
         return void send({ type: 'CACHE_STATE', ...(await cache.report()) });
+
+      /**
+       * E1 — THE DELIVERABLE. The six untouched model outputs out of the 32f
+       * tier, through `WavStreamEncoder`, into the writables the Host's
+       * `exportSink` hands back. `engine/export.js` owns the run; this case owns
+       * the three things that are not the run's business — which cache tier the
+       * key names, where a frame comes from, and how a failure reaches the deck.
+       *
+       * `EXPORT_START { deck?, key, stems?, format? }`. The KEY is the caller's,
+       * not a videoId: the entry was filed under whatever identity its Source
+       * had (a content hash for a file, a video id for a tab), and the export
+       * does not re-derive it. Re-deriving would be a second chance to look at
+       * the wrong entry, which `shared/stemcache.js`'s header prices as the
+       * worst failure this project can ship.
+       *
+       * IT IS NOT AWAITED HERE. `handle()`'s own catch reports through `fail()`,
+       * which writes `state.job` — the wrong surface for this, because progress
+       * and completion ride their own messages (a per-window tick through
+       * `push()` would be coalesced away or would drag the whole snapshot
+       * hundreds of times a track). So the run reports through `send` on the
+       * export vocabulary, and every exit from it is one of the three messages
+       * below.
+       */
+      case 'EXPORT_START': {
+        const deckId = normalizeDeckId(m.deck);
+        if (exportRun) {
+          return void exportFailed(deckId, 'BUSY',
+            'an export is already running — stop it before starting another, or two runs write windows into '
+            + "each other's files");
+        }
+        const key = String(m.key || '');
+        // The lookup itself is guarded, so a broken storage layer reports as an
+        // export failure rather than falling through to `handle()`'s catch,
+        // which writes `state.job` — a surface nothing renders and no export
+        // reads.
+        let entry;
+        try { entry = await cache32.entry(key); } catch (e) {
+          return void exportFailed(deckId, 'READ_FAILED',
+            `the ${CACHE_DIR_32F} manifest could not be read — ${String((e && e.message) || e)}`);
+        }
+        if (!entry) {
+          return void exportFailed(deckId, 'NO_ENTRY',
+            `nothing is cached under ${JSON.stringify(key)} in the ${CACHE_DIR_32F} tier — separate the track first`);
+        }
+        const run = new ExportRun({
+          entry,
+          stems: Array.isArray(m.stems) ? m.stems : undefined,
+          format: m.format || null,
+          /**
+           * ONE STEM, WINDOWED. `cache32.get(key)` would decode all six whole —
+           * ~508 MB for four minutes — and would put back exactly the ceiling
+           * the streaming writer exists to remove.
+           */
+          openStem: async (stem) => new WavWindowReader(await cache32.stemFile(key, stem)).open(),
+          exportSink: (plan) => host.exportSink(plan),
+          onProgress: (p) => send({ type: 'EXPORT_PROGRESS', deck: deckId, ...p }),
+        });
+        exportRun = run;
+        log(`export ${key}: ${entry.frames} frames`);
+        run.run().then(
+          (r) => {
+            log(`export done: ${r.files.length} file(s), ${r.bytes} bytes`);
+            send({ type: 'EXPORT_DONE', deck: deckId, files: r.files, bytes: r.bytes });
+          },
+          (e) => exportFailed(deckId, e instanceof ExportError ? e.code : 'WRITE_FAILED', String((e && e.message) || e)),
+        ).finally(() => { if (exportRun === run) exportRun = null; });
+        return;
+      }
+
+      /**
+       * A flag, checked between windows. There is no way to abandon a write
+       * mid-window that leaves a file a reader can align, and there is nothing
+       * to gain: a window is 4 s of one stem.
+       */
+      case 'EXPORT_CANCEL':
+        if (exportRun) { exportRun.cancel(); log('export cancel requested'); }
+        return;
 
       case 'SET_HOP': {
         // GLOBAL, no deck field. Two decks on different hops emit audio seconds
