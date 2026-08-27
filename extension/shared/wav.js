@@ -12,6 +12,17 @@
 // does not prove the composition around it — the header, the chunk boundaries,
 // the RIFF pad byte and the frame accounting — is right.
 //
+// THE SHARING IS LOAD-BEARING FOR COVERAGE, NOT ONLY FOR TIDINESS, and this is
+// the sentence that says so. `writeFrames` holds a deliberate asymmetry: the
+// float path writes `setFloat32` RAW while every fixed-point path clamps, because
+// htdemucs outputs are not bounded to ±1.0 and 32f export is defined as the
+// untouched model output (AUDIO.md §5.3). group('window') is what asserts that
+// asymmetry, and it reaches the streaming writers ONLY because they run this same
+// loop. Give any writer its own conversion loop — a plausible optimisation, since
+// a chunk knows its own length — and the asymmetry stops being tested for that
+// writer, with nothing anywhere going red to say so. If you split the loop, move
+// the coverage with it.
+//
 // WHY STREAMING EXISTS. Six 32f stems of a four-minute track are ~508 MB, and
 // `encodeWav` allocates the entire file before it writes a byte
 // (`new ArrayBuffer(8 + riffSize)`). That is the ceiling ARCHITECTURE R6 names

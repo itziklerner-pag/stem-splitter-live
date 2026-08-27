@@ -14,7 +14,11 @@
  * header that lies about its filters is how a run ends up asserting nothing
  * while reporting success. Keep this list and `if (group('…'))` in step.
  *
- *   window   the export window is upstream Demucs' triangular transition weight
+ *   window   the export window is upstream Demucs' triangular transition weight,
+ *            AND THE WAV BYTE MAP: encodeWav/decodeWav round-trip at 32f, 24-bit
+ *            and 16-bit, the header field offsets, and the sample-conversion loop
+ *            that every writer in shared/wav.js shares — which is what makes this
+ *            group the coverage the wavstream group's mutation note defers to
  *   wavstream  U1's streaming WAV writers: the chunked and the unknown-length
  *            OPFS writer emit exactly the bytes encodeWav emits, the header is
  *            final before any audio is written, and a wrong frame count throws
@@ -331,7 +335,7 @@ if (group('window')) {
 
 // ===========================================================================
 /**
- * WATCHED RED BY MUTATION — all fifteen. Each mutation below was applied to a
+ * WATCHED RED BY MUTATION — all eighteen. Each mutation below was applied to a
  * green tree, `node test.js wavstream` was run, the red was read, and the file
  * was restored. AGENTS.md:118: "an assertion never observed failing is one whose
  * ability to fail is an assumption."
@@ -373,6 +377,27 @@ if (group('window')) {
  *                   -> 1 red: the length known before any audio is written
  *   M12 wav.js:301  pipeTo closes the sink on a refusal instead of aborting it
  *                   -> 1 red: pipeTo aborts rather than closes
+ *
+ * M13-M15 CLOSE A COVERAGE HOLE AN ADVERSARIAL REVIEW FOUND, and M13 is the
+ * review's own mutation, reproduced here because it is the one this suite used
+ * to pass. WavSyncWriter was asserted only at 32f — but it exists for the cache
+ * write, and the cache writes 16-bit (stemcache.js put()). `fact` is present only
+ * for float, so every patch offset past the fmt chunk differs between the two
+ * formats, and 32f stereo blockAlign 8 is always even so close()'s pad byte was
+ * unreachable as well.
+ *
+ *   M13 wav.js:78   dataSizeAt is wrong for PCM ONLY, float left untouched:
+ *                   `fmt.headerSize - 4 + (fmt.factSize ? 0 : 2)`
+ *                   -> 2 red: the 16-bit sync round trip, the odd-payload pad.
+ *                   BEFORE these two assertions existed this mutation left the
+ *                   whole group green while every 16-bit and 24-bit cache file
+ *                   carried a data-chunk size of zero.
+ *   M14 wav.js:379  close() never writes the pad byte for an odd payload
+ *                   -> 1 red: the odd-payload pad
+ *   M15 wav.js:134  the float path clamps to ±1.0 like the fixed-point paths
+ *                   -> 1 red here (the streamed out-of-range read-back), and 2
+ *                   more in group('window') — which is the transitive coverage
+ *                   the note above describes, observed rather than assumed
  */
 if (group('wavstream')) {
   head('wavstream — the streaming writers emit exactly the bytes encodeWav emits (U1)');
@@ -421,7 +446,11 @@ if (group('wavstream')) {
   // the last chunk is short — the arithmetic a whole-buffer encoder never does.
   const N = 5000, CHUNK = 997;
   const l = noise(N, 3), r = noise(N, 4);
-  l[10] = 1.7; r[11] = -1.42;   // out of range on purpose: 32f must not clip (AUDIO.md §5.3)
+  // Out of range on purpose, and ASSERTED below rather than merely commented:
+  // 32f must not clip (AUDIO.md §5.3). Byte identity alone cannot carry that
+  // claim — both sides of the comparison get identical treatment — so the
+  // streamed bytes are decoded and the two samples are read back.
+  l[10] = 1.7; r[11] = -1.42;
 
   // -- byte identity, the assertion the slice rests on -----------------------
   {
@@ -431,6 +460,17 @@ if (group('wavstream')) {
     ok('32f: the streamed file is byte-identical to encodeWav  '
       + '[entry point: WavStreamEncoder.header/chunk/end over 6 chunks]',
       same(whole, streamed), `${whole.length} bytes, ${firstDiff(whole, streamed)}`);
+
+    // The float path writes setFloat32 RAW while every fixed-point path clamps
+    // (wav.js writeFrames). htdemucs outputs are not bounded to ±1.0 and 32f
+    // export is defined as the untouched model output, so a clamp appearing on
+    // the streaming path is a silent quality regression in the deliverable.
+    const back = decodeWav(streamed.buffer);
+    ok('32f: the STREAMED bytes preserve out-of-range samples — no clip, no rescale  '
+      + '[entry point: decodeWav over WavStreamEncoder output, not over encodeWav output]',
+      back.channels[0][10] === Math.fround(1.7) && back.channels[1][11] === Math.fround(-1.42)
+      && back.bitDepth === 32 && back.float === true,
+      `read back ${back.channels[0][10]} and ${back.channels[1][11]}`);
   }
 
   {
@@ -571,6 +611,47 @@ if (group('wavstream')) {
       + '[entry point: WavSyncWriter.append/close over a FileSystemSyncAccessHandle]',
       same(whole, h.bytes) && res.frames === N && h.flushed === 1 && h.closes === 1,
       `${h.bytes.length} bytes, ${res.frames} frames, ${firstDiff(whole, h.bytes)}`);
+  }
+
+  {
+    // 16-BIT IS THE SHIPPED CACHE FORMAT (stemcache.js put()), and the 32f case
+    // above structurally cannot see a PCM-only header bug: `fact` is present only
+    // for float, so every patch offset past the fmt chunk differs between the two.
+    // A dataSizeAt() that is wrong for PCM alone leaves the data-chunk size at
+    // zero in every cache file and passes a float-only suite.
+    const opts = { sampleRate: SR, bitDepth: 16, float: false, dither: false };
+    const src = [Float32Array.from(l, (v) => Math.max(-1, Math.min(0.999, v))),
+                 Float32Array.from(r, (v) => Math.max(-1, Math.min(0.999, v)))];
+    const h = new FakeSyncHandle();
+    const w = new WavSyncWriter(h, 2, opts);
+    for (let o = 0; o < N; o += CHUNK) {
+      const len = Math.min(CHUNK, N - o);
+      w.append([src[0].subarray(o, o + len), src[1].subarray(o, o + len)], len);
+    }
+    const res = w.close();
+    const whole = new Uint8Array(encodeWav(src, opts));
+    ok('WavSyncWriter at 16-bit — THE FORMAT THE CACHE ACTUALLY WRITES — lands encodeWav’s exact bytes  '
+      + '[entry point: WavSyncWriter.close patching a PCM header, where there is no fact chunk]',
+      same(whole, h.bytes) && res.frames === N,
+      `${h.bytes.length} bytes, ${res.frames} frames, ${firstDiff(whole, h.bytes)}`);
+  }
+
+  {
+    // 24-bit mono, 7 frames: dataSize 21 is ODD. 32f stereo blockAlign is 8 and
+    // 16-bit stereo is 4, so neither case above can reach close()'s pad byte at all.
+    const opts = { sampleRate: SR, bitDepth: 24, float: false, dither: false };
+    const m = Float32Array.from(noise(7, 9), (v) => Math.max(-1, Math.min(0.999, v)));
+    const h = new FakeSyncHandle();
+    const w = new WavSyncWriter(h, 1, opts);
+    w.append([m.subarray(0, 3)], 3);
+    w.append([m.subarray(3, 7)], 4);
+    const res = w.close();
+    const whole = new Uint8Array(encodeWav([m], opts));
+    ok('WavSyncWriter pads an ODD payload at close and reports the padded length  '
+      + '[entry point: WavSyncWriter.close, the pad path no even blockAlign can reach]',
+      same(whole, h.bytes) && (7 * 3) % 2 === 1 && h.bytes.length % 2 === 0
+      && res.byteLength === whole.length && res.frames === 7,
+      `${h.bytes.length} bytes for a ${7 * 3}-byte odd payload, ${firstDiff(whole, h.bytes)}`);
   }
 
   {
