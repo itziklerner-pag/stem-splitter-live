@@ -19,16 +19,19 @@
  * directory that is shared between agents. So: in the tree, beside the suite it
  * tests, named for its slice.
  *
- * ANCHORS CUT AGAINST `f9c4088` — "feat(deck): make the deck the transport
+ * ANCHORS CUT AGAINST `f6987a0` — "feat(deck): make the deck the transport
  * master for a File source, over the engine's playback clock", the commit that
- * introduced every line M1-M17 patch (the rebased `d75a6fd`). Every case
- * carries a stamp in `cut`, and this file prints it beside the current HEAD on
- * every run so a reader sees the distance without being told.
+ * introduced every line M1-M17 patch (the rebased `d75a6fd`, re-stamped after
+ * the integration rebase). Every case carries a stamp in `cut`, and this file
+ * prints it beside the current HEAD on every run so a reader sees the distance
+ * without being told.
  *
- * THAT STAMP HAS ALREADY MOVED TWICE, WHICH IS WHY THE FILE NOW CHECKS IT. It
- * read `619908a` until a rebase replaced that commit with `d75a6fd`, and the
- * rebase onto v0.3.1+U11 replaced that with `f9c4088` — and NOTHING WENT RED
- * either time: the anchors still matched, because a rebase copies the content,
+ * THAT STAMP HAS ALREADY MOVED THREE TIMES, WHICH IS WHY THE FILE NOW CHECKS
+ * IT. It read `619908a` until a rebase replaced that commit with `d75a6fd`, the
+ * rebase onto v0.3.1+U11 replaced that with `f9c4088`, and the integration
+ * rebase onto v0.3.1+U11+Bounce replaced that with `f6987a0` — and NOTHING WENT
+ * RED any of those times: the anchors still matched, because a rebase copies
+ * the content,
  * and the SHA that no longer named anything was prose. The check the
  * runner does below is deliberately NOT `git cat-file -e` — that answers YES
  * for an orphaned commit, for as long as any un-force-pushed remote ref still
@@ -81,7 +84,7 @@
  *
  * THIS FILE IS ITSELF AN INSTRUMENT, SO IT WAS WATCHED FAILING. Five
  * mutations, applied to this file — the first three at the commit now known as
- * `f9c4088`, the last two at the D1 repair — and each restored:
+ * `f6987a0`, the last two at the D1 repair — and each restored:
  *
  *   1. M6's `find` altered so it matches NOTHING
  *      -> `M6  ANCHOR DECAYED  extension/offscreen/cacheddeck.js: 0 match(es)`,
@@ -123,15 +126,17 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CUT_AGAINST = 'f9c4088';
+const CUT_AGAINST = 'f6987a0';
 /**
  * ...AND THE REPAIR'S OWN ANCHORS, which are a different commit. M18-M24 patch
  * the `isDeckClock` declaration and the video-lock gate, and none of those
- * lines existed at `f9c4088`. It is `e4cc898`, "fix(deck): stop the video lock
- * taking the deck it IS" (the rebased `980ef24`) — the commit that introduced
+ * lines existed at `f6987a0`. It is `c4cff11`, "fix(deck): stop the video lock
+ * taking the deck it IS" (the rebased `980ef24`, re-stamped after the
+ * integration rebase) — the commit that introduced
  * every line M18-M24 patch, stamped from the commit AFTER it for the only
  * reason there is: a stamp cannot name the commit it ships in. That is how
- * M1-M17 got theirs too.
+ * M1-M17 got theirs too. The rebase moved the stamp but not the anchors
+ * (33/33 MATCH both times).
  *
  * IT CARRIES THE SAME CAVEAT AS `CUT_AGAINST`, said again rather than hidden:
  * this is a BRANCH commit, not `main`'s, so a rebase before integration
@@ -144,22 +149,22 @@ const CUT_AGAINST = 'f9c4088';
  * committed" and "rebased away" are opposite findings that must not share a
  * line. This constant was prose until the commit above existed.
  */
-const CUT_REPAIR = 'e4cc898';
+const CUT_REPAIR = 'c4cff11';
 /**
  * ...AND A THIRD, FOR THE COVERAGE REPAIR. M25-M33 patch lines that arrived
  * with the review's D3/D4/D5/D7 — the `ended` direction, the release that no
  * longer speaks, `stop()`'s push, `load()`'s dedupe reset, the `listen()` latch,
  * `atMs`, the engine's rate-refusal record and the second `hosted` derivation.
- * None of those lines existed at `e4cc898`; several of them CONTRADICT it, so
+ * None of those lines existed at `c4cff11`; several of them CONTRADICT it, so
  * stamping them to it would be a claim this file can be checked against and
  * would lose.
  *
- * Landed as `9b589a3` (the rebased `7acd42c`); if a later rebase moves it
- * again, re-stamp — "not committed yet" and "rebased away" are opposite
+ * Landed as `33f8d1a` (the rebased `7acd42c`, re-stamped after the integration
+ * rebase); if a later rebase moves it again, re-stamp — "not committed yet" and "rebased away" are opposite
  * findings and must not print as the same line, which is what the check
  * below's third answer is for.
  */
-const CUT_MAJORS = '9b589a3';
+const CUT_MAJORS = '33f8d1a';
 
 const SUITES = {
   host: { argv: ['test.js', 'host'], label: 'node test.js host' },
