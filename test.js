@@ -15,6 +15,9 @@
  * while reporting success. Keep this list and `if (group('…'))` in step.
  *
  *   window   the export window is upstream Demucs' triangular transition weight
+ *   wavstream  U1's streaming WAV writers: the chunked and the unknown-length
+ *            OPFS writer emit exactly the bytes encodeWav emits, the header is
+ *            final before any audio is written, and a wrong frame count throws
  *   fft      rfft agrees with a naive DFT; STFT/iSTFT round-trips
  *   ring     the SAB capture ring is lossless across wrap
  *   live     Mode 1: the causal chunk plan emits every sample exactly once, the
@@ -75,7 +78,7 @@
  * construction. When you add a test, say which kind it is.
  */
 
-import { encodeWav, decodeWav } from './extension/shared/wav.js';
+import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
   videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
@@ -323,6 +326,289 @@ if (group('window')) {
     // the exported length must equal the source length exactly (AUDIO.md §5.3)
     const buf = encodeWav([new Float32Array(7), new Float32Array(7)], { sampleRate: SR });
     ok('numFrames survives an odd short buffer', decodeWav(buf).channels[0].length === 7);
+  }
+}
+
+// ===========================================================================
+/**
+ * WATCHED RED BY MUTATION — all fifteen. Each mutation below was applied to a
+ * green tree, `node test.js wavstream` was run, the red was read, and the file
+ * was restored. AGENTS.md:118: "an assertion never observed failing is one whose
+ * ability to fail is an assumption."
+ *
+ * THE MUTATIONS TARGET THE COMPOSITION, NOT THE SAMPLE LOOP, and that is not an
+ * oversight. `writeFrames` is shared by all three writers, so breaking it moves
+ * both sides of a byte-identity assertion equally and the assertion stays green
+ * — which is the honest cost of the streaming path being the SAME encoder rather
+ * than a second one. What these assertions can see is everything built around
+ * that loop: the header, the chunk boundaries, the pad byte, the frame
+ * accounting and the two refusals. The existing group('window') covers the loop
+ * itself against the byte map.
+ *
+ *   M1  wav.js:268  chunk() interleaves the channels in reverse order
+ *                   -> 3 red: 32f identity, 16-bit identity, pipeTo identity
+ *                   (sizing the chunk buffer by bytesPerSample instead of
+ *                   blockAlign is also red, but as a DataView overflow that
+ *                   takes the whole suite down before the assertion reports)
+ *   M2  wav.js:249  header() declares `written` instead of `frames`
+ *                   -> 6 red: all three identities, header-is-final, pipeTo
+ *                   identity, and the no-options default header
+ *   M3  wav.js:280  end() stops refusing a short write
+ *                   -> 2 red: the short-write refusal, and pipeTo's abort
+ *   M4  wav.js:257  chunk() stops refusing a long write
+ *                   -> 1 red: the long-write refusal
+ *   M5  wav.js:284  end() never emits the RIFF pad byte
+ *                   -> 1 red: 24-bit mono odd frame count
+ *   M6  wav.js:244  the constructor computes the length without riffSizeFor
+ *                   -> 1 red: the 4 GiB refusal at construction
+ *   M7  wav.js:372  WavSyncWriter.close does not patch the data-chunk size
+ *                   -> 1 red: the sync writer's byte identity
+ *   M8  wav.js:344  WavSyncWriter.append checks the ceiling after it writes
+ *                   -> 1 red: the sync writer refuses before writing
+ *   M9  wav.js:47   the 16-bit dither default is dropped
+ *                   -> 1 red: the dither default
+ *   M10 wav.js:230  the constructor stops refusing planes as a channel count
+ *                   -> 1 red: the named refusal
+ *   M11 wav.js:244  byteLength forgets the header bytes
+ *                   -> 1 red: the length known before any audio is written
+ *   M12 wav.js:301  pipeTo closes the sink on a refusal instead of aborting it
+ *                   -> 1 red: pipeTo aborts rather than closes
+ */
+if (group('wavstream')) {
+  head('wavstream — the streaming writers emit exactly the bytes encodeWav emits (U1)');
+
+  /** Drive WavStreamEncoder by hand and concatenate everything it emits. */
+  const streamBytes = (chs, opts, chunkLen) => {
+    const n = chs[0].length;
+    const enc = new WavStreamEncoder(chs.length, { ...opts, frames: n });
+    const parts = [enc.header()];
+    for (let o = 0; o < n; o += chunkLen) {
+      const len = Math.min(chunkLen, n - o);
+      parts.push(enc.chunk(chs.map((c) => c.subarray(o, o + len)), len));
+    }
+    parts.push(enc.end());
+    const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0));
+    let p = 0;
+    for (const b of parts) { out.set(b, p); p += b.length; }
+    return out;
+  };
+  const same = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+  const firstDiff = (a, b) => {
+    if (a.length !== b.length) return `lengths differ: ${a.length} vs ${b.length}`;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return `first difference at byte ${i}`;
+    return 'identical';
+  };
+  const threw = (f) => { try { f(); return null; } catch (e) { return e.message; } };
+
+  /** An OPFS FileSystemSyncAccessHandle, duck-typed on the four members WavSyncWriter uses. */
+  class FakeSyncHandle {
+    constructor() { this.bytes = new Uint8Array(0); this.writes = 0; this.flushed = 0; this.closes = 0; }
+    write(buf, { at }) {
+      this.writes++;
+      if (at + buf.length > this.bytes.length) {
+        const grown = new Uint8Array(at + buf.length);
+        grown.set(this.bytes); this.bytes = grown;
+      }
+      this.bytes.set(buf, at);
+      return buf.length;
+    }
+    truncate(n) { this.bytes = this.bytes.slice(0, n); }
+    flush() { this.flushed++; }
+    close() { this.closes++; }
+  }
+
+  // 5000 frames chunked at 997 so no chunk boundary lands on a power of two and
+  // the last chunk is short — the arithmetic a whole-buffer encoder never does.
+  const N = 5000, CHUNK = 997;
+  const l = noise(N, 3), r = noise(N, 4);
+  l[10] = 1.7; r[11] = -1.42;   // out of range on purpose: 32f must not clip (AUDIO.md §5.3)
+
+  // -- byte identity, the assertion the slice rests on -----------------------
+  {
+    const opts = { sampleRate: SR, bitDepth: 32, float: true };
+    const whole = new Uint8Array(encodeWav([l, r], opts));
+    const streamed = streamBytes([l, r], opts, CHUNK);
+    ok('32f: the streamed file is byte-identical to encodeWav  '
+      + '[entry point: WavStreamEncoder.header/chunk/end over 6 chunks]',
+      same(whole, streamed), `${whole.length} bytes, ${firstDiff(whole, streamed)}`);
+  }
+
+  {
+    // dither:false BECAUSE encodeWav's dither is seeded from Math.random()
+    // (wav.js writeFrames): with it on, two runs of the SAME encoder differ, so
+    // byte-identity is undefined rather than false. The cache write already
+    // passes dither:false (stemcache.js put()), which is the path that matters.
+    const opts = { sampleRate: SR, bitDepth: 16, float: false, dither: false };
+    const src = [Float32Array.from(l, (v) => Math.max(-1, Math.min(0.999, v))),
+                 Float32Array.from(r, (v) => Math.max(-1, Math.min(0.999, v)))];
+    const whole = new Uint8Array(encodeWav(src, opts));
+    const streamed = streamBytes(src, opts, CHUNK);
+    ok('16-bit PCM: the streamed file is byte-identical to encodeWav  '
+      + '[entry point: WavStreamEncoder.chunk, dither off — see the comment]',
+      same(whole, streamed), `${whole.length} bytes, ${firstDiff(whole, streamed)}`);
+  }
+
+  {
+    // Mono 24-bit, 7 frames: blockAlign 3 makes dataSize ODD, which is the only
+    // shape in this codebase that produces a RIFF pad byte at all.
+    const opts = { sampleRate: SR, bitDepth: 24, float: false, dither: false };
+    const m = Float32Array.from(noise(7, 9), (v) => Math.max(-1, Math.min(0.999, v)));
+    const whole = new Uint8Array(encodeWav([m], opts));
+    const streamed = streamBytes([m], opts, 3);
+    ok('24-bit mono, odd frame count: byte-identical INCLUDING the RIFF pad byte  '
+      + '[entry point: WavStreamEncoder.end]',
+      same(whole, streamed) && whole.length % 2 === 0 && (7 * 3) % 2 === 1,
+      `${whole.length} bytes for a ${7 * 3}-byte odd payload, ${firstDiff(whole, streamed)}`);
+  }
+
+  // -- the header is final before any audio is written ------------------------
+  {
+    const opts = { sampleRate: SR, bitDepth: 32, float: true };
+    const enc = new WavStreamEncoder(2, { ...opts, frames: N });
+    const head0 = enc.header();                       // BEFORE a single chunk
+    const whole = new Uint8Array(encodeWav([l, r], opts));
+    const dv = new DataView(head0.buffer, head0.byteOffset, head0.byteLength);
+    ok('the header is complete and FINAL on the first chunk — no seek, no patch  '
+      + '[entry point: WavStreamEncoder.header() before any chunk() call]',
+      same(head0, whole.subarray(0, head0.length))
+      && dv.getUint32(4, true) === whole.byteLength - 8
+      && dv.getUint32(46, true) === N
+      && dv.getUint32(54, true) === N * 8,
+      `${head0.length}-byte header, riff=${dv.getUint32(4, true)} fact=${dv.getUint32(46, true)} data=${dv.getUint32(54, true)}`);
+    ok('the finished byte length is known before any audio is written  '
+      + '[entry point: WavStreamEncoder.byteLength, for a progress meter that cannot count what it has not encoded]',
+      enc.byteLength === whole.byteLength, `${enc.byteLength} bytes`);
+  }
+
+  // -- a wrong frame count throws, in both directions -------------------------
+  {
+    const enc = new WavStreamEncoder(2, { sampleRate: SR, bitDepth: 32, float: true, frames: 100 });
+    enc.header();
+    enc.chunk([l.subarray(0, 60), r.subarray(0, 60)], 60);
+    const msg = threw(() => enc.chunk([l.subarray(0, 60), r.subarray(0, 60)], 60));
+    ok('a LONG write is refused, naming both counts, and takes no frames with it  '
+      + '[entry point: WavStreamEncoder.chunk]',
+      msg !== null && /120/.test(msg) && /100/.test(msg) && enc.written === 60,
+      msg === null ? 'ACCEPTED 120 frames into a 100-frame file' : `${enc.written} frames still written; ${msg}`);
+  }
+
+  {
+    const enc = new WavStreamEncoder(2, { sampleRate: SR, bitDepth: 32, float: true, frames: 100 });
+    enc.header();
+    enc.chunk([l.subarray(0, 60), r.subarray(0, 60)], 60);
+    const msg = threw(() => enc.end());
+    ok('a SHORT write is refused at end(), naming both counts  '
+      + '[entry point: WavStreamEncoder.end]',
+      msg !== null && /60/.test(msg) && /100/.test(msg),
+      msg === null ? 'ACCEPTED a file whose header promises 100 frames and whose data stops at 60' : msg);
+  }
+
+  // -- the 4 GiB ceiling wav.js has always guarded ----------------------------
+  {
+    // 600e6 frames x 8 bytes = 4.8 GB of payload, refused without allocating any
+    // of it — the point of checking at construction rather than at the last chunk.
+    const msg = threw(() => new WavStreamEncoder(2, { sampleRate: SR, bitDepth: 32, float: true, frames: 600e6 }));
+    ok('the 4 GiB RIFF ceiling is refused at construction, before anything is streamed  '
+      + '[entry point: new WavStreamEncoder]',
+      msg !== null && /4 GiB/.test(msg),
+      msg === null ? 'ACCEPTED a 4.8 GB payload into a uint32 size field' : msg);
+  }
+
+  // -- into a real WritableStream --------------------------------------------
+  {
+    const sink = { chunks: [], closed: 0, aborted: null };
+    const ws = new WritableStream({
+      write(c) { sink.chunks.push(c); },
+      close() { sink.closed++; },
+      abort(reason) { sink.aborted = reason; },
+    });
+    const opts = { sampleRate: SR, bitDepth: 32, float: true };
+    const enc = new WavStreamEncoder(2, { ...opts, frames: N });
+    const source = (function* () {
+      for (let o = 0; o < N; o += CHUNK) {
+        const len = Math.min(CHUNK, N - o);
+        yield [[l.subarray(o, o + len), r.subarray(o, o + len)], len];
+      }
+    })();
+    await enc.pipeTo(ws, source);
+    const got = new Uint8Array(sink.chunks.reduce((a, c) => a + c.length, 0));
+    let p = 0;
+    for (const c of sink.chunks) { got.set(c, p); p += c.length; }
+    const whole = new Uint8Array(encodeWav([l, r], opts));
+    ok('pipeTo drives a real WritableStream to the same bytes, and closes it once  '
+      + '[entry point: WavStreamEncoder.pipeTo]',
+      same(whole, got) && sink.closed === 1 && sink.aborted === null,
+      `${sink.chunks.length} writes, ${got.length} bytes, ${firstDiff(whole, got)}`);
+  }
+
+  {
+    // A source that stops early must ABORT the sink, not close it: a Host that
+    // turns the writable into a file has to be told the file is not a file.
+    const sink = { closed: 0, aborted: null };
+    const ws = new WritableStream({ write() {}, close() { sink.closed++; }, abort(r) { sink.aborted = r; } });
+    const enc = new WavStreamEncoder(2, { sampleRate: SR, bitDepth: 32, float: true, frames: N });
+    const short = (function* () { yield [[l.subarray(0, 10), r.subarray(0, 10)], 10]; })();
+    let rejected = null;
+    try { await enc.pipeTo(ws, short); } catch (e) { rejected = e.message; }
+    ok('pipeTo ABORTS the sink on a short source rather than closing it  '
+      + '[entry point: WavStreamEncoder.pipeTo]',
+      rejected !== null && sink.closed === 0 && sink.aborted instanceof Error,
+      rejected === null ? 'RESOLVED on a truncated file' : `sink closed ${sink.closed} times, aborted with: ${rejected}`);
+  }
+
+  // -- the unknown-length OPFS variant ----------------------------------------
+  {
+    const opts = { sampleRate: SR, bitDepth: 32, float: true };
+    const h = new FakeSyncHandle();
+    const w = new WavSyncWriter(h, 2, opts);
+    for (let o = 0; o < N; o += CHUNK) {
+      const len = Math.min(CHUNK, N - o);
+      w.append([l.subarray(o, o + len), r.subarray(o, o + len)], len);
+    }
+    const res = w.close();
+    const whole = new Uint8Array(encodeWav([l, r], opts));
+    ok('WavSyncWriter patches the three lengths at close and lands encodeWav’s exact bytes  '
+      + '[entry point: WavSyncWriter.append/close over a FileSystemSyncAccessHandle]',
+      same(whole, h.bytes) && res.frames === N && h.flushed === 1 && h.closes === 1,
+      `${h.bytes.length} bytes, ${res.frames} frames, ${firstDiff(whole, h.bytes)}`);
+  }
+
+  {
+    // The ceiling is checked BEFORE the bytes are built, because a file that has
+    // already crossed 4 GiB cannot be repaired at close: the size field wraps and
+    // what is left on disk is a short file that parses.
+    const h = new FakeSyncHandle();
+    const w = new WavSyncWriter(h, 2, { sampleRate: SR, bitDepth: 32, float: true });
+    const writesAfterHeader = h.writes;
+    const msg = threw(() => w.append([new Float32Array(1), new Float32Array(1)], 600e6));
+    ok('WavSyncWriter refuses the 4 GiB ceiling BEFORE it writes a byte  '
+      + '[entry point: WavSyncWriter.append]',
+      msg !== null && /4 GiB/.test(msg) && h.writes === writesAfterHeader,
+      msg === null ? 'ACCEPTED a payload past the uint32 size field'
+        : `${h.writes - writesAfterHeader} writes past the header; ${msg}`);
+  }
+
+  // -- the defaults are the same defaults -------------------------------------
+  {
+    const enc = new WavStreamEncoder(2, { frames: N });
+    const whole = new Uint8Array(encodeWav([l, r]));
+    ok('with NO options both writers resolve the same format: 44.1 k, 32f, stereo  '
+      + '[entry point: wavFormat, via encodeWav and new WavStreamEncoder]',
+      same(enc.header(), whole.subarray(0, enc.headerSize)),
+      `${enc.headerSize}-byte header, ${firstDiff(enc.header(), whole.subarray(0, enc.headerSize))}`);
+    ok('the 16-bit dither default is resolved the same way and is still switchable  '
+      + '[entry point: the resolved format on WavStreamEncoder, the one option the header cannot show]',
+      new WavStreamEncoder(2, { bitDepth: 16, float: false, frames: 4 }).fmt.dither === true
+      && new WavStreamEncoder(2, { bitDepth: 16, float: false, dither: false, frames: 4 }).fmt.dither === false
+      && new WavStreamEncoder(2, { frames: 4 }).fmt.dither === false);
+  }
+
+  {
+    const msg = threw(() => new WavStreamEncoder([l, r], { frames: N }));
+    ok('passing the planes where the channel COUNT goes is a named refusal  '
+      + '[entry point: new WavStreamEncoder]',
+      msg !== null && /count/i.test(msg) && /2 planes/.test(msg),
+      msg === null ? 'ACCEPTED an array of planes as a channel count' : msg);
   }
 }
 
