@@ -135,9 +135,11 @@ function pushSettings(node, s) {
  * @param {(relPath:string) => string} o.assetUrl  the Host's asset resolver
  * @param {{offlineContext?:Function, workletNode?:Function}} [o.audio]  see the header
  * @param {(p:{frame:number, frames:number, pct:number}) => void} [o.onProgress]
- * @param {() => boolean} [o.cancelled]  polled at each producer stop, never mid-quantum
+ * @param {() => boolean} [o.cancelled]  polled at each producer stop and ONCE MORE
+ *        after the render settles - never mid-quantum. See THE CANCEL BOUND below.
  * @returns {Promise<{left:Float32Array, right:Float32Array, frames:number,
- *                    plan:object, underruns:number, underrunFrames:number, stops:number}>}
+ *                    plan:object, underruns:number, underrunFrames:number,
+ *                    framesRead:number, stops:number}>}
  */
 export async function renderBounce(o) {
   const track = o.track;
@@ -241,12 +243,14 @@ export async function renderBounce(o) {
    */
   let failure = null;
   let stops = 0;
-  let cancelled = false;
+  /** The render frame a cancel was OBSERVED at, or -1. See THE CANCEL BOUND. */
+  let cancelledAt = -1;
   for (const r of plan.refills) {
     ctx.suspend(r.seconds).then(() => {
       try {
         stops++;
-        if (o.cancelled && o.cancelled()) { cancelled = true; return; }
+        if (cancelledAt >= 0) return;
+        if (o.cancelled && o.cancelled()) { cancelledAt = r.frame; return; }
         fill();
         if (o.onProgress) o.onProgress({ frame: r.frame, frames: total, pct: r.frame / total });
       } catch (e) {
@@ -262,7 +266,36 @@ export async function renderBounce(o) {
 
   const buf = await ctx.startRendering();
   if (failure) throw failure;
-  if (cancelled) throw bounceError('CANCELLED', `at frame ${plan.refills[0] ? plan.refills[0].frame : 0}`);
+
+  /**
+   * THE CANCEL BOUND, POLLED ONCE MORE HERE, AND WHY THE LAST POLL IS NOT
+   * DECORATION.
+   *
+   * The cancel flag is read inside a suspension callback, and `bouncePlan`
+   * schedules NO stop below `BOUNCE_REFILL_FRAMES` = 262144 frames. So at the
+   * shipped ring a bounce shorter than 5.94 s has ZERO producer stops, and with
+   * the poll only at the stops `BOUNCE_CANCEL` was a NO-OP on every such track:
+   * measured at 4.0 s, `cancelled()` was polled 0 times, the render RESOLVED,
+   * `writeBounce` ran, and the user who asked to cancel got a file.
+   *
+   * The last poll closes it. The bound that remains is stated rather than
+   * implied: THE EARLIEST A CANCEL CAN BE OBSERVED IS THE FIRST PRODUCER STOP,
+   * and a track with no stops is one whose whole render is shorter than a single
+   * refill period - so "at the end" is a fraction of a second, and it is still
+   * BEFORE the Host is asked for a destination (`bounceToSink` renders first).
+   * Nothing lands either way, which is the guarantee that actually matters.
+   *
+   * AND THE FRAME IT NAMES IS THE FRAME IT HAPPENED AT. This used to report
+   * `plan.refills[0].frame` whatever stop cancelled it, so a cancel at the third
+   * stop of a 20 s bounce said "at frame 262144" about frame 786432 - a fixture
+   * that cancels at the first stop makes the two identical and cannot see it.
+   */
+  if (cancelledAt < 0 && o.cancelled && o.cancelled()) cancelledAt = plan.quantaFrames;
+  if (cancelledAt >= 0) {
+    throw bounceError('CANCELLED', `at render frame ${cancelledAt} of ${plan.quantaFrames}`
+      + `${cancelledAt >= plan.quantaFrames ? ' — the last poll, after the render; this plan has '
+        + `${plan.refills.length} producer stop${plan.refills.length === 1 ? '' : 's'}` : ''}`);
+  }
 
   const L = buf.getChannelData(0);
   const R = buf.numberOfChannels > 1 ? buf.getChannelData(1) : buf.getChannelData(0);
@@ -278,6 +311,23 @@ export async function renderBounce(o) {
     // reports a positive number here, and a correct one reports 0.
     underruns: out.underruns(),
     underrunFrames: out.underrunFrames(),
+    /**
+     * AND THE COUNTER THAT SAYS THE OTHER TWO COULD LOOK AT ALL.
+     *
+     * playback-processor.js's `if (!play || avail < n)` branch does NOT advance
+     * the read pointer, and it only counts an underrun `if (play)`. So "the ring
+     * was never put in play" and "the render was perfectly fed" produce the SAME
+     * reading on `underruns` and `underrunFrames`: zero and zero. Measured - with
+     * `out.play(false)` the deliverable is silence and both counters still say 0,
+     * which is the third failure mode exactly: the instrument reads its PERFECT
+     * value on the worst defect in the slice.
+     *
+     * `framesRead` cannot: it is the consumer's own monotonic cursor, so a
+     * correct render leaves it at `plan.quantaFrames` and a worklet that never
+     * played leaves it at 0. An assertion that pairs the two can no longer be
+     * satisfied by a render that did nothing.
+     */
+    framesRead: out.readFrames(),
   };
 }
 

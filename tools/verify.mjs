@@ -1113,10 +1113,18 @@ const steps = [
    * a suspension schedule; that was measured separately and `qa/bounce.mjs`'s
    * header says so rather than letting a green here be read as covering it.
    *
-   * ~7 s, 47 assertions. Neither `slow` nor `heavy`: no browser, no weights. Its
-   * longest fixture is fourteen seconds of audio ON PURPOSE — the stem ring holds
-   * 11.89 s, and a bounce gate shorter than the ring cannot see the failure the
-   * whole slice exists to prevent.
+   * Neither `slow` nor `heavy`: no browser, no weights. Its longest fixture is
+   * fourteen seconds of audio ON PURPOSE — the stem ring holds 11.89 s, and a
+   * bounce gate shorter than the ring cannot see the failure the whole slice
+   * exists to prevent.
+   *
+   * NO ASSERTION COUNT IS WRITTEN HERE, and that is deliberate rather than lazy.
+   * The first draft of this comment said "~7 s, 47 assertions" and the step was
+   * 51 the day it landed — a measured claim in prose that was wrong on arrival,
+   * in a file whose own header is about not letting that happen, and the second
+   * instance of exactly that (see the note at the top of this file about the
+   * stale `unit` figure). The count that cannot decay is the one the runner
+   * PRINTS, and `--self-check` is what pins the step list itself.
    */
   { id: 'bounce', title: 'node qa/bounce.mjs — BOUNCE: the deck rendered offline through the shipped playback worklet, with its faders, mute/solo, crossfader and transpose baked in', args: ['qa/bounce.mjs'] },
   // `${RING_PLANES}`, not `14`. This read "10-plane routing" for the whole of

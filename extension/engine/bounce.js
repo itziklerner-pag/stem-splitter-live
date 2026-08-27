@@ -152,6 +152,94 @@ export function bounceError(code, detail) {
 }
 
 /**
+ * WHICH REFUSAL A DECK EARNS, as a pure function of the deck - so a suite can
+ * DRIVE each state and read the code back.
+ *
+ * THIS FUNCTION EXISTS BECAUSE THE INLINE VERSION WAS UNREACHABLE FOR A WHOLE
+ * REVIEW CYCLE. offscreen/engine.js used to decide it at the call site:
+ *
+ *     if (!cd || !cd.track) bounceFailed(id, isCached(id) ? 'NO_TRACK' : 'NOT_CACHED');
+ *
+ * and `isCached(id)` is `!!(cachedDecks[id] && cachedDecks[id].track)`
+ * (engine.js:534) - which is EXACTLY `!(!cd || !cd.track)`, with no await
+ * between the two statements. So inside the `if`, the ternary's condition was
+ * ALWAYS FALSE and `NO_TRACK` could never be produced: every refusal reported
+ * `NOT_CACHED`. The failing case is ordinary - a deck that HAD a track and was
+ * unloaded (`cacheddeck.js` sets `this.track = null` in two places) asks for a
+ * bounce and is told "this deck is live and holds no whole track" about a deck
+ * that is not live. The one sentence the user needs could never be printed.
+ *
+ * AND IT SURVIVED REVIEW BECAUSE THE ASSERTION NAMED FOR EXACTLY THAT PROPERTY
+ * WAS A SCAN FOR STRING LITERALS in engine.js's source: both codes appear in the
+ * file, so both counted as "covered". A scan for a string is not a test of
+ * reachability, and no mutation that deletes ONE literal can expose it.
+ *
+ * So the decision moves here, where it is a value rather than a control-flow
+ * accident - the shape `stemcache.js`'s `primeRefusal` and `separationRefusal`
+ * already have, for the same reason: a refusal nobody can drive is a refusal
+ * nobody has seen.
+ *
+ * THE TWO STATES ARE GENUINELY DIFFERENT PROBLEMS WITH DIFFERENT FIXES, which is
+ * the whole reason for two codes:
+ *
+ *   NOT_CACHED   the deck IS LIVE - capturing, or running the live pipeline.
+ *                There is audio; it is simply not a whole separated track yet.
+ *                The fix is to let the prime finish and play it from the cache.
+ *   NO_TRACK     the deck holds nothing and is not live - never loaded, or
+ *                unloaded. The fix is to load something.
+ *
+ * ------------------------------- AND IT TAKES THE LIVENESS FACT, WHICH IS WHY
+ *
+ * The first repair of this defect took the deck's `CachedDeck` and read
+ * `!cd -> NOT_CACHED`, `!cd.track -> NO_TRACK`. That is still wrong, and wrong
+ * in the reviewer's own failing case, because of one line in the caller:
+ * `CachedDeck.stop()` and `.dispose()` have exactly ONE caller between them -
+ * `stopCached()` in `offscreen/engine.js` - and its next statement is
+ * `cachedDecks[id] = null`. So a deck that HAD a track and was unloaded arrives
+ * with NO `CachedDeck` AT ALL, indistinguishable from a live one, and is told
+ * "this deck is live and holds no whole track" about a deck that is not live -
+ * which is the sentence the review was about. `NO_TRACK` would then be
+ * reachable in exactly one state: the window inside `await cd.load()`, where
+ * the deck is arguably the most live it ever is.
+ *
+ * LIVENESS IS NOT DERIVABLE FROM `cachedDecks`. It lives on `Deck` - capture
+ * status and the live pipeline's status - so the caller passes it in, and the
+ * two facts this takes are INDEPENDENT. That is the property that makes the
+ * original defect impossible to write again: a ternary over one fact cannot
+ * express this, and no fixture can make the two inputs the same input.
+ *
+ * @param {{cachedTrack:boolean, live:boolean}} [d] the two facts, from the
+ *        engine: does this deck hold a whole cached track, and is it live?
+ *        Absent means neither, which is a deck the engine has never seen.
+ * @returns {'NO_TRACK'|'NOT_CACHED'|null} the code to refuse with, or `null` to
+ *          proceed. Never a code outside `BOUNCE_CODES`.
+ */
+export function bounceRefusal(d) {
+  if (d && d.cachedTrack) return null;
+  return d && d.live ? 'NOT_CACHED' : 'NO_TRACK';
+}
+
+/**
+ * The code a bounce failure reaches the WIRE with. Validated on receipt, and the
+ * fallback is named rather than assumed.
+ *
+ * THE PATH THAT NEEDS THIS IS REACHABLE AND IS NOT A LITERAL. `BOUNCE_START`'s
+ * catch reports `e && e.code`, and not every error that arrives there is one of
+ * ours: `writeBounce`'s `enc.pipeTo()` runs OUTSIDE the SINK_REFUSED try/catch,
+ * so a disk-full mid-write hands this an OS error whose `.code` is `'ENOSPC'`.
+ * Unvalidated, that reaches `BOUNCE_ERROR.code` on the wire - which is the
+ * ARM_CODES failure (#29) exactly, one layer further out: a plausible code no
+ * table declares, a surface that renders it, and nothing red anywhere.
+ *
+ * A scan of engine.js's source cannot see this, because there is no literal to
+ * find at that call site. It is a run-time property, so it takes a function that
+ * can be run.
+ */
+export function bounceWireCode(code) {
+  return isBounceCode(code) ? code : 'RENDER_FAILED';
+}
+
+/**
  * THE RENDER PLAN. Pure: no context, no ring, no clock.
  *
  * @param {object} o

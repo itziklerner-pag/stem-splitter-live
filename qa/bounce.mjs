@@ -52,39 +52,64 @@
  * sitting in another stem's band. One fixture per claim.
  *
  * ===========================================================================
- * THE MUTATION TABLE - every assertion here was watched red
+ * WHAT A GREEN `bounce` IS NOT EVIDENCE OF - THREE GAPS, NAMED
  * ===========================================================================
  *
- * Anchors cut against LANDED commit 5993d32 for the two files that exist there
- * (`offscreen/playback-processor.js`, `offscreen/engine.js`) and against the
- * commit that introduces them for the two this slice creates. Re-run with
- * `node qa/bounce-mutations.mjs`, which reports per anchor whether it still
- * MATCHES its source (a decayed instrument) and whether it still REDS (decay or
- * a real coverage loss). A pass count alone collapses the two.
+ * None of the three is covered by anything below, and each is easy to assume is
+ * covered by all of it. They are listed first, before the table of what IS
+ * measured, so nobody has to reach the end to find them.
  *
- *   anchor / mutation                    | file                        | MATCHES | REDS | the red it produced, with the FIGURE
- *   -------------------------------------+-----------------------------+---------+------+-------------------------------------
- *   no-refills                           | offscreen/bounce.js         |   yes   | yes  | 5 red: "a 14.0 s bounce runs to the end without starving" -> 1 underrun, 96256 underrun frames; tail/head 0.000000 (was 1.000000)
- *   half-the-refills                     | engine/bounce.js            |   yes   | yes  | 1 red: "the producer stops every half-ring" -> 1 stop at 262144 (plan said 2)
- *   no-quantum-rounding                  | engine/bounce.js            |   yes   | yes  | 5 red: "rounded UP to a whole render quantum" -> 620472 quanta frames; the final quantum starves
- *   no-trim-in-the-plan                  | engine/bounce.js            |   yes   | yes  | 5 red: "track 617400 + trim 0"
- *   no-trim-in-the-slice                 | offscreen/bounce.js         |   yes   | yes  | 3 red: "the deliverable starts where the track starts" -> head/mid ratio 0.0000 (was 1.0000)
- *   no-stem-gains                        | offscreen/bounce.js         |   yes   | yes  | 3 red: "each stem arrives at its OWN gain" -> relative residual 5.99e-1 (was 2.26e-9). WORSE, which is the direction that matters
- *   no-crossfader                        | offscreen/bounce.js         |   yes   | yes  | 5 red: "both ends are at the level the settings say" -> |measured - analytic| 5.86e-2 (was 4.72e-10)
- *   no-master-gain                       | offscreen/bounce.js         |   yes   | yes  | 1 red: "each stem arrives at its OWN gain" -> residual 2.59e-1
- *   crossfader-applied-twice             | offscreen/bounce.js         |   yes   | yes  | 4 red: "both ends are at the level the settings say" -> 4.14e-2
- *   no-pitch-reset                       | offscreen/bounce.js         |   yes   | yes  | 1 red: "at the transposed pitch from its FIRST sample" -> A(330)/A(440.5) 1.0286 (was 0.0482)
- *   no-silent-tail                       | offscreen/bounce.js         |   yes   | yes  | 3 red: "nothing starved" -> 1 underrun, 3200 underrun frames
- *   ring-never-plays                     | offscreen/bounce.js         |   yes   | yes  | 14 red: the whole file is silence
- *   drums-are-transposed                 | offscreen/playback-processor.js | yes | yes  | 2 red: "the drums are NOT transposed" -> the click train no longer comes back; head/mid 0.8460
- *   engine-invents-a-code                | offscreen/engine.js         |   yes   | yes  | 1 red: "every one of them is a code engine/bounce.js declares" -> UNDECLARED: BOUNCE_BUSY
- *   engine-conflates-the-two-refusals    | offscreen/engine.js         |   yes   | yes  | 1 red: "a deck with nothing loaded and a deck playing live are DIFFERENT refusals" -> NOT_CACHED gone
- *   producer-throws            (guard L1) | offscreen/bounce.js        |   yes   | yes  | 1 NAMED red: "the producer failed at frame 262144 of 620544 (5.94 s)"; 51 passed -> 48 passed, 2 assertions NEVER RAN
- *   guard-without-its-finally  (guard L2) | offscreen/bounce.js        |   yes   | yes  | HUNG: node exits 13, ERR_UNSETTLED_TOP_LEVEL_AWAIT, and the suite prints NO summary at all
+ *   1. NO UI CONSUMER, ANYWHERE. `BOUNCE_START` / `BOUNCE_CANCEL` are answered
+ *      and `BOUNCE_PROGRESS` / `BOUNCE_DONE` / `BOUNCE_ERROR` are sent, and this
+ *      suite drives the unit side of that wire - but nothing in this repository
+ *      or the desktop one draws a Bounce button, a progress bar or an error
+ *      banner. The closed code vocabulary exists so the FIRST consumer cannot be
+ *      handed an invented code (#29); that is a promise about the emitter, and
+ *      it is not evidence about a renderer that does not exist yet.
  *
- *   17/17 anchors MATCH  .  17/17 RED, against a 51-passed green baseline.
+ *   2. NOT RUN IN A REAL `OfflineAudioContext` IN THIS REPOSITORY, on any run.
+ *      `qa/lib/bounce-offline.mjs` boots the SHIPPED worklet in a `vm` realm and
+ *      pumps it at the 128-frame render quantum, honouring suspend/resume at
+ *      quantum boundaries. Chromium's own `OfflineAudioContext` honouring a
+ *      suspension schedule - the property the whole design rests on - was
+ *      measured separately in Electron, 3/3, and is NOT re-measured here.
  *
- * The battery is the authority; this table is what it printed at branch time.
+ *   3. NO REAL-STEM BOUNCE. Every fixture is synthetic: six exact-bin tones, a
+ *      click train, one sine. Nothing here has bounced htdemucs output or any
+ *      recorded music at all. This suite is evidence about the GEOMETRY, the mix
+ *      stage and the plumbing. It is not evidence that a bounce of a real track
+ *      sounds like the deck did.
+ *
+ * ===========================================================================
+ * THE MUTATION TABLE LIVES IN THE BATTERY, AND THAT IS THE POINT
+ * ===========================================================================
+ *
+ * `node qa/bounce-mutations.mjs` is the authority. Every anchor carries, IN THE
+ * TREE, the defect it introduces and the SET OF ASSERTIONS IT MUST TURN RED -
+ * checked in both directions on every run, so a coverage loss that migrates from
+ * one mutation to another cannot hide inside an unchanged total. It reports
+ * three verdicts per anchor, because three different things have gone wrong in
+ * this build: an anchor that no longer MATCHES (a decayed instrument), one that
+ * matches and no longer REDS (decay or a real coverage loss), and one whose red
+ * SET has moved. A fourth, `EQUIV`, is for a mutation that cannot be caught by
+ * construction, with the arithmetic saying why.
+ *
+ * THERE IS NO SECOND COPY OF THAT TABLE HERE ANY MORE, and its removal is the
+ * point rather than a tidy-up. There was one, and it decayed exactly the way
+ * INTEGRATION.md section 26 says such tables do: it claimed "17/17 anchors,
+ * against a 51-passed green baseline" for a suite that had become 72 assertions
+ * and thirty-odd anchors, and its stamp named commits a rebase had already
+ * rewritten. Nothing went red, because prose cannot. A measurement that lives
+ * only in a comment is a measurement nobody is checking - and this file is the
+ * wrong place to keep one, because editing an assertion here does not put the
+ * table in front of the person editing it.
+ *
+ * LAST RUN OVER THIS TREE, 2026-08-27, over a 72-assertion green baseline:
+ * 34/34 anchors still MATCH their source; 33 RED with exactly the assertions
+ * they declare, in both directions; 1 EQUIVALENT by construction
+ * (`bounce-tau-is-the-worklet-default` - 18 ms of ramp inside a 69.7 ms trim);
+ * 0 needing attention. `guard-without-its-finally` is counted RED because the
+ * suite HANGS rather than reporting, which is the whole point of layer 2.
  *
  * ===========================================================================
  * THE TWO-LAYER GUARD, AND ITS BOUND
@@ -110,7 +135,7 @@ import { dbToGain, xfaderGains, xfFactor } from '../extension/engine/mixer.js';
 import { decodeWav } from '../extension/shared/wav.js';
 import {
   bouncePlan, bounceCushionFloor, bounceFileName, bounceError, BOUNCE_QUANTUM, BOUNCE_REFILL_FRAMES,
-  BOUNCE_CODES, isBounceCode,
+  BOUNCE_CODES, isBounceCode, bounceSettings, bounceRefusal, bounceWireCode,
 } from '../extension/engine/bounce.js';
 import { renderBounce, writeBounce, bounceToSink } from '../extension/offscreen/bounce.js';
 import { makeOfflineHarness, makeFakeSink, QUANTUM } from './lib/bounce-offline.mjs';
@@ -306,9 +331,16 @@ await section('2. one render, at unity — length, the head trim, and no starvat
   ok('the deliverable is exactly as long as the track — no drift, no rounding out of the quanta',
     r.frames === N && r.left.length === N && r.right.length === N,
     `${r.left.length} frames for a ${N}-frame track`);
-  ok('nothing starved: the ring never made the worklet fade',
-    r.underruns === 0 && r.underrunFrames === 0,
-    `${r.underruns} underruns, ${r.underrunFrames} underrun frames`);
+  // THE LIVENESS HALF IS NOT DECORATION - see section 3b's second control. The
+  // worklet only counts an underrun `if (play)`, so a ring that never played
+  // reads 0 and 0 here while the deliverable is silence: the instrument's
+  // PERFECT value on the worst defect in the slice. `framesRead` is the
+  // consumer's own cursor and cannot be satisfied by a render that did nothing.
+  ok('nothing starved: the ring never made the worklet fade, and the worklet really read it',
+    r.underruns === 0 && r.underrunFrames === 0 && r.framesRead === r.plan.quantaFrames,
+    `${r.underruns} underruns, ${r.underrunFrames} underrun frames, `
+    + `${r.framesRead} of ${r.plan.quantaFrames} frames read off the ring `
+    + '(a worklet that never played reads 0 frames and still reports 0 underruns)');
 
   // THE TRIM, AS A RATIO. The first 3072 frames of the RENDER are the transpose
   // lanes' initial zeros; if the trim were missing they would be the first 3072
@@ -337,11 +369,34 @@ await section('3. THE LONG FIXTURE — a bounce longer than the stem ring', asyn
     `${N} frames = ${SECONDS}.0 s against a ring of ${STEM_RING_FRAMES} frames `
     + `= ${(STEM_RING_FRAMES / SR).toFixed(2)} s`);
 
-  const r = await bounce({ stems: toneStems(N), frames: N }, centreSettings());
+  // PROGRESS IS DRIVEN HERE rather than in a section of its own, because this is
+  // the only fixture with more than one producer stop to report and a second
+  // 14-second render would buy nothing.
+  const ticks = [];
+  const r = await bounce({ stems: toneStems(N), frames: N }, centreSettings(),
+    { onProgress: (t) => ticks.push(t) });
 
   ok('a 14.0 s bounce runs to the end without starving — the count, not a listen',
-    r.underruns === 0 && r.underrunFrames === 0 && r.frames === N,
-    `${r.underruns} underruns, ${r.underrunFrames} underrun frames, ${r.frames} frames out`);
+    r.underruns === 0 && r.underrunFrames === 0 && r.frames === N
+      && r.framesRead === r.plan.quantaFrames,
+    `${r.underruns} underruns, ${r.underrunFrames} underrun frames, ${r.frames} frames out, `
+    + `${r.framesRead} of ${r.plan.quantaFrames} frames read off the ring`);
+
+  /**
+   * PROGRESS RIDES ITS OWN MESSAGE AND TICKS ONCE PER PRODUCER STOP - the rule
+   * PHASE4-CONTRACT.md section 7 states and the one the report's headline
+   * claimed. A count and an exact frame list, never a clock: the `>= 2` clause
+   * is what stops a plan with no stops at all from passing this vacuously.
+   */
+  ok('progress ticks ONCE PER PRODUCER STOP, at the frames the plan named, monotonically',
+    ticks.length === r.plan.refills.length && ticks.length >= 2
+      && ticks.map((t) => t.frame).join(',') === r.plan.refills.map((x) => x.frame).join(',')
+      && ticks.every((t) => t.frames === r.plan.quantaFrames)
+      && ticks.every((t) => Math.abs(t.pct - t.frame / r.plan.quantaFrames) < 1e-12)
+      && ticks.every((t, i) => i === 0 || t.pct > ticks[i - 1].pct),
+    `${ticks.length} ticks at ${ticks.map((t) => t.frame).join(', ')} of ${r.plan.quantaFrames}, `
+    + `pct ${ticks.map((t) => t.pct.toFixed(4)).join(' ')} `
+    + `(the plan's stops are ${r.plan.refills.map((x) => x.frame).join(', ')})`);
   ok('the render stopped exactly where the plan said it would',
     r.stops === r.plan.refills.length
       && r.harness.last.stoppedAt.join(',') === r.plan.refills.map((x) => x.frame).join(','),
@@ -410,6 +465,40 @@ await section('3b. THE NAIVE RENDER — the failure this slice exists to prevent
     late / early < 0.01 && out.underruns() > 0,
     `tail/head ${(late / early).toExponential(2)}, ${out.underruns()} underruns, `
     + `${out.underrunFrames()} underrun frames`);
+
+  /**
+   * THE SECOND CONTROL, AND IT IS WHY SECTIONS 2 AND 3 READ `framesRead`.
+   *
+   * playback-processor.js's starvation branch is `if (!play || avail < n)`, and
+   * inside it the underrun counters are advanced only `if (play)` and the read
+   * pointer is not advanced at all. So a ring that was never put in play is not
+   * merely "a different defect" - it is INDISTINGUISHABLE from a perfectly fed
+   * render on the two counters the whole slice is gated on. Measured: the
+   * deliverable is silence and both counters read 0.
+   *
+   * That is PHASE4-CONTRACT.md section 12's third failure exactly - an
+   * instrument reading its PERFECT value on the worst defect in the slice - and
+   * it was found by a reviewer, not by this suite. It is pinned here as a
+   * control so the pairing above cannot be "simplified" back out again.
+   */
+  const h2 = makeOfflineHarness(EXT);
+  const ctx2 = h2.audio.offlineContext(2, plan.renderFrames, SR);
+  await ctx2.audioWorklet.addModule(h2.assetUrl('offscreen/playback-processor.js'));
+  const out2 = new StemRingWriter(new SharedArrayBuffer(stemRingByteLength(plan.capacity)), plan.capacity);
+  const node2 = h2.audio.workletNode(ctx2, 'stem-playback', {
+    processorOptions: { sab: out2.sab, capacity: plan.capacity, sampleRate: SR, panicFadeMs: 20, lowWaterSec: 0.05, meterHz: 30, healthHz: 10 },
+  });
+  node2.connect(ctx2.destination);
+  out2.play(false);                                          // NEVER put in play.
+  out2.write(0, planes, plan.capacity);
+  const silent = (await ctx2.startRendering()).getChannelData(0);
+  ok('a ring that NEVER PLAYS reads PERFECT on both starvation counters — which is why they are '
+    + 'paired with a frame count',
+    peakOf(silent) === 0 && out2.underruns() === 0 && out2.underrunFrames() === 0
+      && out2.readFrames() === 0,
+    `peak ${peakOf(silent)}, ${out2.underruns()} underruns, ${out2.underrunFrames()} underrun frames — `
+    + `identical to a healthy render — but ${out2.readFrames()} of ${plan.quantaFrames} frames read, `
+    + 'which is not');
 });
 
 // ===========================================================================
@@ -452,6 +541,83 @@ await section('4. DISTINCT GAINS — the fader, crossfader and master stages, pe
     got[5] / loud < 1e-6,
     `${STEMS[5]} reads ${got[5].toExponential(2)} against the loudest stem's ${loud.toFixed(5)} `
     + `= ${(got[5] / loud).toExponential(2)}`);
+
+  /**
+   * THE SAME MEASUREMENT AT THE HEAD OF THE FILE, AND IT IS A DIFFERENT CLAIM.
+   *
+   * Everything above reads at `from = SR` — one second in — where any head ramp
+   * has long since settled. That made `BOUNCE_TAU` (offscreen/bounce.js) a
+   * load-bearing constant with a sixteen-line justification and NO assertion:
+   * setting it to `TAU.master` = 0.020, the value every other caller of the same
+   * {t:'gain'} message uses, left this suite 51 passed / 0 failed.
+   *
+   * MEASURED DAMAGE of that setting on this exact fixture: the worklet's gain
+   * slots all start at 1, so the deck's real gains arrive over 6 tau = 120 ms.
+   * The trim only eats the first 3072 frames = 69.7 ms of it, so the two
+   * deliverables differ by more than 0.1 % of peak for the first 2049 frames =
+   * 46.5 ms OF THE FILE, up to 3.4 % of peak. It ships.
+   *
+   * A UNITY FIXTURE CANNOT SEE THIS AT ALL — with every gain already 1 there is
+   * nothing to ramp from, which is why the existing head-of-file assertion
+   * (section 7's, on unitySettings) was blind to it. Section 12 in miniature:
+   * a fixture that makes two inputs identical is blind to what distinguishes
+   * them. This one is on the DISTINCT-gain fixture on purpose.
+   */
+  const headGot = STEMS.map((_, k) => amplitudeAt(r.left, F[k], 0, W));
+  let hnum = 0, hden = 0;
+  for (let k = 0; k < STEMS.length; k++) { const e = headGot[k] - expect[k]; hnum += e * e; hden += expect[k] * expect[k]; }
+  const headResidual = Math.sqrt(hnum / hden);
+  ok('...and each stem is at that gain from the FIRST SAMPLE of the file — a bounce has no gestures, '
+    + 'so it must not spend a smoothing constant sliding up to its own settings',
+    headResidual < 1e-4,
+    `relative residual over the first ${W} frames of the FILE ${headResidual.toExponential(2)} `
+    + `(at 1.0 s it is ${residual.toExponential(2)}; posting the worklet's own 20 ms tau instead of `
+    + 'BOUNCE_TAU reads ~2e-2 here and is unchanged at 1.0 s, because 120 ms of ramp does not fit '
+    + 'inside a 69.7 ms trim)');
+});
+
+// ===========================================================================
+await section('4b. THE SNAPSHOT — the bounce is of the settings AS THEY WERE WHEN IT WAS ASKED FOR', async () => {
+  /**
+   * `bounceSettings()` is what makes that sentence true, and until this section
+   * existed the suite never imported it. Its guarantee is not about audio — a
+   * render posts its settings once, before the first quantum, so a deck moved
+   * DURING one changes nothing whatever `bounceSettings` returns. What the copy
+   * protects is the window between "the user pressed Bounce" and every later
+   * read of that record: progress, a retry, a second consumer. So the instrument
+   * is the record itself, driven, and not the deliverable.
+   */
+  const deck = {
+    id: 'A',
+    mix: STEMS.map((_, k) => ({ gainDb: -k, muted: false, soloed: k === 1 })),
+    xf: { position: 0.35, curve: 'dip', assign: STEMS.map(() => 'XF') },
+    masterDb: -2, semitones: 3,
+  };
+  const snap = bounceSettings(deck);
+
+  // The deck moves, exactly as a user moving a fader mid-render moves it.
+  deck.mix[1].gainDb = -60;
+  deck.mix[1].muted = true;
+  deck.xf.assign[2] = 'B';
+
+  ok('the live deck really moved after the snapshot, or this section is measuring nothing',
+    deck.mix[1].gainDb === -60 && deck.mix[1].muted === true && deck.xf.assign[2] === 'B',
+    `deck now: gainDb ${deck.mix[1].gainDb}, muted ${deck.mix[1].muted}, assign[2] ${deck.xf.assign[2]}`);
+  ok('a fader moved after the bounce was asked for does not reach the render: `mix` is COPIED, '
+    + 'element by element',
+    snap.mix[1].gainDb === -1 && snap.mix[1].muted === false && snap.mix[1].soloed === true
+      && snap.mix !== deck.mix && snap.mix[1] !== deck.mix[1],
+    `snapshot still reads gainDb ${snap.mix[1].gainDb}, muted ${snap.mix[1].muted}, `
+    + `soloed ${snap.mix[1].soloed}; same array ${snap.mix === deck.mix}, `
+    + `same element ${snap.mix[1] === deck.mix[1]}`);
+  ok('...and neither does the crossfader column: `assign` is COPIED',
+    snap.xf.assign[2] === 'XF' && snap.xf.assign !== deck.xf.assign,
+    `snapshot still reads assign[2] ${snap.xf.assign[2]}; same array ${snap.xf.assign === deck.xf.assign}`);
+  ok('...and the flat record carries every field the render needs, so nothing has to reach for the deck',
+    snap.id === 'A' && snap.masterDb === -2 && snap.semitones === 3
+      && snap.xf.position === 0.35 && snap.xf.curve === 'dip' && snap.mix.length === STEMS.length,
+    `id ${snap.id}, masterDb ${snap.masterDb}, semitones ${snap.semitones}, `
+    + `xf ${snap.xf.position}/${snap.xf.curve}, ${snap.mix.length} stems`);
 });
 
 // ===========================================================================
@@ -661,12 +827,24 @@ await section('9. the closed code vocabulary and the file name', async () => {
 });
 
 // ===========================================================================
-await section('10. CANCEL — the render settles, and nothing lands', async () => {
+await section('10. CANCEL — the render settles, nothing lands, and it names WHERE it stopped', async () => {
   /**
-   * A SMALL RING ON PURPOSE, so there is a producer stop early enough to cancel
-   * at without rendering fourteen seconds to find out. The SHIPPED defaults are
-   * asserted in section 1; this section is about the cancel path, not about the
-   * ring size.
+   * TWO FIXTURES, BECAUSE ONE OF THEM USED TO COLLAPSE THE DISTINCTION IT TESTS.
+   *
+   * (a) cancels at the THIRD producer stop. The old fixture cancelled at the
+   *     first — `cancelled: () => true` — which made the frame the message
+   *     reports and the frame it happened at IDENTICAL, so it could not see that
+   *     the message always said `plan.refills[0].frame` whatever stop cancelled
+   *     it. Measured before the fix: cancelling at the 3rd stop of a 20 s bounce
+   *     (real frame 786432) reported "at frame 262144".
+   *
+   * (b) cancels a bounce with NO PRODUCER STOPS AT ALL, at the SHIPPED ring.
+   *     The cancel flag is read inside a suspension callback and `bouncePlan`
+   *     schedules no stop below 262144 frames, so at the shipped ring every
+   *     bounce shorter than 5.94 s had NOWHERE to observe a cancel: measured at
+   *     4.0 s, `cancelled()` was polled 0 times, the render resolved, the file
+   *     was written and BOUNCE_DONE was sent. The old fixture hid this by
+   *     shrinking the ring so a stop existed.
    *
    * AND THIS IS WHERE LAYER 2 OF THE GUARD IS WATCHED. The cancel path leaves
    * the suspension callback through a bare `return`, so the `finally` is the
@@ -675,10 +853,12 @@ await section('10. CANCEL — the render settles, and nothing lands', async () =
    * anchor under a timeout and reports HUNG rather than a red.
    */
   const N = Math.round(2 * SR);
+
+  // ---- (a) a SMALL ring on purpose, so there are several stops to choose from.
   const CAP = 1 << 15, EVERY = 1 << 14;
+  const planA = bouncePlan({ frames: N, capacity: CAP, refillEvery: EVERY });
   const sink = makeFakeSink();
-  let asked = 0;
-  let threw = null;
+  let asked = 0, polls = 0, threw = null;
   try {
     const h = makeOfflineHarness(EXT);
     await bounceToSink({
@@ -687,55 +867,270 @@ await section('10. CANCEL — the render settles, and nothing lands', async () =
       assetUrl: h.assetUrl, audio: h.audio,
       capacity: CAP, refillEvery: EVERY,
       title: 'Cancelled',
-      cancelled: () => true,
+      cancelled: () => (++polls >= 3),
       exportSink: async () => { asked++; return { 'Cancelled.wav': sink.writable }; },
     });
   } catch (e) { threw = String(e.message); }
+  const at = /at render frame (\d+)/.exec(threw || '');
 
-  ok('a cancelled bounce SETTLES rather than hanging, and says CANCELLED',
-    threw != null && threw.includes(BOUNCE_CODES.CANCELLED),
+  ok('the cancel fixture really has several stops and cancels at a LATER one, or it cannot tell '
+    + 'the reported frame from the first stop',
+    planA.refills.length >= 3 && planA.refills[0].frame !== planA.refills[2].frame,
+    `${planA.refills.length} stops at ${planA.refills.map((x) => x.frame).join(', ')}; `
+    + `cancelled at the 3rd (frame ${planA.refills[2] ? planA.refills[2].frame : '—'}), not the 1st `
+    + `(frame ${planA.refills[0] ? planA.refills[0].frame : '—'})`);
+  ok('a cancelled bounce SETTLES rather than hanging, says CANCELLED, and names the stop it '
+    + 'ACTUALLY stopped at',
+    threw != null && threw.includes(BOUNCE_CODES.CANCELLED)
+      && at != null && Number(at[1]) === planA.refills[2].frame,
     threw || 'it resolved as if it had finished');
   ok('...and nothing lands: the Host is never asked for a destination and no byte is written',
     asked === 0 && sink.chunks.length === 0 && sink.closed === false,
     `exportSink called ${asked} times, ${sink.chunks.length} chunks written, closed=${sink.closed}`);
+
+  // ---- (b) the SHIPPED ring, and a track too short to have a single stop.
+  const planB = bouncePlan({ frames: N });
+  const sinkB = makeFakeSink();
+  let askedB = 0, threwB = null;
+  try {
+    const h = makeOfflineHarness(EXT);
+    await bounceToSink({
+      track: { stems: toneStems(N), frames: N },
+      settings: centreSettings(),
+      assetUrl: h.assetUrl, audio: h.audio,
+      title: 'Short',
+      cancelled: () => true,
+      exportSink: async () => { askedB++; return { 'Short.wav': sinkB.writable }; },
+    });
+  } catch (e) { threwB = String(e.message); }
+
+  ok('the short fixture really has NO producer stop at the shipped ring, or it is the same test twice',
+    planB.refills.length === 0 && N < BOUNCE_REFILL_FRAMES,
+    `${(N / SR).toFixed(1)} s = ${N} frames against a refill period of ${BOUNCE_REFILL_FRAMES} frames `
+    + `= ${(BOUNCE_REFILL_FRAMES / SR).toFixed(2)} s: ${planB.refills.length} stops`);
+  ok('a bounce with no producer stop at all is STILL cancellable — it is not a no-op below 5.94 s',
+    threwB != null && threwB.includes(BOUNCE_CODES.CANCELLED) && askedB === 0
+      && sinkB.chunks.length === 0,
+    threwB || `it resolved as if it had finished; exportSink called ${askedB} times, `
+      + `${sinkB.chunks.length} chunks written`);
 });
 
 // ===========================================================================
-await section('11. THE WIRE — every code that reaches a surface is one this unit declared', async () => {
+await section('11. THE WIRE — the engine is WIRED to the unit\'s refusals, read as text', async () => {
   /**
    * READ AS TEXT, and the reason is the same one test.js gives for reading
    * ui/embed.js that way: importing offscreen/engine.js RUNS it, and it builds a
    * MasterBus, installs a message listener and reaches for Web Audio at module
-   * scope. What is checkable without running it is the thing #29 measured -
-   * whether a code that no table declares can reach a surface - and that is a
-   * property of the literals, not of the run.
+   * scope.
    *
-   * IT FAILS WHEN IT CANNOT LOOK. A scan that found no codes at all would report
-   * a clean vocabulary most confidently at the moment it stopped reading the
-   * file, so the count is asserted before the membership is.
+   * WHAT A TEXT SCAN CAN AND CANNOT CARRY, stated because getting this wrong
+   * shipped a defect. This section used to hold an assertion named "a deck with
+   * nothing loaded and a deck playing live are DIFFERENT refusals" whose whole
+   * check was `all.includes('NO_TRACK') && all.includes('NOT_CACHED')`. Both
+   * strings were in the file the entire time NO_TRACK was UNREACHABLE, so it
+   * passed for the same reason it would have passed over a comment. A SCAN FOR A
+   * STRING IS NOT A TEST OF REACHABILITY.
+   *
+   * So the reachability claim moved to section 12, where each state is DRIVEN
+   * and the code it answers is read back, and what is left here is a WIRING
+   * claim, named as one: that the engine reaches for those functions rather than
+   * keeping a second copy of the decision. That is a property of the literals,
+   * and it is the most a scan can honestly say.
+   *
+   * IT FAILS WHEN IT CANNOT LOOK. A scan that found no wiring at all would
+   * report a clean vocabulary most confidently at the moment it stopped reading
+   * the file, so the count is asserted before the membership is.
    */
-  const src = await (await import('node:fs/promises')).readFile(path.join(EXT, 'offscreen/engine.js'), 'utf8');
+  const raw = await (await import('node:fs/promises')).readFile(path.join(EXT, 'offscreen/engine.js'), 'utf8');
+  /**
+   * COMMENTS ARE STRIPPED FIRST, and that is not tidiness. A scan that reads
+   * them cannot tell the code from a description of the code — the comment three
+   * lines above the fix QUOTES the broken line verbatim, so an unstripped scan
+   * for `'NO_TRACK'` finds it in prose and reports on the wrong thing in both
+   * directions. Block comments and whole-line `//` comments only: a trailing
+   * `//` on a code line is left alone rather than risking a `//` inside a string.
+   */
+  const src = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  ok('the scan is reading CODE and not prose, or it is answering about the wrong text',
+    src.length > 0 && raw.length - src.length > 2000 && /case 'BOUNCE_START'/.test(src),
+    `${raw.length} bytes of engine.js, ${raw.length - src.length} of them comment `
+    + `(${((raw.length - src.length) / raw.length * 100).toFixed(0)} %); `
+    + `${src.split('\n').length} lines of code remain`);
   // LINE-BASED ON PURPOSE. A call can carry its code as a literal, as a ternary
   // over two of them, or as `e.code` with a literal fallback, and a regex over
   // the ARGUMENT LIST would have to balance parentheses to see all three. Every
-  // line that mentions the emitter or the validator is scanned for upper-case
-  // string literals instead, which reaches all three shapes and cannot silently
-  // see fewer of them than there are.
-  const lines = src.split('\n').filter((l) => /\bbounceFailed\(|\bisBounceCode\(/.test(l));
+  // line that mentions the emitter is scanned for upper-case string literals
+  // instead, which reaches all three shapes and cannot silently see fewer of
+  // them than there are.
+  const lines = src.split('\n').filter((l) => /\bbounceFailed\(/.test(l));
   const all = [...new Set(lines.flatMap((l) => [...l.matchAll(/'([A-Z][A-Z_]{2,})'/g)].map((m) => m[1])))].sort();
   ok('the scan really found the bounce wiring, or everything below is vacuous',
-    all.length >= 3 && /case 'BOUNCE_START'/.test(src) && /case 'BOUNCE_CANCEL'/.test(src),
-    `${all.length} code literals over ${lines.length} lines: ${all.join(', ')}`);
+    lines.length >= 3 && all.length >= 1
+      && /case 'BOUNCE_START'/.test(src) && /case 'BOUNCE_CANCEL'/.test(src),
+    `${lines.length} bounceFailed lines carrying ${all.length} code literals: ${all.join(', ')}`);
   const invented = all.filter((c) => !isBounceCode(c));
-  ok('...and every one of them is a code engine/bounce.js declares — the ARM_CODES failure, checked on the EMITTING side',
+  ok('...and every literal one of them is a code engine/bounce.js declares — the ARM_CODES failure, '
+    + 'checked on the EMITTING side',
     invented.length === 0,
     invented.length ? `UNDECLARED: ${invented.join(', ')}` : `all ${all.length} are in BOUNCE_CODES`);
-  ok('a deck with nothing loaded and a deck playing live are DIFFERENT refusals, so the user is not left guessing',
-    all.includes('NO_TRACK') && all.includes('NOT_CACHED'),
-    `${all.join(', ')}`);
+  ok('the engine does not keep its own copy of the two empty-deck refusals: it asks bounceRefusal, '
+    + 'which section 12 drives',
+    /\bbounceRefusal\(\{/.test(src) && !/'NO_TRACK'/.test(src) && !/'NOT_CACHED'/.test(src),
+    `bounceRefusal({...}) present: ${/\bbounceRefusal\(\{/.test(src)}; `
+    + `'NO_TRACK' literal in engine.js: ${/'NO_TRACK'/.test(src)}; `
+    + `'NOT_CACHED' literal: ${/'NOT_CACHED'/.test(src)}`);
+  /**
+   * AND IT HANDS OVER THE LIVENESS FACT, WHICH IS THE HALF A `cd` TEST CANNOT
+   * HAVE. Both clauses below are the reason the design is what it is, so both
+   * are checked rather than described: `stopCached` really does drop the
+   * `CachedDeck` on unload, which is what makes `!cd` unable to tell an unloaded
+   * deck from a live one, and the call site really does pass `live` in. If
+   * `stopCached` ever stops nulling the entry, this goes red and somebody
+   * re-reads the design — which is the red anyone would want.
+   */
+  ok('...and it hands bounceRefusal the LIVENESS fact, because stopCached drops the CachedDeck on '
+    + 'unload and `!cd` cannot tell an unloaded deck from a live one',
+    /cachedDecks\[id\] = null;/.test(src) && /live: deckIsLive\(decks\[id\]\)/.test(src)
+      && (src.match(/const deckIsLive = /g) || []).length === 1
+      && (src.match(/d\.status === 'recording'/g) || []).length === 1,
+    `stopCached nulls the entry: ${/cachedDecks\[id\] = null;/.test(src)}; `
+    + `the call site passes live: ${/live: deckIsLive\(decks\[id\]\)/.test(src)}; `
+    + `deckIsLive defined ${(src.match(/const deckIsLive = /g) || []).length} time(s) and the capture `
+    + `predicate written out ${(src.match(/d\.status === 'recording'/g) || []).length} time(s) — one `
+    + 'each, or two answers that can disagree');
+  ok('...and the code that reaches the wire goes through bounceWireCode, which section 12 also drives — '
+    + 'the one call site that carries no literal to scan for',
+    /const c = bounceWireCode\(code\);/.test(src) && /bounceFailed\(id, e && e\.code,/.test(src),
+    `bounceWireCode at the emitter: ${/const c = bounceWireCode\(code\);/.test(src)}; `
+    + `the catch reports e.code: ${/bounceFailed\(id, e && e\.code,/.test(src)}`);
   const errSends = [...src.matchAll(/type: 'BOUNCE_ERROR'/g)].length;
-  ok('...and there is exactly ONE place a bounce failure reaches the wire, so the check above covers all of them',
+  ok('...and there is exactly ONE place a bounce failure reaches the wire, so the checks above cover all of them',
     errSends === 1, `${errSends} BOUNCE_ERROR emitters`);
+});
+
+// ===========================================================================
+await section('12. THE REFUSALS, DRIVEN — each state asked, and the code it answers read back', async () => {
+  /**
+   * THE OTHER HALF OF SECTION 11, AND THE HALF THAT CAN SEE REACHABILITY.
+   *
+   * Every refusal below is produced by RUNNING the thing, not by finding its
+   * name. That is the difference between "both codes appear in the source" — a
+   * sentence that stayed true for the whole time `NO_TRACK` could not be
+   * produced at all — and "this deck state answers this code".
+   */
+
+  // ---- the two empty-deck states (engine/bounce.js's bounceRefusal) ---------
+  /**
+   * THE WHOLE GRID, NOT A SAMPLE OF IT. `bounceRefusal` takes two independent
+   * booleans, so there are exactly four states plus "no facts at all", and all
+   * five are driven. A subset would be the same mistake one level down: an
+   * assertion that happens not to visit the state where the answer is wrong.
+   */
+  const at = (cachedTrack, live) => bounceRefusal({ cachedTrack, live });
+  const drive = {
+    'no facts at all — a deck the engine has never seen': bounceRefusal(undefined),
+    'nothing cached, NOT live — never loaded, or unloaded by stopCached': at(false, false),
+    'nothing cached, LIVE — capturing, or priming': at(false, true),
+    'a whole cached track, not live': at(true, false),
+    'a whole cached track while the live deck also runs': at(true, true),
+  };
+  const answers = Object.values(drive);
+  ok('a deck with nothing loaded and a deck playing live are DIFFERENT refusals — driven, one state '
+    + 'at a time, and the code READ BACK',
+    drive['nothing cached, NOT live — never loaded, or unloaded by stopCached'] === 'NO_TRACK'
+      && drive['nothing cached, LIVE — capturing, or priming'] === 'NOT_CACHED'
+      && drive['no facts at all — a deck the engine has never seen'] === 'NO_TRACK'
+      && new Set(answers.filter((c) => c)).size === 2,
+    Object.entries(drive).map(([k, v]) => `${k} -> ${v}`).join('  |  '));
+  ok('...and a deck that HAS a track is not refused at all, live or not, so the two above are a '
+    + 'decision and not a constant',
+    drive['a whole cached track, not live'] === null
+      && drive['a whole cached track while the live deck also runs'] === null
+      && answers.filter((c) => c !== null).every((c) => isBounceCode(c)),
+    `cached+idle -> ${JSON.stringify(drive['a whole cached track, not live'])}, `
+    + `cached+live -> ${JSON.stringify(drive['a whole cached track while the live deck also runs'])}; `
+    + `every refusal is a declared code: ${answers.filter((c) => c !== null).every(isBounceCode)}`);
+  /**
+   * BOTH FACTS MUST MATTER, AND THAT IS A SEPARATE CLAIM. A refusal that ignored
+   * `live` would still answer two different codes across the grid above — it
+   * would simply answer them for the wrong reason, which is exactly what the
+   * first repair of this defect did. So each fact is flipped ON ITS OWN and the
+   * answer must move: two guards that produce an identical observation are one
+   * guard wearing two names.
+   */
+  ok('flipping EITHER fact on its own changes the answer, so neither is decoration — the check the '
+    + 'first repair of this defect would have failed',
+    at(false, false) !== at(false, true) && at(false, false) !== at(true, false)
+      && at(true, false) !== at(false, false),
+    `live alone: (false,false) -> ${at(false, false)} vs (false,true) -> ${at(false, true)}  |  `
+    + `cachedTrack alone: (false,false) -> ${at(false, false)} vs (true,false) -> `
+    + `${JSON.stringify(at(true, false))}`);
+
+  // ---- the run-time half of #29 (engine/bounce.js's bounceWireCode) --------
+  ok('a code the unit never declared is folded to RENDER_FAILED before it reaches the wire — driven, '
+    + 'because that call site carries no literal to scan for',
+    bounceWireCode('ENOSPC') === 'RENDER_FAILED' && bounceWireCode(undefined) === 'RENDER_FAILED'
+      && bounceWireCode('BOUNCE_BUSY') === 'RENDER_FAILED' && bounceWireCode('toString') === 'RENDER_FAILED',
+    `ENOSPC -> ${bounceWireCode('ENOSPC')}, undefined -> ${bounceWireCode(undefined)}, `
+    + `BOUNCE_BUSY -> ${bounceWireCode('BOUNCE_BUSY')}, toString -> ${bounceWireCode('toString')} `
+    + '(ENOSPC is reachable: writeBounce pipes OUTSIDE the SINK_REFUSED try/catch)');
+  ok('...and a declared one passes through untouched, so the fold is not a constant either',
+    Object.keys(BOUNCE_CODES).every((c) => bounceWireCode(c) === c),
+    `all ${Object.keys(BOUNCE_CODES).length} declared codes pass through: `
+    + Object.keys(BOUNCE_CODES).map((c) => `${c}->${bounceWireCode(c)}`).join(' '));
+
+  // ---- the per-stem shape guard (offscreen/bounce.js) ----------------------
+  const N = Math.round(0.5 * SR);
+  const shortStem = toneStems(N);
+  shortStem[STEMS[3]] = [shortStem[STEMS[3]][0].subarray(0, N - 1), shortStem[STEMS[3]][1]];
+  const missing = toneStems(N);
+  delete missing[STEMS[2]];
+  const caught = async (track) => {
+    try { await bounce(track, unitySettings()); return null; } catch (e) { return e; }
+  };
+  const eShort = await caught({ stems: shortStem, frames: N });
+  const eMissing = await caught({ stems: missing, frames: N });
+  const eOk = await caught({ stems: toneStems(N), frames: N });
+  ok('a stem SHORTER than the track is NO_TRACK naming the stem — not a deliverable that is silently '
+    + 'not the track',
+    eShort != null && eShort.code === 'NO_TRACK' && eShort.message.includes(STEMS[3])
+      && eShort.message.includes(String(N)),
+    eShort ? `${eShort.code}: ${eShort.message}` : 'it rendered a track one of whose stems is short');
+  ok('...and a MISSING stem is the same refusal, and a complete track is not refused at all',
+    eMissing != null && eMissing.code === 'NO_TRACK' && eMissing.message.includes(STEMS[2])
+      && eOk === null,
+    `${eMissing ? eMissing.code : 'nothing thrown'} for a missing stem; `
+    + `a complete track threw ${eOk ? eOk.code : 'nothing'}`);
+
+  // ---- the producer failure, DRIVEN rather than mutated --------------------
+  /**
+   * LAYER 1 OF THE GUARD AND THE RE-THROW, WITHOUT A MUTATION. `o.onProgress` is
+   * called inside the same try block the producer runs in, so a consumer of
+   * progress that throws exercises exactly the path a `fill()` that threw would:
+   * the callback's catch names the frame, the `finally` resumes the context so
+   * the render still settles, and `if (failure) throw failure` is what stops a
+   * truncated bounce being presented as a finished one. Before this, the
+   * re-throw could be deleted with the whole suite still green.
+   */
+  const LONG = Math.round(7 * SR);
+  const CAP = 1 << 16, EVERY = 1 << 15;
+  const planF = bouncePlan({ frames: LONG, capacity: CAP, refillEvery: EVERY });
+  let boom = null;
+  try {
+    const h = makeOfflineHarness(EXT);
+    await renderBounce({
+      track: { stems: toneStems(LONG), frames: LONG }, settings: unitySettings(),
+      assetUrl: h.assetUrl, audio: h.audio, capacity: CAP, refillEvery: EVERY,
+      onProgress: () => { throw new Error('the consumer of progress threw'); },
+    });
+  } catch (e) { boom = e; }
+  ok('a producer that failed mid-render is a RENDER_FAILED naming the frame and the second — never a '
+    + 'finished bounce, and never an unhandled rejection',
+    planF.refills.length >= 1 && boom != null && boom.code === 'RENDER_FAILED'
+      && /the producer failed at frame (\d+) of (\d+) \(\d+\.\d\d s\)/.test(boom.message)
+      && boom.message.includes('the consumer of progress threw')
+      && Number(/at frame (\d+)/.exec(boom.message)[1]) === planF.refills[0].frame,
+    boom ? boom.message : `it resolved as a finished bounce over ${planF.refills.length} stops`);
 });
 
 console.log(`\n${fail ? '\x1b[31m' : '\x1b[32m'}${pass} passed, ${fail} failed\x1b[0m`);

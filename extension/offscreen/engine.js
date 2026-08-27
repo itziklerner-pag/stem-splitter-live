@@ -91,7 +91,7 @@ import * as host from './host.js';
  * the design, the arithmetic and the reason SPEED is not one of the things a
  * bounce bakes.
  */
-import { bounceSettings, isBounceCode, BOUNCE_CODES } from '../engine/bounce.js';
+import { bounceSettings, bounceRefusal, bounceWireCode, BOUNCE_CODES } from '../engine/bounce.js';
 import { bounceToSink } from './bounce.js';
 import { assertHost, ENGINE_HOST_DUTIES, modelSourceWord } from '../shared/host.js';
 
@@ -399,8 +399,10 @@ const shared = {
     //
     // Mode 1 and Mode 2 are untouched: nothing prepares deck B unless the dual
     // console is open, and the engine deliberately does not prepare at boot.
-    const n = liveDecks().filter((d) =>
-      d.prepared || d.status === 'recording' || (d.live.status !== 'idle' && d.live.status !== 'error')).length;
+    // `deckIsLive` (:~496) and not a second spelling of it: this arm count and
+    // `deckLoaded` must never be able to disagree about what "live" means. The
+    // only thing this adds is PREPARED, which is the sentence below.
+    const n = liveDecks().filter((d) => d.prepared || deckIsLive(d)).length;
     // MEDIAN, not p95 — see GpuScheduler's comment on medMs.
     //
     // MEMOISED FOR AS LONG AS ANY DECK IS LIVE, and that is the point rather
@@ -518,14 +520,25 @@ function deck(id) {
 /** Every deck that currently exists. */
 const liveDecks = () => (deckB ? [decks.A, deckB] : [decks.A]);
 
+/**
+ * IS THIS DECK LIVE — capturing, or running a live pipeline?
+ *
+ * FACTORED OUT OF `deckLoaded` RATHER THAN COPIED. `BOUNCE_START` needs this
+ * half on its own, to tell a deck that is live from a deck that is merely empty
+ * (`engine/bounce.js`'s `bounceRefusal`), and a second copy of a predicate is
+ * two answers that can disagree — which is the entry-point rule in AGENTS.md and
+ * the reason `mixTarget` exists one screen down.
+ */
+const deckIsLive = (d) => !!d && (d.status === 'recording'
+  || (d.live.status !== 'idle' && d.live.status !== 'error'));
+
 /** A deck is "loaded" once it has audio to play — capture attached or already live. */
-const deckLoaded = (d) => !!d && (d.status === 'recording' ||
-  (d.live.status !== 'idle' && d.live.status !== 'error') ||
+const deckLoaded = (d) => deckIsLive(d) ||
   // A cached deck has audio to play WITHOUT a capture or a live pipeline, and
   // "loaded" is what parks the crossfader and picks the master trim. Omitting it
   // would attenuate a lone cached deck 3 dB by a control nobody touched — the
   // exact bug effectiveXfPosition exists to prevent.
-  !!(cachedDecks[d.id] && cachedDecks[d.id].track));
+  !!(d && cachedDecks[d.id] && cachedDecks[d.id].track);
 
 // ------------------------------------------------------------- the stem cache
 /**
@@ -1234,13 +1247,16 @@ const bounceCancelled = { A: false, B: false };
 /**
  * Report a bounce failure on the wire, with a code from the CLOSED set.
  *
- * `isBounceCode` is checked at the call sites rather than trusted: a code that
- * this unit never declared reaching a surface is exactly what #29 measured —
- * `ARM_CODES` is a closed set of 8 the seam never checks, and an invented one
- * gets an undismissable banner with a dead button and nothing red anywhere.
+ * The validation is `bounceWireCode` in `engine/bounce.js` and not a ternary
+ * here, because it is the RUN-TIME half of #29 and a run-time property takes a
+ * function a suite can run. The call site that needs it is the catch below —
+ * `bounceFailed(id, e && e.code, …)`, where `e` is not always one of ours: a
+ * disk-full inside `writeBounce`'s `pipeTo` arrives carrying `.code = 'ENOSPC'`.
+ * Unvalidated that reaches `BOUNCE_ERROR.code`, which is ARM_CODES again — a
+ * plausible code no table declares, on a surface, with nothing red anywhere.
  */
 function bounceFailed(id, code, detail) {
-  const c = isBounceCode(code) ? code : 'RENDER_FAILED';
+  const c = bounceWireCode(code);
   const message = detail || BOUNCE_CODES[c];
   log(`ERROR [${id}] bounce ${c}: ${message}`);
   send({ type: 'BOUNCE_ERROR', deck: id, code: c, message });
@@ -1853,7 +1869,36 @@ async function handle(m) {
         const id = normalizeDeckId(m.deck);
         const cd = cachedDecks[id];
         if (bouncing[id]) return void bounceFailed(id, 'BUSY');
-        if (!cd || !cd.track) return void bounceFailed(id, isCached(id) ? 'NO_TRACK' : 'NOT_CACHED');
+        /**
+         * THE REFUSAL IS A VALUE, NOT A TERNARY HERE, AND THAT IS THE FIX FOR A
+         * DEFECT THAT SHIPPED. This line read
+         *
+         *     if (!cd || !cd.track) bounceFailed(id, isCached(id) ? 'NO_TRACK' : 'NOT_CACHED');
+         *
+         * and `isCached` (`:534`) is `!!(cachedDecks[id] && cachedDecks[id].track)`
+         * — the exact negation of the `if`, with no await between them. So
+         * `NO_TRACK` was UNREACHABLE and every refusal said `NOT_CACHED`.
+         * `engine/bounce.js`'s `bounceRefusal` carries the decision and the whole
+         * story; qa/bounce.mjs drives every state through it and reads the code
+         * back, because the assertion that used to guard this scanned this file
+         * for the two STRING LITERALS and both were present the whole time.
+         *
+         * AND IT TAKES TWO FACTS, NOT A `CachedDeck`. The first repair passed
+         * `cd` and read `!cd -> NOT_CACHED`, which leaves the reviewer's own
+         * failing case unfixed: `stopCached()` a few hundred lines up sets
+         * `cachedDecks[id] = null` immediately after `cd.stop()`, so a deck that
+         * HAD a track and was unloaded arrives here with no `CachedDeck` at all
+         * and is indistinguishable, by that test, from a live one. Liveness is
+         * not derivable from `cachedDecks`; it is `deckIsLive`, and it is passed
+         * in so the two facts stay independent.
+         */
+        const refusal = bounceRefusal({
+          cachedTrack: !!(cd && cd.track),
+          // `decks[id]`, never `deck(id)` — `deck('B')` CONSTRUCTS deck B, which
+          // is 1.7 GB of session state built by a refusal.
+          live: deckIsLive(decks[id]),
+        });
+        if (refusal) return void bounceFailed(id, refusal);
         bouncing[id] = true;
         bounceCancelled[id] = false;
         const t0 = Date.now();
@@ -1864,9 +1909,14 @@ async function handle(m) {
             settings: bounceSettings(cd),
             title,
             assetUrl: host.assetUrl,
-            // Called through a wrapper rather than handed over by reference so
-            // that the seam scan in test.js sees a CALL here. A duty consumed
-            // only by hand-off reads as one nothing reaches for.
+            // A WRAPPER, AND NOT FOR THE REASON THIS COMMENT USED TO GIVE. It
+            // claimed a bare `exportSink: host.exportSink,` would be invisible to
+            // the seam scan in test.js. It would not: that scan is
+            // `reached = dutyCalls ∪ dutyRefs`, and `dutyRefs` matches
+            // `host.<name>` followed by a comma — i.e. exactly the hand-off form.
+            // The wrapper stays because it puts THIS file and THIS line in the
+            // stack of a Host that throws, which is what `SINK_REFUSED`'s detail
+            // is read off; it is not load-bearing for the exemption bookkeeping.
             exportSink: (plan) => host.exportSink(plan),
             cancelled: () => bounceCancelled[id],
             /**

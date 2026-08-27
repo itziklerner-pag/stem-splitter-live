@@ -27,6 +27,30 @@ baked in. This extension's own Host still refuses every destination.
   `BOUNCE_DONE` / `BOUNCE_ERROR`; the file goes wherever the Host's `exportSink`
   puts it. This extension's own Host still refuses every destination, so nothing
   about what the extension does changes.
+- **Every code that reaches a bounce surface is one the unit declared, and both
+  halves are checked.** `BOUNCE_CODES` is a closed set of six; `bounceError`
+  refuses an undeclared code at the throw site, and `bounceWireCode` folds one to
+  `RENDER_FAILED` on receipt — which matters because the engine reports
+  `e.code`, and a disk-full inside the write hands it an OS error whose `.code`
+  is `ENOSPC`. That is [#29](https://github.com/itziklerner-pag/stem-splitter-live/issues/29)'s
+  lesson applied rather than repeated. `bounceRefusal` decides the two
+  empty-deck refusals as a value, so "no track on this deck" and "this deck is
+  live" stay two different sentences with two different fixes.
+- **A bounce refusal is decided from TWO independent facts, and liveness is one
+  of them.** Whether the deck holds a whole cached track, and whether it is
+  live — because the second is not derivable from the first. `stopCached()`
+  drops the deck's `CachedDeck` the moment a track is unloaded, so a test on
+  that object alone cannot tell an unloaded deck from a capturing one, and a
+  user who unloaded a track would be told "this deck is live" about a deck that
+  is idle. `deckIsLive` is factored out of `deckLoaded` rather than copied, so
+  the engine has one answer to "is this deck live" and not two.
+- **`BOUNCE_CANCEL` is honoured on short tracks too, and the bound is stated.**
+  The cancel flag is read at each producer stop, and a bounce shorter than one
+  refill period (5.94 s at the shipped ring) has none — so it is read once more
+  after the render settles. Either way the Host is never asked for a
+  destination, because the render runs before the dialog: a cancelled bounce
+  touches nothing at all. The failure names the render frame it actually stopped
+  at, not the first stop.
 - **A bounce bakes THREE things, and "speed" is withdrawn with its reason.**
   Faders, mute/solo (with the crossfader) and transpose. A File source is the
   only kind a bounce can render, and there is no rate to bake on that path — the
@@ -49,7 +73,12 @@ baked in. This extension's own Host still refuses every destination.
   fourteen-second fixture — longer than the 11.89 s stem ring on purpose, because
   a bounce gate shorter than the ring cannot see the failure the whole feature
   exists to prevent. `qa/bounce-mutations.mjs` is its mutation battery, in the
-  repository beside it, stamped against the commit its anchors were cut from.
+  repository beside it, stamped against the commit its anchors were cut from —
+  and every one of its cases DECLARES the assertions it must turn red, failing
+  if the observed set differs in either direction. A pass count cannot see
+  coverage migrating from one mutation to another, because the union it reports
+  is unchanged.
+
 ## [0.3.1] — 2026-08-27
 
 A documentation release. No code in the unit changed; no assertion count moved.

@@ -144,7 +144,9 @@ That last row is the trap, and it is exactly what "just use an `OfflineAudioCont
 > constructed** and none of the three rows above is on the path. What the trap is really
 > about is the SOURCE NODE, not the context, and the sentence above is easy to read as
 > being about the context. Written out because a bounce is exactly the feature somebody
-> will reach for this paragraph to veto. The Web Audio spec deliberately leaves this implementation-defined; Gecko uses a higher-quality (Speex) resampler, Blink uses linear. So: **browser-implementation-defined, and the browser we target picked the bad one.**
+> will reach for this paragraph to veto.
+
+The Web Audio spec deliberately leaves this implementation-defined; Gecko uses a higher-quality (Speex) resampler, Blink uses linear. So: **browser-implementation-defined, and the browser we target picked the bad one.**
 
 Quantitatively, linear interpolation at fractional phase `α` has magnitude response
 
