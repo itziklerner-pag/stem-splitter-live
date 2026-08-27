@@ -4641,6 +4641,44 @@ if (group('host')) {
     listed('captureStream') && duties.filter((k) => k !== 'captureStream').every((k) => !listed(k)),
     why == null ? 'nothing was thrown' : why);
 
+  /**
+   * HOST INTERFACE v1.1 — A HOST SHORT ONE OF THE TWO NEW DUTIES IS REFUSED BY
+   * NAME, which is the whole mechanism by which ADDING a duty is a MINOR change
+   * rather than a silent one.
+   *
+   * `shared/host.js`'s freeze block: "Adding a duty is a MINOR change that every
+   * existing Host fails at boot, loudly, by `assertHost`." That sentence is only
+   * true if the failure NAMES the duty and says what it is for — otherwise the
+   * author of a Host vendored against the previous tag is handed a count and
+   * left to diff two interfaces. `captureStream`'s refusal above proves the
+   * mechanism for a v1 duty; these prove it for the two duties v1.1 adds, which
+   * are the ones an existing Host is actually short.
+   *
+   * Matched as `name() — `, the exact form `assertHost` lists a MISSING duty in,
+   * for the reason the block above records: a bare identifier match goes red on
+   * a rewording that has nothing to do with the claim.
+   *
+   * FAILS WHEN IT CANNOT LOOK: a duty that is not in `ENGINE_HOST_DUTIES` at all
+   * cannot be deleted from a stub built out of it, and a green here would then
+   * mean only that nothing was checked.
+   */
+  for (const k of ['sourceBytes', 'exportSink']) {
+    const short = stub();
+    delete short[k];
+    const msg = threw(() => assertHost(short, ENGINE_HOST_DUTIES, 'EngineHost'));
+    ok(`A HOST THAT IS SHORT \`${k}\` IS REFUSED, AND THE ERROR NAMES THAT DUTY AND WHAT IT IS FOR  `
+      + '[entry point: assertHost(), called at extension/offscreen/engine.js module scope]',
+      duties.includes(k) && msg != null && msg.includes(`${k}() — `)
+      && msg.includes(ENGINE_HOST_DUTIES[k])
+      && duties.filter((d) => d !== k).every((d) => !msg.includes(`${d}() — `)),
+      !duties.includes(k)
+        ? `${k} is in no duty table, so this assertion deleted nothing and checked nothing`
+        : msg == null
+          ? `a Host with no ${k} was ACCEPTED — the duty would be added and no existing Host ever told, `
+            + 'which is the silent break the freeze exists to make loud'
+          : msg);
+  }
+
   const absent = threw(() => assertHost(undefined, ENGINE_HOST_DUTIES, 'EngineHost'));
   ok('AN ABSENT HOST IS THE LOUDEST FAILURE HERE, NOT THE QUIETEST  '
     + '[entry point: assertHost(), the `!host || ...` shape AGENTS.md bans]',
@@ -4794,10 +4832,51 @@ if (group('host')) {
           ? `undeclared: ${undeclared.map((k) => `host.${k}()`).join(', ')} — declare it in ENGINE_HOST_DUTIES or a Host will pass assertHost and still throw`
           : `${reached.length} reached across ${unitFiles.length} unit files: ${reached.join(', ')}`);
 
-  const unreached = duties.filter((k) => !reached.includes(k));
-  ok('...and every declared duty is actually reached for, so a second Host implements nothing dead',
+  /**
+   * THE ONE LEGITIMATE REASON A DECLARED DUTY IS NOT REACHED FOR YET — and it is
+   * a WINDOW, not a carve-out.
+   *
+   * `shared/host.js`'s freeze block makes adding a duty a MINOR change that every
+   * existing Host fails at boot. That is precisely what lets a duty be DECLARED
+   * in one tag and CONSUMED in the next: a second product implements it against
+   * a tag it can already vendor, instead of against one that does not exist yet.
+   * Host interface v1.1 does exactly that — `sourceBytes` and `exportSink` are
+   * declared here for the ahead-of-time separation runner and the export path,
+   * neither of which is in this tree. Without this window the seam could only
+   * ever grow in the same tag as its caller, which is the serialisation the
+   * split into two tags exists to avoid.
+   *
+   * SO THE EXEMPTION IS EXACT IN BOTH DIRECTIONS, and that is what keeps it from
+   * becoming the "expected red" list AGENTS.md forbids:
+   *   - a duty that is unreached and NOT named below is a red, unchanged;
+   *   - a duty named below that IS reached is ALSO a red, so the slice that
+   *     writes the caller has to delete its line in the same commit. An
+   *     exemption that outlives its reason is the thing that rots;
+   *   - a name below that is in no duty table is a red too, so a duty that gets
+   *     renamed or removed cannot leave a permanent hole behind it.
+   */
+  const DECLARED_AHEAD_OF_ITS_CONSUMER = Object.freeze({
+    sourceBytes: 'the ahead-of-time separation runner, which reads a Source that is a file',
+    exportSink: 'the export path, which opens one writable per stem of a deliverable',
+  });
+  const ahead = Object.keys(DECLARED_AHEAD_OF_ITS_CONSUMER);
+  const unreached = duties.filter((k) => !reached.includes(k) && !ahead.includes(k));
+  ok('...and every declared duty is actually reached for, so a second Host implements nothing dead  '
+    + `[less ${ahead.length} declared ahead of its consumer: ${ahead.join(', ')}]`,
     reached.length > 0 && unreached.length === 0,
     unreached.length ? `declared but never called: ${unreached.join(', ')}` : `all ${duties.length}`);
+
+  const consumed = ahead.filter((k) => reached.includes(k));
+  const phantom = ahead.filter((k) => !duties.includes(k));
+  ok('...and no duty is exempted for longer than its reason lasts: each one named above is still declared, and still has no caller  '
+    + '[entry point: the same scan, read against DECLARED_AHEAD_OF_ITS_CONSUMER]',
+    consumed.length === 0 && phantom.length === 0,
+    consumed.length
+      ? `${consumed.join(', ')} HAS a caller now — delete its line from DECLARED_AHEAD_OF_ITS_CONSUMER in the `
+        + 'same commit as the caller, or the exemption goes on covering a duty nothing is checking'
+      : phantom.length
+        ? `${phantom.join(', ')} is exempted from a check it is not subject to — it is in no duty table at all`
+        : `${ahead.length} exempted, ${ahead.map((k) => `${k} (${DECLARED_AHEAD_OF_ITS_CONSUMER[k]})`).join('; ')}`);
 
   /**
    * R5 — TRACK-STOP DISCIPLINE, ASSERTED FOR THE FIRST TIME.
@@ -5518,6 +5597,47 @@ if (group('host')) {
           ? `the caller\u2019s assetUrl won: INIT wasmDirUrl ${initSecond.wasmDirUrl} — the unit now decides where the Host `
             + 'keeps the ORT runtime'
           : `INIT wasmDirUrl ${initSecond.wasmDirUrl}`);
+
+    /**
+     * THE TWO DUTIES THIS HOST REFUSES ARE STILL DRIVEN, because a refusal is an
+     * implementation and an undriven implementation is a claim.
+     *
+     * `offscreen/host.js` answers `sourceBytes` and `exportSink` by rejecting:
+     * its Sources are tabs, which have no encoded bytes behind them, and
+     * `tools/tree-check.mjs` asserts this build requests no `downloads`
+     * permission. Both refusals are legitimate — `sourceBytes`'s own
+     * declaration says a Host whose Sources are all streams may reject every
+     * token here — and both are exactly the shape that decays into a stub that
+     * RESOLVES with an empty answer, which is strictly worse: a zero-length
+     * buffer decodes to a track that is silently not the track, and a sink map
+     * missing a stem exports five of six files and calls it done.
+     *
+     * REJECTS RATHER THAN THROWS. Each is declared `=> Promise<…>`, and a
+     * synchronous throw escapes a `.catch()` that is not preceded by an `await`
+     * — landing as an unhandled error one frame out from the call, which is the
+     * late failure this seam moves earlier everywhere else. So `probe` is asked
+     * whether the call RETURNED at all, and the settlement is asked separately.
+     *
+     * Called UNBOUND through `probe`, like every duty in this block.
+     */
+    for (const [duty, arg] of [['sourceBytes', 'token-A'],
+      ['exportSink', { title: 'a track', files: ['vocals.wav'] }]]) {
+      const call = probe(engineHost[duty], arg);
+      const settled = call.ok
+        ? await Promise.resolve(call.v).then((v) => ({ resolved: true, v }), (e) => ({ resolved: false, e }))
+        : { threwSync: call.e };
+      const msg = String((settled.e && settled.e.message) || settled.e || '');
+      ok(`${duty}() REFUSES BY REJECTING, AND THE REFUSAL NAMES ITSELF — this Host has no file Sources and no `
+        + 'export path, and an empty answer would travel on as a real one  '
+        + `[entry point: extension/offscreen/host.js ${duty}(), called unbound as engine.js passes its duties]`,
+        settled.resolved === false && msg.includes(duty),
+        settled.threwSync
+          ? `${duty}() threw SYNCHRONOUSLY (${settled.threwSync}) — it is declared => Promise, so a caller that `
+            + 'attaches .catch() without awaiting first never sees it'
+          : settled.resolved
+            ? `${duty}() RESOLVED with ${JSON.stringify(settled.v)} — the unit would carry that forward as an answer`
+            : msg || `${duty}() rejected with something carrying no message`);
+    }
   } finally {
     delete globalThis.chrome;
     delete globalThis.addEventListener;

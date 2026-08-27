@@ -100,6 +100,70 @@ export const captureStream = (sourceToken) => navigator.mediaDevices.getUserMedi
   video: false,
 });
 
+/* ------------------------------------------------ the two duties this Host refuses
+ * A REFUSAL IS AN IMPLEMENTATION, and it is the only honest one here.
+ *
+ * Host interface v1.1 adds `sourceBytes` and `exportSink` for a Source that is a
+ * FILE and a deliverable that is a FOLDER. This build has neither, and the two
+ * absences are structural rather than unfinished:
+ *
+ *   - ITS SOURCES ARE TABS. A token minted by `chrome.tabCapture.getMediaStreamId`
+ *     names a live tab, not a file, and there are no encoded bytes anywhere behind
+ *     it. `sourceBytes`'s own declaration blesses exactly this shape — "a Host whose
+ *     Sources are all streams may reject every token here" — because ONE token
+ *     vocabulary answering whichever duty the engine asks is what keeps a Host from
+ *     minting a second kind of token the deck cannot carry.
+ *   - IT HAS NO EXPORT. `tools/tree-check.mjs:58` asserts this build does not request
+ *     the `downloads` permission, `ui/embed.js:15-16` says why — offline export is
+ *     the side-panel build's — and the offscreen document could not reach
+ *     `chrome.downloads` even if the manifest asked for it: its entire `chrome.*`
+ *     surface is `runtime.{getURL, onMessage, sendMessage}`. A Host that answered
+ *     with an OPFS handle would satisfy the type and hand the user a deliverable
+ *     inside a storage bucket they have no way to open, which is the "silently not
+ *     the thing" failure this seam is written against.
+ *
+ * BOTH REJECT RATHER THAN THROW SYNCHRONOUSLY. Each is declared `=> Promise<…>` and
+ * every caller of a promise-returning duty is `.catch`-wrapped somewhere; a
+ * synchronous throw from an `async`-shaped duty escapes past a `.catch()` that is
+ * not preceded by an `await` and lands as an unhandled error one frame out from the
+ * call. `captureStream` gets this from `getUserMedia` for free; these two say it.
+ *
+ * WHY THEY ARE HERE AT ALL, given that nothing under this Host will ever call them:
+ * `assertHost(host, ENGINE_HOST_DUTIES)` runs at `engine.js` module scope and refuses
+ * a Host short a duty, so this file gains both or the extension does not boot. That
+ * is the freeze's design — adding a duty is the MINOR change every existing Host
+ * fails at boot, loudly — and a stub that resolved with an empty answer instead
+ * would be the lie the check exists to catch.
+ * -------------------------------------------------------------------------- */
+
+/**
+ * @type {import('../shared/host.js').EngineHost['sourceBytes']}
+ *
+ * Rejects every token, for the reason above: under this Host a Source token names a
+ * tab. The message names the duty and the Host rather than the token, because the
+ * token is opaque to the unit that would be reading the message and echoing it back
+ * says nothing a reader can act on.
+ */
+export const sourceBytes = async () => {
+  throw new Error('sourceBytes: this Host has no file Sources. Its Source tokens name tabs, '
+    + 'which have no encoded bytes behind them — ask captureStream for one of those.');
+};
+
+/**
+ * @type {import('../shared/host.js').EngineHost['exportSink']}
+ *
+ * Rejects every plan, for the reason above: this build writes no files. Named `plan`
+ * and read for its `files` so the refusal says how many destinations were asked for,
+ * which is the difference between "this Host cannot export" and "this Host lost your
+ * export".
+ */
+export const exportSink = async (plan) => {
+  const n = (plan && Array.isArray(plan.files) && plan.files.length) || 0;
+  throw new Error(`exportSink: this Host has nowhere to put a deliverable, so none of the ${n} `
+    + 'file(s) asked for was opened. This build declares no downloads permission and its '
+    + 'offscreen document cannot reach one; offline export is the side-panel build.');
+};
+
 /**
  * @type {import('../shared/host.js').EngineHost['assetUrl']}
  *
