@@ -46,6 +46,12 @@
  *
  * The worked example is `bounce-tau-is-the-worklet-default` below.
  *
+ * AND THE VERDICT ITSELF WAS WATCHED FAILING, because a verdict that cannot fail
+ * is the thing this whole file is about. Point that anchor at 0.020 instead of
+ * 0.003 - a mutation that IS visible - and it reports
+ * `MISS  DECLARED EQUIVALENT BUT IT WENT RED: 1 of 72`, naming the assertion
+ * that saw it. Measured, then reverted.
+ *
  * ===========================================================================
  * THREE WAYS A GATE FAILS, AND THIS BATTERY CHECKS ALL THREE
  * ===========================================================================
@@ -90,6 +96,21 @@ const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const SUITE = path.join(HERE, 'bounce.mjs');
 const LEARN = process.argv.includes('--learn');
+/**
+ * `--only <id>...` runs a subset. THE IDS ARE VALIDATED, and that is not
+ * politeness: a sibling repository ships fourteen batteries whose selector is
+ * `ONLY=("$@")` with no check at all, so a typo'd id runs nothing, burns a
+ * baseline on the shared machine and exits 1 with no sentence saying why. An
+ * unknown id here is a refusal that NAMES the ids it does know.
+ *
+ * AND A SUBSET NEVER CLAIMS COMPLETENESS. The closing line says how many anchors
+ * were skipped, because a battery that prints its full-run sentence over a subset
+ * is an instrument reporting on itself.
+ */
+const ONLY = (() => {
+  const i = process.argv.indexOf('--only');
+  return i < 0 ? null : process.argv.slice(i + 1).filter((a) => !a.startsWith('--'));
+})();
 
 /**
  * THE REVISION THE ANCHORS WERE CUT AGAINST, in two halves, because a stamp
@@ -535,6 +556,18 @@ function compareRedSet(declared, observed) {
   return { ok: unexplained.length === 0 && missing.length === 0 && ambiguous.length === 0, unexplained, missing, ambiguous };
 }
 
+const ALL_IDS = ANCHORS.map((a) => a.id);
+if (ONLY) {
+  const unknown = ONLY.filter((id) => !ALL_IDS.includes(id));
+  if (ONLY.length === 0 || unknown.length) {
+    console.log(`\x1b[31m--only: ${ONLY.length === 0 ? 'no anchor id given'
+      : `no anchor named ${unknown.map((u) => JSON.stringify(u)).join(', ')}`}\x1b[0m`);
+    console.log(`  the ${ALL_IDS.length} anchors are:\n    ${ALL_IDS.join('\n    ')}`);
+    process.exit(2);
+  }
+}
+const SELECTED = ANCHORS.filter((a) => !ONLY || ONLY.includes(a.id));
+
 const orig = readAll();
 let dirty = false;
 const rows = [];
@@ -551,7 +584,7 @@ try {
     process.exit(2);
   }
 
-  for (const a of ANCHORS) {
+  for (const a of SELECTED) {
     const found = a.edits.map((e) => {
       const src = orig.get(e.file);
       let n = 0, at = 0;
@@ -654,5 +687,10 @@ console.log(`\n  ${matched}/${rows.length} anchors still MATCH their source  · 
 if (matched < rows.length) console.log('  \x1b[33mre-cut every anchor that no longer matches: the instrument has decayed, silently\x1b[0m');
 if (rows.some((r) => r.verdict === 'MISS')) console.log('  \x1b[31man anchor that matches and no longer reds is decay OR A REAL COVERAGE LOSS — investigate\x1b[0m');
 if (rows.some((r) => r.verdict === 'SET')) console.log('  \x1b[31ma red set that differs is coverage that MIGRATED — the total cannot see it, which is why it is declared per case\x1b[0m');
-if (bad === 0) console.log('  \x1b[32mevery anchor applies, and every one produced exactly the reds it declared\x1b[0m');
+if (ONLY) {
+  console.log(`  \x1b[33mSUBSET: ${rows.length} of ${ALL_IDS.length} anchors ran; `
+    + `${ALL_IDS.length - rows.length} were skipped, so this run says nothing about them\x1b[0m`);
+} else if (bad === 0) {
+  console.log('  \x1b[32mevery anchor applies, and every one produced exactly the reds it declared\x1b[0m');
+}
 process.exit(bad === 0 ? 0 : 1);
