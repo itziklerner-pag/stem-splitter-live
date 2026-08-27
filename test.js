@@ -158,7 +158,7 @@ import {
   makeLivePlan, chunkPlan, makeFades, LiveEmitter, readWindow, primedPct, skipFrames, STEM_PLANES,
   PASS_PLANE_L, PASS_PLANE_R,
 } from './extension/engine/live.js';
-import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler } from './extension/engine/offline.js';
+import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler, runOffline } from './extension/engine/offline.js';
 import { StemRingWriter, stemRingByteLength, PLANES, H_READ, H_PLAY } from './extension/shared/stemring.js';
 import { outputTick, OUTPUT_DEAD_HOLD_SEC, OUTPUT_DEAD_HOLD_FRAMES, MIXER_SILENT_PEAK } from './extension/offscreen/live.js';
 import {
@@ -7589,6 +7589,24 @@ if (group('cache')) {
  * nearly reached the contract; it is named here so nobody adds it back.
  */
 if (group('offline')) {
+  /**
+   * THE GROUP-LEVEL GUARD, and it is the second layer rather than the only one.
+   *
+   * Every assertion below names its own failure. What this catches is the throw
+   * NOBODY named — the one that escapes a block and takes the whole file's
+   * verdict down with it, so 700 unrelated assertions never run and the report
+   * is a stack trace. Found by mutation: folding every window in as window 0
+   * makes `OfflineAssembler.add` refuse out-of-order (correctly, and by name),
+   * that refusal escapes `runOffline`, and `node test.js` dies. The named red
+   * was there; nothing was left standing to print it.
+   *
+   * Two layers, per the same finding in the Host-seam slice: the per-item
+   * message, and a guard around the body so a defect that only shows on USE
+   * still reports. The body is deliberately NOT re-indented, so the diff that
+   * added this is one line at each end.
+   */
+  let escaped = null;
+  try {
   head('offline — the symmetric window, and what it is NOT');
   {
     const p = makeOfflinePlan(STRIDE * 6 + SEGMENT);
@@ -7778,6 +7796,144 @@ if (group('offline')) {
       dip <= 2 ** -23, `worst deviation from unity ${dip.toExponential(2)} at ${plan.windows} windows`);
   }
 
+  head('offline — the runner: every window once, in order, and a cancel that lands nothing');
+  /**
+   * EVERY ASSERTION HERE READS A COUNT. `elapsedMs` and `etaMs` are a progress
+   * READOUT, not a verdict, and a gate on a duration measured from a real clock
+   * on a shared machine is a gate that measures the machine (AGENTS.md). `now`
+   * is injected instead, so the ETA arithmetic is checked exactly while nothing
+   * reads a clock.
+   */
+  {
+    const n = STRIDE * 4 + 1000;
+    const plan = makeOfflinePlan(n);
+    const l = noise(n, 21), r = noise(n, 23);
+    const ring = bufferRing(l, r);
+    /** The identity model, and a log of exactly how it was called. */
+    const calls = [];
+    const identity = (mixL, mixR, k) => { calls.push(k); return [Float32Array.from(mixL), Float32Array.from(mixR)]; };
+    const events = [];
+
+    let clock = 1000;
+    const res = await runOffline({
+      plan, ring, separate: identity, onProgress: (e) => events.push(e),
+      now: () => { clock += 100; return clock; },
+    });
+
+    ok('every window is separated EXACTLY ONCE and in order  '
+       + '[entry point: runOffline over an identity separator]',
+      calls.length === plan.windows && calls.every((k, i) => k === i) && plan.windows >= 4,
+      `${calls.length} calls over ${plan.windows} windows: [${calls}]`);
+    ok('...and the run reports it finished rather than leaving the caller to infer it',
+      res.cancelled === false && res.done === plan.windows && res.planes !== null);
+    ok('the assembled track is the input back, so the runner drives the geometry it was given '
+       + 'and does not quietly bypass it',
+      res.planes[0].length === n && res.planes[0].every((v, i) => Math.abs(v - l[i]) <= 2 ** -23),
+      `${res.planes[0].length} frames`);
+
+    ok('progress is emitted ONCE PER WINDOW, monotone, and ends at exactly 1  '
+       + '[entry point: runOffline onProgress]',
+      events.length === plan.windows
+      && events.every((e, i) => e.window === i + 1 && e.windows === plan.windows)
+      && events.every((e, i) => i === 0 || e.pct > events[i - 1].pct)
+      && events[events.length - 1].pct === 1,
+      `${events.length} events, last pct ${events[events.length - 1].pct}`);
+    /**
+     * THE ETA IS ARITHMETIC, CHECKED AGAINST AN INJECTED CLOCK. The fake `now`
+     * advances 100 per read, and `runOffline` reads it once at the start and
+     * once per window — so after window w the elapsed is 100*w and the ETA is
+     * that average projected over the windows left. Asserting the FORMULA, not
+     * a duration.
+     */
+    ok('...and the ETA is the average so far projected over what is left, exactly  '
+       + '[entry point: runOffline with an injected clock — no assertion here reads a real one]',
+      events.every((e) => e.etaMs === Math.round((e.elapsedMs / e.window) * (plan.windows - e.window)))
+      && events[events.length - 1].etaMs === 0,
+      `elapsed ${events.map((e) => e.elapsedMs).join(',')} eta ${events.map((e) => e.etaMs).join(',')}`);
+  }
+
+  {
+    const n = STRIDE * 4 + 1000;
+    const plan = makeOfflinePlan(n);
+    const ring = bufferRing(noise(n, 31), noise(n, 33));
+
+    // Cancel BEFORE anything runs.
+    const never = [];
+    const pre = await runOffline({
+      plan, ring, cancelled: () => true,
+      separate: (a, b, k) => { never.push(k); return [Float32Array.from(a), Float32Array.from(b)]; },
+    });
+    ok('a run cancelled before it starts separates NOTHING and hands back no planes  '
+       + '[entry point: runOffline cancelled()]',
+      never.length === 0 && pre.cancelled === true && pre.planes === null && pre.done === 0);
+
+    /**
+     * Cancel DURING window 1. The flag is raised from inside `separate`, which
+     * is the only way to prove the timing: if the runner checked mid-call it
+     * would abandon a backend that is still running, which is the wedge
+     * `workers/inference.worker.js:10-12` exists to prevent.
+     */
+    const seen = [];
+    let stop = false;
+    const observedInside = [];
+    const mid = await runOffline({
+      plan,
+      ring,
+      cancelled: () => stop,
+      separate: (a, b, k) => {
+        seen.push(k);
+        observedInside.push(stop);        // what the flag was WHEN THIS CALL BEGAN
+        if (k === 1) stop = true;         // raised part-way through the run
+        return [Float32Array.from(a), Float32Array.from(b)];
+      },
+    });
+    ok('a cancel raised during a window lets THAT window finish and stops before the next  '
+       + '[entry point: runOffline, flag raised from inside separate()]',
+      seen.join(',') === '0,1' && mid.done === 2 && plan.windows > 2,
+      `separated [${seen}] of ${plan.windows} windows, done ${mid.done}`);
+    ok('...and the backend is never abandoned mid-call: no separate() began after the flag was up',
+      observedInside.every((wasSet) => wasSet === false), `flag at each call start: [${observedInside}]`);
+    ok('...and a cancelled run hands back NO PLANES, so a caller cannot commit a part-track  '
+       + '— it is not a shorter track, it is no track',
+      mid.cancelled === true && mid.planes === null);
+  }
+
+  {
+    /**
+     * FOUR STRIDES, so failing at window 1 leaves THREE windows unrun. At two
+     * windows the "it stops there" claim is vacuous — window 1 is the last one
+     * and the loop would have ended anyway. The `plan.windows > 2` guard below
+     * caught exactly that when this fixture was shorter.
+     */
+    const n = STRIDE * 4 + 10;
+    const plan = makeOfflinePlan(n);
+    const ring = bufferRing(noise(n, 41), noise(n, 43));
+    const after = [];
+    let msg = null;
+    try {
+      await runOffline({
+        plan, ring,
+        separate: (a, b, k) => { after.push(k); if (k === 1) throw new Error('the model fell over'); return [Float32Array.from(a), Float32Array.from(b)]; },
+      });
+    } catch (e) { msg = e.message; }
+    ok('a separator that throws is reported NAMING THE WINDOW, not three layers down  '
+       + '[entry point: runOffline]',
+      msg !== null && /window 1 of/.test(msg) && /fell over/.test(msg), msg || 'SWALLOWED THE THROW');
+    ok('...and the loop stops there rather than grinding through the rest of the track',
+      after.join(',') === '0,1' && plan.windows > 2, `separated [${after}] of ${plan.windows}`);
+    /**
+     * `runOffline` is async, so its argument check REJECTS rather than throwing
+     * synchronously — a bare try/catch around the call would never fire and the
+     * assertion would pass having caught nothing. Awaited deliberately.
+     */
+    let refused = null;
+    try { await runOffline({ plan, ring }); } catch (e) { refused = e.message; }
+    ok('a missing separator is refused at the door rather than at the first window, and the '
+       + 'refusal ARRIVES AS A REJECTION because the runner is async',
+      refused !== null && /separate/.test(refused) && /REJECTS/.test(refused),
+      refused || 'ACCEPTED A RUN WITH NO SEPARATOR');
+  }
+
   head('offline — refusals, because a gap or a short run is a track with holes in it');
   {
     const threw = (f) => { try { f(); return null; } catch (e) { return e.message; } };
@@ -7813,6 +7969,11 @@ if (group('offline')) {
     ok('channels of different lengths are refused by the ring adapter',
       threw(() => bufferRing(new Float32Array(10), new Float32Array(11))) !== null);
   }
+  } catch (e) { escaped = e; }
+  ok('NOTHING ESCAPED THIS GROUP — an unexpected throw is a named red here rather than a '
+     + 'stack trace that takes the whole file\u2019s verdict down with it  '
+     + '[entry point: the offline group body]',
+    escaped === null, escaped ? `${escaped.message}` : 'clean');
 }
 
 // ===========================================================================

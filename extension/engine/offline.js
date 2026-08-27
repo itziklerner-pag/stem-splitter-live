@@ -52,7 +52,7 @@
  */
 
 import { SEGMENT, STRIDE, SEAM_XFADE_LAW } from '../shared/config.js';
-import { makeFades } from './live.js';
+import { makeFades, readWindow } from './live.js';
 
 /**
  * How many windows cover `frames`, and the geometry they sit on.
@@ -189,4 +189,93 @@ export class OfflineAssembler {
     }
     return this.out;
   }
+}
+
+/**
+ * DRIVE A WHOLE AHEAD-OF-TIME RUN: read each window, separate it, fold it in.
+ *
+ * THE MODEL IS AN INJECTED CALLBACK, and that is the design rather than a
+ * testing convenience. `separate` is whatever turns one segment of mix into
+ * planes — in the product it is `Deck.infer()` through the Host's Backend, and
+ * here it can be an identity function. So the loop, the window sequence, the
+ * progress and the cancellation are all drivable under plain Node with no
+ * Backend, no Host and no worker, which is where they can actually be gated.
+ *
+ * CANCELLATION IS CHECKED BETWEEN WINDOWS AND NEVER INSIDE ONE. The seam
+ * serialises one call per backend (`shared/host.js`) and abandoning a `run()`
+ * in flight is the wedge `workers/inference.worker.js` exists to prevent: a
+ * rejected concurrent call leaves the session permanently dead, with no error a
+ * user can act on and no recovery short of a reload. So a cancel that arrives
+ * during a window lets that window finish and stops before the next one.
+ *
+ * A CANCELLED RUN RETURNS `planes: null`, not a short track. The caller cannot
+ * commit what it does not have — which is a stronger guarantee than returning
+ * a partial result and trusting every caller to check a flag first. It is the
+ * same reason `CacheWriter.abort()` is sticky rather than advisory.
+ *
+ * `now` IS INJECTED so the timings are arithmetic rather than weather. They are
+ * a READOUT — a progress bar — and no assertion should ever gate on a duration
+ * measured from a real clock on a shared machine (`AGENTS.md`: a gate whose
+ * verdict changes on code that did not change is measuring the machine). With
+ * `now` injected, a suite can assert the ETA arithmetic exactly and still read
+ * no clock.
+ *
+ * @param {object} o
+ * @param {ReturnType<makeOfflinePlan>} o.plan
+ * @param {{cap:number, writeFrames:Function, readAt:Function}} o.ring  see `bufferRing`
+ * @param {(mixL:Float32Array, mixR:Float32Array, k:number) => Promise<Float32Array[]>|Float32Array[]} o.separate
+ * @param {(p:object) => void} [o.onProgress]
+ * @param {() => boolean} [o.cancelled]
+ * @param {number} [o.planes] output plane count
+ * @param {() => number} [o.now]
+ * @returns {Promise<{cancelled:boolean, windows:number, done:number, planes:Float32Array[]|null}>}
+ */
+export async function runOffline({
+  plan, ring, separate, onProgress, cancelled, planes = 2, now = Date.now,
+}) {
+  // REJECTS RATHER THAN THROWS, because this function is async and there is no
+  // way for it to do both. Said out loud so a caller writes `await` around the
+  // check rather than a bare try/catch that never fires.
+  if (typeof separate !== 'function') {
+    throw new TypeError('offline: `separate` must be the function that turns one window of mix '
+      + `into planes (got ${typeof separate}) — note this REJECTS, it does not throw synchronously`);
+  }
+  const asm = new OfflineAssembler(plan, planes);
+  const mixL = new Float32Array(plan.segment);
+  const mixR = new Float32Array(plan.segment);
+  const t0 = now();
+  let done = 0;
+  for (let k = 0; k < plan.windows; k++) {
+    // BEFORE the window, so a cancel that arrived during the previous one is
+    // seen here and the backend is never abandoned mid-call.
+    if (cancelled && cancelled()) return { cancelled: true, windows: plan.windows, done, planes: null };
+    readWindow(ring, windowPlan(k, plan).inputStart, plan.segment, mixL, mixR);
+    let out;
+    try {
+      out = await separate(mixL, mixR, k);
+    } catch (e) {
+      // Named with the window, because "the model threw" three layers down is
+      // the report this project keeps having to reconstruct after the fact.
+      throw new Error(`offline: window ${k} of ${plan.windows} failed to separate: `
+        + `${String((e && e.message) || e)}`);
+    }
+    asm.add(k, out);
+    done = k + 1;
+    if (onProgress) {
+      const elapsedMs = now() - t0;
+      onProgress({
+        stage: 'separate',
+        window: done,
+        windows: plan.windows,
+        pct: done / plan.windows,
+        elapsedMs,
+        // Linear on windows completed. Honest about what it is: an average so
+        // far projected forward, not a prediction. null until there is one
+        // window to average over, rather than a division by zero dressed up.
+        etaMs: done ? Math.round((elapsedMs / done) * (plan.windows - done)) : null,
+      });
+    }
+  }
+  if (cancelled && cancelled()) return { cancelled: true, windows: plan.windows, done, planes: null };
+  return { cancelled: false, windows: plan.windows, done, planes: asm.finish() };
 }
