@@ -9,6 +9,78 @@ Because [`PRIVACY.md`](PRIVACY.md) promises that any change to data handling is
 disclosed, **any such change gets its own entry here**, at the top of the
 release, whether or not it is otherwise notable.
 
+## [0.3.1] — 2026-08-27
+
+A documentation release. No code in the unit changed; no assertion count moved.
+v0.3.0 shipped **seven stale measured claims across four files**, and this
+release re-derives every one of them by running the thing rather than by
+adjusting the digits.
+
+This is worth stating plainly rather than correcting quietly, because it is this
+project's own subject found in its own release artefacts: **an instrument that
+reports what it did not measure.** Every figure below was green, internally
+consistent, and wrong.
+
+### Fixed
+
+- **`docs/VENDORING.md` §7 promised 1183 assertions where the tree measures
+  1327**, with `unit` at 622 against an actual 766. §7 is the intermediate green
+  a vendoring host checks its fresh copy against, and it closes with *"If a step
+  is red here, before you have changed anything, the copy is wrong"* — so the
+  stale table told a **correct** copy that it was broken, in the document the tag
+  body sends a second product to as the procedure. It was **not** stale at
+  v0.2.0, which read 1156 with `unit` 612 and matched that tag's own body
+  exactly; this was introduced by v0.3.0.
+- **`extension/unit.json` carried five stale figures and it ships.** It is
+  hashed, and a vendoring product reads it. The `group('host')` line range, the
+  `ok()`-site counts, the entry-point count, the line the Chrome platform is
+  installed at, and the `send()` measurement were all stale — the old install
+  line now pointed *before* the group it describes. `tools/unit-check.mjs` holds
+  this file to the code structurally and asserts none of its prose numbers,
+  which is how every one of them rotted with the gate green.
+- **Two paragraphs asserted their own freshness while stale.** Both
+  `VENDORING.md` and `unit.json` introduced the `send()` measurement with
+  *"re-measured at v0.3.0"* while carrying the pre-v0.3.0 number. A stale figure
+  is a decayed instrument; one that claims to have been re-measured is the same
+  thing wearing a certificate, because it tells the reader the check has already
+  been done. Every measured figure now names the tree it was taken on.
+- **The mutation battery's own header was stale** — `tools/mutations/u8-seam-fixes.mjs`
+  said a hole that throws at import takes "ninety-one later assertions" out of
+  the run. It takes eighty-four. The instrument built to catch decayed claims had
+  one in its own prose.
+- **A correction in `630e9bd` used the wrong metric and is itself corrected
+  here.** "125 of the file's assertions" was never an assertion count — the same
+  sentence in `unit.json` says "125 of the file's 592 `ok()` sites". Sites and
+  assertions differ (128 sites run 132 assertions), so both are now given with
+  the metric named. The entry-point count reads 30, 37 or 48 depending on where
+  an `ok()` statement is judged to end, and none of those reproduces the
+  original 28 — so the metric is written down beside the number.
+
+### Changed
+
+- **`package.json` and `extension/manifest.json` now have an assertion between
+  them.** Both carry the version, a release bumps both by hand, and no gate
+  compared them: v0.1.0 and v0.2.0 matched because someone remembered.
+  `tools/tree-check.mjs` compares **the two files to each other** and never
+  either to a literal — a literal would be a third place the version lives, and
+  the next release would have three to remember instead of two.
+- **`CONTRIBUTING.md` gains a "Cutting a tag" section** for the three things
+  that are easy to miss and none of which goes red: this file's link-reference
+  block at the bottom, `VENDORING.md` §7's table, and any documented number that
+  claims to have been measured.
+
+### A note on why the numbers could not simply be rescaled
+
+The totals moved by 144, so the truncation claim looked rescalable:
+`622 → 529 / 91 not run` is internally consistent, so `766 → 673 / 91` looks
+right. It is wrong on two of three figures — the real answer is
+**`766 → 680 / 84 not run`**, because the mutation reaches a different set of
+assertions on the new tree and nothing in the old arithmetic predicts it.
+
+**A stale figure that is internally consistent is more dangerous than one
+obviously broken: the consistency is what persuades you to rescale instead of
+re-run.**
+
 ## [0.3.0] — 2026-08-27
 
 Nothing about what the extension does changes. This release is for the second
@@ -238,7 +310,8 @@ First public release.
 - No `downloads` permission, and an automated gate asserts its continued
   absence.
 
-[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/itziklerner-pag/stem-splitter-live/releases/tag/v0.1.0
