@@ -10348,22 +10348,27 @@ if (group('host')) {
    *                                                                                          request(s), 3 model ask(s)`
    *  M2   the follower stops registering onState       extension/ui/embed-state.js:208       3 reds; the first-gesture assertion and
    *       — `videoPlaying` structurally unwritable                                           the page-hosted path
-   *  M3   the shipping Host declares it has no player  extension/ui/host.js:117              4 reds AND 26 of 149 DID NOT RUN — the
+   *  M3   the shipping Host declares it has no player  extension/ui/host.js                  4 reds AND 32 of 155 DID NOT RUN — the
    *       (FRAMED forced false)                                                              group guard reporting a truncation
    *  M4   the follower's start effect does nothing     extension/ui/embed.js:2238            the chain assertion: the count above
    *                                                                                          would stand in for nothing
    *  M5   the deck builds its follower over a          extension/ui/embed.js:2233            2 reds: the hosted derivation, and the
    *       transport of its own, not the Host's                                               chain regex that anchors on it
-   *  M6   the deck stops putting its report on         extension/offscreen/cacheddeck.js:862 5 reds; the playhead, the first
-   *       the wire                                                                           gesture, the pair, the seeking check
-   *  M7   the report carries a constant position       extension/offscreen/cacheddeck.js:718 the playhead assertion, plus the pair
-   *       instead of the playhead                                                            assertion the collapsed dedupe starves
+   *  M6   the deck stops putting its report on         extension/offscreen/cacheddeck.js     6 reds; the playhead, the first
+   *       the wire                                                                           gesture, the pair, the seeking check,
+   *                                                                                          the tri-state, the video-lock gate
+   *  M7   the report carries a constant position       extension/offscreen/cacheddeck.js     3 reds: the playhead, plus the pair and
+   *       instead of the playhead                                                            seeking assertions the collapsed dedupe
+   *                                                                                          starves
    *  M8   the dedupe key includes atMs                 extension/offscreen/cacheddeck.js:747 a still deck reports 3 times
    *  M9   the report says it is seeking                extension/offscreen/cacheddeck.js:721 the seeking check
    *  M10  drive() spreads its patch                    extension/offscreen/cacheddeck.js:778 the closed write set: `volume=0.1`
-   *  M11  pushMaster ignores the transport mute        extension/offscreen/cacheddeck.js:545 the mute never reaches the graph
-   *  M12  release() does not unmute                    extension/offscreen/cacheddeck.js:804 the player is not handed back
-   *  M13  load() lets a mute survive the track         extension/offscreen/cacheddeck.js:237 the next track inherits the lock
+   *  M11  pushMaster ignores the transport mute        extension/offscreen/cacheddeck.js     2 reds: the mute never reaches the
+   *                                                                                          graph, and the lock gate reads the slot
+   *  M12  release() does not unmute                    extension/offscreen/cacheddeck.js     2 reds: the player is not handed back,
+   *                                                                                          and the lock gate reads the release
+   *  M13  load() lets a mute survive the track         extension/offscreen/cacheddeck.js     2 reds: the next track inherits the
+   *                                                                                          lock, and the gate plays after that load
    *  M14  the effects bag is not checked               extension/ui/embed-state.js:169       a half-wired follower is accepted
    *  M15  the engine filters the patch before the      extension/offscreen/engine.js:1265    the closure leaves the deck
    *       deck sees it
@@ -10387,6 +10392,24 @@ if (group('host')) {
    * and the chain link stays green; M21 breaks the WIRING and the gate stays
    * green. Either alone would leave a hole the other's assertion is the only
    * thing standing in.
+   *
+   * THE RED SETS ARE EXHAUSTIVE, AND MAKING THEM SO FOUND NINE. The runner
+   * fails a case for a red it did NOT name as well as for one it named and did
+   * not get — coverage migrating into an unnamed assertion is invisible to any
+   * pass count, because the union over all mutations is unchanged
+   * (INTEGRATION §25). Adding that direction turned 24 of 24 GREEN into 8 cases
+   * reporting 9 `RED BUT NOT CLAIMED` lines, every one of them honest coverage
+   * this table had stopped describing: M1/M2/M6 reach assertions the D1 repair
+   * added, M3 reaches the two that read the SHIPPED transport, M7's collapsed
+   * dedupe starves one more, and M11/M12/M13 all reach the video-lock gate,
+   * which reads the same master slot they break. They are named per case now,
+   * with the reason beside each.
+   *
+   * THE COUNTS ABOVE ARE RE-DERIVED, NOT COPIED. Six rows were wrong after the
+   * repair — M3's truncation was 26 of 149 and is 32 of 155, M6 read 5 and
+   * reads 6, M7/M11/M12/M13 each read one and read two or three — and nothing
+   * went red while they were wrong, which is exactly the decay INTEGRATION §26
+   * is about: a mutation table is a set of measurements and it rots like one.
    *
    * M20 IS THE CASE THAT CHANGED AN ASSERTION RATHER THAN CONFIRMING IT. An
    * omitted declaration is ALSO not a boolean, so `assertDeclared` still threw

@@ -173,7 +173,10 @@ function runSuite(key) {
  *   suite   which instrument reports it
  *   cut     the revision these anchors were cut against
  *   edits   [{ file, find, replace }] — `find` must occur EXACTLY ONCE
- *   red     assertion-name substrings that MUST come back FAIL
+ *   red     assertion-name substrings that MUST come back FAIL — AND THE SET IS
+ *           EXHAUSTIVE. A red this list does not name fails the case as
+ *           `RED BUT NOT CLAIMED`, because coverage migrating into an
+ *           unnamed assertion is invisible to any pass count (INTEGRATION §25).
  *   green   assertion-name substrings that MUST come back PASS — the controls
  */
 const MUTATIONS = [
@@ -192,6 +195,9 @@ const MUTATIONS = [
       'THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE',
       'THE PAGE-HOSTED PATH IS UNCHANGED',
       'THE DECK ASKS THE HOST, NOT THE WINDOW, AND ASKS ONCE',
+      // With `hosted` stuck false the boot tick starts the pipeline, so the
+      // first-gesture assertion's `captures === 1` reads 2 by the time it runs.
+      'and the SAME follower starts on the user\'s first gesture',
     ],
     green: [
       'CONTROL — WITH `transport: null` THE SAME BOOT TICK STARTS THE PIPELINE',
@@ -211,6 +217,9 @@ const MUTATIONS = [
     red: [
       'and the SAME follower starts on the user\'s first gesture',
       'THE PAGE-HOSTED PATH IS UNCHANGED',
+      // Nothing writes the tri-state, so the unwritability assertion's own
+      // precondition (`flagBefore === true`) can never be reached.
+      'and nothing outside the transport can write `videoPlaying`',
     ],
     /**
      * NOT a red here, and the reason is worth the line: the duty-reach scan is
@@ -223,6 +232,7 @@ const MUTATIONS = [
       'CONTROL — WITH `transport: null` THE SAME BOOT TICK STARTS THE PIPELINE',
       'EVERY PAGE AND TRANSPORT DUTY THE DECK REACHES FOR IS DECLARED',
     ],
+
   },
   {
     id: 'M3', suite: 'host', cut: CUT_AGAINST,
@@ -239,6 +249,10 @@ const MUTATIONS = [
     red: [
       'HOSTED IS A FACT ABOUT THE HOST, NOT ABOUT FRAMES',
       'group(host) REACHED ITS LAST ASSERTION',
+      // The Host now has no transport at all, so both of the assertions that
+      // read the SHIPPED one lose the thing they read.
+      'and so does the SHIPPED DeckHost.transport, when the Host has a player at all',
+      'and the frame test is the HOST',
     ],
     green: ['A HOST THAT NEVER MENTIONED `transport` IS REFUSED'],
   },
@@ -339,6 +353,12 @@ const MUTATIONS = [
       'and the SAME follower starts on the user\'s first gesture',
       'and it carries the playing/ended pair the readout cannot',
       'and NO report ever says `seeking`',
+      // No report reaches the follower, so the tri-state is never written and
+      // the unwritability assertion's precondition is unreachable.
+      'and nothing outside the transport can write `videoPlaying`',
+      // ...and the video-lock gate reads the deck's own last report, which
+      // never arrives, so its `playing === true` term has nothing to read.
+      'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
     ],
     green: [
       'THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE',
@@ -361,6 +381,9 @@ const MUTATIONS = [
       // collapses the dedupe key, so the later steps' reports never reach the
       // wire at all and the pair assertion has nothing to read.
       'and it carries the playing/ended pair the readout cannot',
+      // Same collapsed dedupe, one assertion further on: the two seeks put
+      // fewer than the two reports that check counts as "could not look".
+      'and NO report ever says `seeking`',
     ],
     green: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
   },
@@ -416,7 +439,13 @@ const MUTATIONS = [
       find: '    const value = this.transportMuted ? 0 : dbToGain(this.masterDb);',
       replace: '    const value = dbToGain(this.masterDb);   // U6/M11 mutation: the mute never reaches the graph',
     }],
-    red: ['and the mute REACHES THE GRAPH rather than only the field'],
+    red: [
+      'and the mute REACHES THE GRAPH rather than only the field',
+      // The video-lock gate reads the same slot: it demands 0 under the mute
+      // the lock would send, and a mute that never reaches the graph reads
+      // back the user's -6 dB instead.
+      'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+    ],
     green: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
   },
   {
@@ -429,7 +458,12 @@ const MUTATIONS = [
       find: '    const was = this.transportMuted;\n    this.transportMuted = false;',
       replace: '    const was = this.transportMuted;   // U6/M12 mutation: the mute is never given back',
     }],
-    red: ['release() HANDS THE PLAYER BACK, READ BACK OFF THE DECK'],
+    red: [
+      'release() HANDS THE PLAYER BACK, READ BACK OFF THE DECK',
+      // ...and the video-lock gate reads the release back too, on the same
+      // slot: it demands the gain above zero after the hand-back.
+      'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+    ],
     green: ['and the mute REACHES THE GRAPH rather than only the field'],
   },
   {
@@ -442,7 +476,12 @@ const MUTATIONS = [
       find: '    this.transportMuted = false;\n    this.transportAt = null;\n    this.pushGains(0);',
       replace: '    this.transportAt = null;   // U6/M13 mutation: the lock survives the load\n    this.pushGains(0);',
     }],
-    red: ['and a NEW TRACK does not inherit a lock that was never released'],
+    red: [
+      'and a NEW TRACK does not inherit a lock that was never released',
+      // The gate's fixture plays the deck AFTER that load, so a lock carried
+      // across the boundary is still on the slot it reads.
+      'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+    ],
     green: ['release() HANDS THE PLAYER BACK, READ BACK OFF THE DECK'],
   },
   {
@@ -748,6 +787,24 @@ try {
     const misses = [];
     for (const n of m.red) { const o = outcome(n); if (o !== 'FAIL') misses.push(`expected RED, got ${o}: ${n}`); }
     for (const n of m.green) { const o = outcome(n); if (o !== 'PASS') misses.push(`expected PASS, got ${o}: ${n}`); }
+    /**
+     * ...AND THE OTHER DIRECTION, WHICH IS THE HALF THAT WAS MISSING. A case
+     * that reds an assertion it did not name is as much a finding as one that
+     * fails to red an assertion it did: it is COVERAGE MIGRATING, and the
+     * aggregate cannot see it because the union of all mutations is unchanged
+     * (INTEGRATION §25). Six of these were live in this very file the first
+     * time it was run against the D1 repair — M11 and M12 reached the new
+     * video-lock gate, M13/M19/M23 reached assertions of their own — and every
+     * one of them read as `RED ok`.
+     *
+     * A RED IS ATTRIBUTED IF IT MATCHES ANY DECLARED NEEDLE, red or green. The
+     * green list is included on purpose: a control that goes red is already
+     * reported above, by name, and reporting it twice would make the fix look
+     * like two findings.
+     */
+    const claimed = [...m.red, ...m.green];
+    const stray = r.reds.filter((l) => !claimed.some((n) => l.includes(n)));
+    for (const l of stray) misses.push(`RED BUT NOT CLAIMED: ${l.trim().slice(0, 120)}`);
     const base = baseline[m.suite];
     const ran = r.greens.length + r.reds.length;
     const baseRan = base.greens.length + base.reds.length;
