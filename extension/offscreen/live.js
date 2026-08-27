@@ -398,6 +398,17 @@ export class LivePipeline {
     this.drainedFrames = 0;
     this.drainAbandoned = 0;
     this.drainWhy = null;
+    /**
+     * WHAT ENDED THE CONTIGUOUS PASS (U7, ruling 29) — a member of
+     * `shared/stemcache.js`'s `PASS_END`, or null while one is still running.
+     *
+     * FIRST WRITER WINS, and that is why this is a field rather than an argument
+     * to `stop()`. A drop ends the pass AT the drop; the `stop()` that follows —
+     * from the user, or from a Host reacting to the same stall — must not
+     * overwrite it with `'stopped'`. "The machine could not keep up" is the fact
+     * the user needs; "you stopped it" is true of both cases and is not news.
+     */
+    this.passEnd = null;
     this.staleReads = 0;
     this.chunkMs = [];
     this.chunkLog = [];
@@ -759,6 +770,7 @@ export class LivePipeline {
     this.drainedFrames = 0;
     this.drainAbandoned = 0;
     this.drainWhy = null;
+    this.passEnd = null;
     this.lastHealthAt = performance.now();
     this.silentTicks = 0;
     this.outputAlarm = null;
@@ -826,10 +838,20 @@ export class LivePipeline {
    *
    * @param {{drain?: boolean}} [opts]
    */
+  /**
+   * Record what ended the contiguous pass, ONCE. See `passEnd`.
+   * @param {'stopped'|'ended'|'seek'|'drop'} reason a `PASS_END` member
+   */
+  endPass(reason) {
+    if (this.passEnd === null) this.passEnd = reason;
+  }
+
   async stop({ drain = true } = {}) {
     if (this.status === 'idle') return;
     // FIRST LINE, before anything can await: everything else bails on this.
     this.stopped = true;
+    // First-writer-wins, so a drop that already ended the pass keeps its reason.
+    this.endPass('stopped');
     // The drain runs BEFORE `this.plan = null` below, because it needs the
     // geometry, and before `status` stops meaning anything.
     if (drain) await this.drain();
@@ -1153,6 +1175,11 @@ export class LivePipeline {
     // track they are already playing; a poisoned entry costs them trust in the
     // feature. `CacheWriter.abort()` is sticky and makes commit() return null,
     // so a single call here kills the whole prime, which is the intent.
+    // RULING 29: a drop is a BOUNDARY, the same shape a seek has. The pass ends
+    // here and what precedes it stays deliverable. Recorded before the cache is
+    // abandoned, because these are two artefacts with two rules and only one of
+    // them is being thrown away.
+    this.endPass('drop');
     if (this.cacheWriter) {
       // COUNTED BEFORE IT IS ABORTED, and both, because they answer different
       // questions. `abort()` makes commit() return null — the entry does not

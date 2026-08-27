@@ -133,7 +133,8 @@ import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter, WavWindowReader 
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
   videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR,
   CACHE_DIR_32F, separationRefusal, PRIME_TAIL_MAX_SEC,
-  fileIdFromBytes, fileIdentity, fileRefusal, fileCommitRefusal } from './extension/shared/stemcache.js';
+  fileIdFromBytes, fileIdentity, fileRefusal, fileCommitRefusal,
+  PASS_END, recordingRefusal, passEndNote } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 import {
   ExportRun, ExportError, EXPORT_CODES, checkExportCode, safeTitle, exportFileNames,
@@ -2361,6 +2362,89 @@ if (group('live')) {
       + `against the ${DELTA.toFixed(1)} the passes were built to differ by`);
   }
 
+  head('live — a drop ENDS the contiguous pass, exactly as a seek does (U7, ruling 29)');
+  /**
+   * THE RULE, AND WHY IT RESOLVES A COLLISION RATHER THAN PICKING A SIDE.
+   *
+   * Two acceptance criteria looked incompatible: "a gap in the recording is a
+   * refusal, not a shorter file" and "dropped chunks surface as `drops`". Under
+   * the cache's existing abort-on-first-drop, a committed entry always has
+   * `drops === 0`, so the second could never be non-zero on anything readable.
+   *
+   * The ruling makes a drop a BOUNDARY — the same shape a seek already has —
+   * rather than a tolerance to be sized:
+   *   - no delivered file ever contains a gap, because the pass ENDS at the
+   *     drop. Shorter AND correct, instead of full-length and quietly wrong in
+   *     the middle, which is the failure nothing downstream can detect;
+   *   - the count names what ended the pass and how many.
+   * And the cache rule is untouched: a committed entry still has `drops === 0`
+   * by construction, because a prime is a claim ABOUT A TRACK where a gap is a
+   * lie, while a recording is a record OF A PASS.
+   *
+   * WHICH KIND — pure. `recordingRefusal` and `passEndNote` take a plain record
+   * and return a sentence; nothing here touches a pipeline. The pipeline's half
+   * (first-writer-wins) is asserted against its source, below.
+   */
+  {
+    ok('a pass that captured audio is DELIVERABLE, whatever ended it — no tolerance, no threshold  '
+      + '[entry point: shared/stemcache.js recordingRefusal(), the export path\u2019s gate]',
+      Object.keys(PASS_END).every((r) => recordingRefusal({ frames: 44100, drops: r === 'drop' ? 1 : 0, endedBy: r }) === null),
+      `all ${Object.keys(PASS_END).length} reasons deliver: ${Object.keys(PASS_END).join(', ')}`);
+
+    const nothing = recordingRefusal({ frames: 0, drops: 1, endedBy: 'drop' });
+    ok('...and the ONE refusal is a pass that captured nothing, which NAMES what ended it  '
+      + '[entry point: shared/stemcache.js recordingRefusal()]',
+      typeof nothing === 'string' && nothing.includes(PASS_END.drop),
+      nothing == null
+        ? 'a pass with zero frames was accepted for delivery — six empty WAV files'
+        : nothing);
+
+    /**
+     * A SEEK AND A DROP NOW SHARE A MECHANISM, WHICH IS EXACTLY WHERE THE
+     * DIFFERENCE BETWEEN THEM GETS LOST. "You moved the playhead" and "the
+     * machine could not keep up" are different facts to someone looking at a
+     * shorter file than they expected, and a shared code path that reported one
+     * sentence for both would be the defect this asserts against.
+     */
+    const notes = Object.keys(PASS_END).map((r) => passEndNote({ frames: 44100 * 90, drops: 0, endedBy: r }));
+    ok('...and the four reasons READ DIFFERENTLY, so a shared code path cannot flatten a seek into a stall',
+      notes.length === 4 && new Set(notes).size === 4 && notes.every((n) => typeof n === 'string' && n.length > 0),
+      `${new Set(notes).size} distinct of ${notes.length}: ${notes.map((n) => JSON.stringify(n)).join(' | ')}`);
+
+    const dropNote = passEndNote({ frames: 44100 * 134, drops: 3, endedBy: 'drop' });
+    ok('...and a drop-ended pass says HOW MANY, which is what makes the count meaningful rather than structurally zero',
+      typeof dropNote === 'string' && dropNote.includes('3 dropped chunks') && dropNote.includes('134.0 s'),
+      dropNote || 'no note at all');
+
+    const one = passEndNote({ frames: 44100, drops: 1, endedBy: 'drop' });
+    ok('...and it counts in English: ONE dropped chunk, not "1 dropped chunks"',
+      typeof one === 'string' && one.includes('1 dropped chunk') && !one.includes('chunks'),
+      one || 'no note at all');
+
+    const seekNote = passEndNote({ frames: 44100 * 20, drops: 0, endedBy: 'seek' });
+    ok('...and a pass that ended cleanly carries NO drop count — a "(0 dropped chunks)" would read as a fault report',
+      typeof seekNote === 'string' && !/dropped/.test(seekNote),
+      seekNote || 'no note at all');
+
+    /**
+     * A HOST INVENTING A REASON IS TOLD, rather than having it rendered as an
+     * empty sentence — the same class as ARM_ERROR's closed vocabulary (#29),
+     * and the unit owns this vocabulary for the same reason.
+     */
+    const bogus = recordingRefusal({ frames: 44100, drops: 0, endedBy: 'BECAUSE_I_SAID_SO' });
+    ok('AN END REASON THIS UNIT HAS NO WORDING FOR IS REFUSED, naming the offending value and the legal set  '
+      + '[entry point: shared/stemcache.js recordingRefusal(); the unit owns the vocabulary, never the detection]',
+      typeof bogus === 'string' && bogus.includes('BECAUSE_I_SAID_SO')
+        && Object.keys(PASS_END).every((r) => bogus.includes(r)),
+      bogus == null
+        ? 'an invented reason was accepted, and passEndNote() would render it as nothing at all'
+        : bogus);
+
+    ok('...and passEndNote() says NOTHING for one, rather than a sentence with a hole in it',
+      passEndNote({ frames: 44100, drops: 0, endedBy: 'BECAUSE_I_SAID_SO' }) === null,
+      'null, so a caller cannot print a half-built sentence');
+  }
+
   /**
    * THE PIPELINE REALLY CALLS IT, AND IN THE RIGHT ORDER — read as TEXT.
    *
@@ -2415,7 +2499,38 @@ if (group('live')) {
         ? 'dispose() passes { drain: false }'
         : 'dispose() awaits a full drain — a document going away can lose more than the tail it was saving');
 
+    /**
+     * FIRST WRITER WINS, DRIVEN RATHER THAN READ. `endPass` is small enough to
+     * exercise directly on a bare object, so this asserts the BEHAVIOUR and not
+     * the presence of a line: a drop ends the pass at the drop, and the `stop()`
+     * that follows — from the user, or from a Host reacting to the same stall —
+     * must not overwrite "the machine could not keep up" with "you stopped it".
+     * The second is true of both cases and is not news.
+     */
+    const { LivePipeline: LPX } = await import('./extension/offscreen/live.js');
+    const bare = { passEnd: null, endPass: LPX.prototype.endPass };
+    bare.endPass('drop');
+    bare.endPass('stopped');
+    ok('a DROP that ended the pass survives the stop() that follows it — first writer wins  '
+      + '[entry point: extension/offscreen/live.js endPass(), called from skipOne() then stop()]',
+      bare.passEnd === 'drop',
+      bare.passEnd === 'drop'
+        ? "drop then stopped -> 'drop'"
+        : `drop then stopped -> ${JSON.stringify(bare.passEnd)} — the user is told they stopped a recording the machine ended`);
+    const plain = { passEnd: null, endPass: LPX.prototype.endPass };
+    plain.endPass('stopped');
+    ok('...and an ordinary stop still records itself when nothing ended the pass first',
+      plain.passEnd === 'stopped',
+      `-> ${JSON.stringify(plain.passEnd)}`);
+
     const skipBody = (liveSrc.split(/  skipOne\(n\) \{/)[1] || '').split(/\n  \}/)[0];
+    ok('...and skipOne() ENDS THE PASS as well as counting — ruling 29\u2019s boundary, recorded before the cache is abandoned  '
+      + '[entry point: extension/offscreen/live.js skipOne()]',
+      skipBody.includes("endPass('drop')") && skipBody.indexOf("endPass('drop')") < skipBody.indexOf('abort()'),
+      !skipBody.includes("endPass('drop')")
+        ? 'a drop abandons the cache but does not end the pass — the recording runs on past the gap'
+        : 'endPass(\'drop\') before abort()');
+
     ok('...and a PASSTHROUGH SPAN IS COUNTED ON THE WRITER, not only aborted — the refusal can name how many  '
       + '[entry point: extension/offscreen/live.js skipOne(), the call site shared/stemcache.js noteDrop() names]',
       skipBody.includes('noteDrop()') && skipBody.includes('abort()'),

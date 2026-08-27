@@ -487,6 +487,108 @@ export function fileCommitRefusal(writer, source) {
   return null;
 }
 
+// --------------------------------------------------- the contiguous pass (U7)
+/**
+ * WHAT ENDED THE PASS. A live export is ONE CONTIGUOUS REAL-TIME PASS from the
+ * position it started at (seed §13), and the rule already has a concept for
+ * "something happened, so the pass is over, and you keep what you got": a seek
+ * ends it, and whatever was captured up to that point remains exportable.
+ *
+ * A DROPPED CHUNK IS ANOTHER SUCH THING — a BOUNDARY, not a tolerance to be
+ * sized. That is what makes both halves of the rule true at once instead of
+ * trading against each other:
+ *
+ *   - "a gap is a refusal, not a shorter file" holds in the STRONGEST sense.
+ *     No delivered file ever contains a gap, because the pass ended at the
+ *     drop. The file is shorter AND correct, rather than full-length and
+ *     quietly wrong somewhere in the middle — which is the failure nothing
+ *     downstream can detect.
+ *   - the drop COUNT is meaningful rather than structurally zero. It names what
+ *     ended the pass and how many, on the refusal and in what the user is told.
+ *
+ * IT CHANGES NOTHING ABOUT THE CACHE, and that separation is the point. A prime
+ * is a by-product of listening and `offscreen/live.js::skipOne()` still abandons
+ * it on the first passthrough span, with its argument intact: a committed cache
+ * entry has `drops === 0` BY CONSTRUCTION. The distinction is what the artefact
+ * claims to be. A cache entry is a claim ABOUT A TRACK, so a gap in it is a lie.
+ * A recording is a record OF A PASS, so a pass that ended early is simply a
+ * shorter record — provided the user is told, which is what these exist for.
+ *
+ * WHICH ONE ENDED IT IS RECORDED, and that is not decoration. A seek and a drop
+ * now share a mechanism, and a shared code path is exactly where the difference
+ * between "you moved the playhead" and "the machine could not keep up" gets
+ * lost. They are different facts to whoever is looking at a shorter file than
+ * they expected.
+ *
+ * THE UNIT DOES NOT KNOW WHAT A SEEK IS. `seek` is a reason a Host reports; this
+ * module owns the vocabulary and what each member means for delivery, never the
+ * detection.
+ */
+export const PASS_END = Object.freeze({
+  /** The user ended it. Everything captured is deliverable. */
+  stopped: 'you stopped the recording',
+  /** The source ran out. The most complete pass there is. */
+  ended: 'the source reached its end',
+  /** The playhead moved. The Host detects this; the unit is only told. */
+  seek: 'the playhead moved, which ends a contiguous pass',
+  /** A chunk went out unseparated. The pass ends where the audio stopped being stems. */
+  drop: 'the machine could not keep up, so the pass ends where the stems do',
+});
+
+/**
+ * May this pass be delivered, and if not, why not?
+ *
+ * `null` for "go ahead", a human-readable reason otherwise — the same shape and
+ * the same rule as `primeRefusal`/`commitRefusal` above, and for the same
+ * reason: a delivery that silently does not happen is indistinguishable from one
+ * that failed.
+ *
+ * NO TOLERANCE AND NO THRESHOLD. Under the boundary rule there is nothing to
+ * size: a pass either captured separated audio or it did not. Refusing a short
+ * pass would be re-introducing the judgement the boundary removes, and the one
+ * number a threshold here could be wrong about — how much of a recording is
+ * enough — belongs to the person who pressed record.
+ *
+ * @param {{frames:number, drops:number, endedBy:string|null}|null} pass
+ * @returns {string|null}
+ */
+export function recordingRefusal(pass) {
+  if (!pass) return 'no recording was in progress';
+  if (!(pass.frames > 0)) {
+    // The one genuine refusal: the pass ended before a single frame of
+    // separated audio existed. Naming what ended it is the difference between
+    // "nothing happened" and "you seeked before the first chunk landed".
+    const why = pass.endedBy && PASS_END[pass.endedBy];
+    return why
+      ? `nothing was recorded before it ended \u2014 ${why}`
+      : 'nothing was recorded';
+  }
+  if (pass.endedBy && !PASS_END[pass.endedBy]) {
+    // A Host inventing a reason gets told, rather than having it rendered as an
+    // empty sentence. The same class as ARM_ERROR's closed vocabulary (#29).
+    return `the recording ended for a reason this unit has no wording for (${JSON.stringify(pass.endedBy)}) `
+      + `\u2014 it must be one of ${Object.keys(PASS_END).join(', ')}`;
+  }
+  return null;
+}
+
+/**
+ * What to TELL someone about a pass that ended early, in one sentence.
+ * Separate from the refusal because a pass that is deliverable can still have
+ * ended for a reason worth saying out loud — which is the whole of what the
+ * drop count buys.
+ *
+ * @param {{frames:number, drops:number, endedBy:string|null}|null} pass
+ */
+export function passEndNote(pass) {
+  if (!pass || !pass.endedBy || !PASS_END[pass.endedBy]) return null;
+  const secs = (pass.frames || 0) / SR;
+  const dropped = pass.drops > 0
+    ? ` (${pass.drops} dropped chunk${pass.drops === 1 ? '' : 's'})`
+    : '';
+  return `${secs.toFixed(1)} s recorded \u2014 ${PASS_END[pass.endedBy]}${dropped}`;
+}
+
 // ------------------------------------------------------------------- storage
 /**
  * The OPFS directory ONE CACHE OWNS, named by the caller rather than by this
