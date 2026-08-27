@@ -109,30 +109,30 @@ export function follow(s) {
 }
 
 /**
- * THE BOOT COMPOSITION — the layer the \`transport: null\` defect lived in, and
+ * THE BOOT COMPOSITION — the layer the `transport: null` defect lived in, and
  * the layer nothing used to drive.
  *
- * \`follow()\` above is a pure function of five values, and it has been asserted
+ * `follow()` above is a pure function of five values, and it has been asserted
  * from every direction for as long as it has existed. THAT WAS NOT ENOUGH, and
- * the reason is worth the paragraph: the defect was never in \`follow()\`. It was
- * in the wiring one level up, where \`videoPlaying\` and \`hosted\` come FROM.
+ * the reason is worth the paragraph: the defect was never in `follow()`. It was
+ * in the wiring one level up, where `videoPlaying` and `hosted` come FROM.
  *
- *   \`hosted\`       is \`host.transport != null\`, asked once.
- *   \`videoPlaying\` is TRI-STATE, and its only writer is the report the
- *                  transport pushes — so with \`transport: null\` there is no
- *                  \`onState\` to register on, and the third value is not a value
+ *   `hosted`       is `host.transport != null`, asked once.
+ *   `videoPlaying` is TRI-STATE, and its only writer is the report the
+ *                  transport pushes — so with `transport: null` there is no
+ *                  `onState` to register on, and the third value is not a value
  *                  the deck is waiting for, it is a value the deck can never
- *                  leave. \`follow()\` then reads "nobody is ever going to tell
+ *                  leave. `follow()` then reads "nobody is ever going to tell
  *                  me" as licence to START: a capture, and behind it a 109 MB
  *                  model load, before the user has touched anything.
  *
- * A Host that declares \`transport: null\` because its Source is a file — a deck
+ * A Host that declares `transport: null` because its Source is a file — a deck
  * that IS the player, running off the engine's playback clock — reproduces
  * exactly that. Four separate documents ratified it before anyone drove the
- * boot path (\`.handoff/PHASE4-CONTRACT.md\` §1.E, §2 W6, §8 C6; upstream #5).
+ * boot path (`.handoff/PHASE4-CONTRACT.md` §1.E, §2 W6, §8 C6; upstream #5).
  *
- * SO THE COMPOSITION IS THE UNIT, AND IT IS HERE RATHER THAN IN \`embed.js\`.
- * \`extension/ui/embed.js\` builds a DOM at module scope and cannot be evaluated
+ * SO THE COMPOSITION IS THE UNIT, AND IT IS HERE RATHER THAN IN `embed.js`.
+ * `extension/ui/embed.js` builds a DOM at module scope and cannot be evaluated
  * from Node, so anything that lives there can only be checked as TEXT or in a
  * browser — and the browser gate is blind to this by construction: under the
  * one shipping Host the two paths behave identically, because that Host always
@@ -140,28 +140,28 @@ export function follow(s) {
  * transport and COUNT what the deck asked for.
  *
  * THIS OBJECT HOLDS STATE, WHICH THE REST OF THIS FILE DOES NOT, AND THAT IS
- * THE POINT. \`videoPlaying\` has to be UNREACHABLE from outside: a fixture that
+ * THE POINT. `videoPlaying` has to be UNREACHABLE from outside: a fixture that
  * could assign it would be able to make the hosted and unhosted cases identical
  * inputs, and a gate whose fixture makes two inputs identical is blind to
  * whatever distinguishes them. The only way in is the transport's own report.
  *
  * @param {{onState:Function, onJump:Function, onSpeedReport:Function}|null} transport
- *   the Host's player, as \`assertHostOption\` handed it back — an object, or
- *   \`null\` for a Host with genuinely no player at all.
+ *   the Host's player, as `assertHostOption` handed it back — an object, or
+ *   `null` for a Host with genuinely no player at all.
  * @param {{onState:(d:object)=>void, onPlaying:(playing:boolean)=>void,
  *          onJump:()=>void, onSpeedReport:(d:object)=>void,
  *          start:()=>void, stop:()=>void}} o  the deck's effects.
- *   \`onState\` is everything the deck does with a report; \`onPlaying\` is the
- *   part that runs only when play/pause actually FLIPPED; \`start\` and \`stop\`
- *   are the two effects \`follow()\` names.
+ *   `onState` is everything the deck does with a report; `onPlaying` is the
+ *   part that runs only when play/pause actually FLIPPED; `start` and `stop`
+ *   are the two effects `follow()` names.
  * @returns {{hosted:boolean, videoPlaying:boolean|null,
  *            listen:()=>void, decide:(s:object)=>string}}
  */
 export function makeFollower(transport, o) {
   /**
    * REFUSED AT CONSTRUCTION, NAMING THE EFFECT — the same shape and the same
-   * reason as \`assertHost\`. An effects bag short \`start\` would leave
-   * \`decide()\` returning \`'start'\` to nobody: the deck would decide to run and
+   * reason as `assertHost`. An effects bag short `start` would leave
+   * `decide()` returning `'start'` to nobody: the deck would decide to run and
    * then not run, with nothing thrown and nothing painted. That is a failure
    * that has to land at boot, not at the first play.
    */
@@ -176,15 +176,15 @@ export function makeFollower(transport, o) {
 
   /**
    * DOES THIS DECK HAVE A HOST THAT REPORTS A PLAYER? Asked ONCE, here, and
-   * nowhere else in the unit. It used to be \`window.parent !== window\` in
-   * \`embed.js\`, which is a fact about FRAMES and not about hosting.
+   * nowhere else in the unit. It used to be `window.parent !== window` in
+   * `embed.js`, which is a fact about FRAMES and not about hosting.
    */
   const hosted = transport != null;
 
   /**
    * The player's state, per the transport. TRI-STATE: true playing, false
-   * paused, **null nobody has told us** — and see \`follow()\` above for why the
-   * third value is not the same as \`false\`.
+   * paused, **null nobody has told us** — and see `follow()` above for why the
+   * third value is not the same as `false`.
    */
   let videoPlaying = null;
   let listening = false;
@@ -198,7 +198,7 @@ export function makeFollower(transport, o) {
      * BEHAVIOUR: the deck registers its transport handlers at one specific
      * point in its boot, after its own bus listener and before it tells the
      * page it is ready, and a report that arrives before that point is dropped
-     * on purpose. Constructing the follower earlier — so that \`hosted\` is
+     * on purpose. Constructing the follower earlier — so that `hosted` is
      * settled before anything reads it — must not move that point.
      */
     listen() {
@@ -228,7 +228,7 @@ export function makeFollower(transport, o) {
      * @param {{halted:boolean, armed:boolean, status:string}} s
      *   the three the deck owns. The other two are this object's and are NOT
      *   parameters, which is the whole of the fix: a caller cannot hand in a
-     *   \`videoPlaying\` the transport never reported.
+     *   `videoPlaying` the transport never reported.
      * @returns {'start'|'stop'|'hold'}
      */
     decide(s) {

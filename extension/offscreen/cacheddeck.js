@@ -424,6 +424,14 @@ export class CachedDeck {
     // The other track boundary — see load(). A deck going idle is not under a
     // lock any more, and the next load must not inherit one.
     this.transportMuted = false;
+    /**
+     * ...AND THE GRAPH IS TOLD, WHICH load() HAS ALWAYS DONE AND THIS DID NOT.
+     * Clearing the field alone leaves the worklet's master slot at 0 while this
+     * deck's own state says it is not muted — the field and the graph
+     * disagreeing, with the field being the half that lies, until whatever
+     * happens next happens to push. Same boundary, same clear, same push.
+     */
+    this.pushMaster();
     this.pushState();
   }
 
@@ -733,6 +741,19 @@ export class CachedDeck {
        * relays it to a deck 50-100 ms later would be reporting a playhead that
        * has moved further than the video lock's own 60 ms threshold.
        * `Date.now()` and not `performance.now()` — two contexts, two origins.
+       *
+       * NO FILE IN THIS TREE READS IT, AND THAT IS WRITTEN HERE RATHER THAN
+       * LEFT TO BE DISCOVERED. `ui/embed.js::onVideoState` does not look at
+       * `d.atMs` — the video lock ages `live.atMs` off `LIVE_STATE` instead.
+       * This field is for the HOST that relays the report, the one participant
+       * that knows how long its own hop took; the alternative is a Host
+       * stamping its arrival time and calling it a sample time, which is the
+       * error this exists to make impossible rather than merely unlikely.
+       *
+       * `test.js` group('host') PINS IT BETWEEN TWO READINGS of the real clock
+       * taken either side of the call, so a constant — `0`, or a value sampled
+       * once at construction — is a red. A `typeof === 'number'` check is not
+       * enough and was not: it passed on `atMs: 0`.
        */
       atMs: Date.now(),
     };
@@ -813,23 +834,29 @@ export class CachedDeck {
     this.transportMuted = false;
     if (was) this.pushMaster();
     /**
-     * ...AND A HEARTBEAT, WHICH IS ALL THIS IS. An earlier version of this line
-     * claimed it let a Host "see the lock was given back rather than assume
-     * it", and MEASUREMENT SAYS OTHERWISE: no message this deck sends carries
-     * the mute at all — `transportReport()` above is the player's state as
-     * `DeckTransport.onState` declares it and `LIVE_STATE` is the readout, and
-     * neither has a mute field — so `pushTransport()` dedupes this away
-     * entirely on a still deck. Measured: `release()` on a paused deck puts
-     * ZERO `TRANSPORT_STATE` on the wire.
+     * ...AND NOTHING GOES ON THE WIRE. This method used to end with a
+     * `pushState()` whose comment claimed it let a Host "see the lock was given
+     * back rather than assume it", and MEASUREMENT SAID OTHERWISE: no message
+     * this deck sends carries the mute at all — `transportReport()` above is
+     * the player's state as `DeckTransport.onState` declares it and
+     * `LIVE_STATE` is the readout, and NEITHER HAS A MUTE FIELD. So the
+     * transport report deduped away entirely (`release()` moves nothing in the
+     * dedupe key) and the readout carried an ordinary heartbeat that said
+     * nothing about the release that sent it. Measured on a real deck: ZERO
+     * `TRANSPORT_STATE` either side of a drive AND a release.
      *
-     * IT IS RIGHT THAT NOTHING CARRIES IT. The only writer of this flag is a
-     * Host's own `drive({muted})`, so the only thing that could be told is the
-     * thing that already knows; a field on the wire with no reader is what
-     * freeze item 2 threw off this interface. What the release actually has to
-     * do is reach the GRAPH, two lines up, and `test.js` reads it back off the
-     * deck rather than off a message for exactly that reason.
+     * IT IS RIGHT THAT NOTHING CARRIES IT, so the line is gone rather than
+     * repaired. The only writer of this flag is a Host's own `drive({muted})`,
+     * so the only thing that could be told is the thing that already knows; a
+     * field on the wire with no reader is what freeze item 2 threw off this
+     * interface, and a heartbeat that reports nothing about the event that sent
+     * it is the same thing one layer down. What the release HAS to do is reach
+     * the GRAPH, two lines up.
+     *
+     * `test.js` group('host') asserts BOTH HALVES and that is what keeps the
+     * line from coming back: the graph gets the user's dB restored, read off
+     * the worklet port, and the bus stays SILENT across the release.
      */
-    this.pushState();
   }
 
   // ----------------------------------------------------------------- report

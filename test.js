@@ -10092,23 +10092,37 @@ if (group('host')) {
      * ...and the frame test stays absent, as before.
      */
     const handsTransport = /^const follower = makeFollower\(transport, \{/m.test(embedSrc);
-    const derivesHosted = /const hosted = transport != null;/.test(stateSrc);
+    /**
+     * COUNTED IN BOTH FILES, BECAUSE "ONCE" IS A COUNT AND NOT A PRESENCE.
+     * This read `/const hosted = transport != null;/.test(stateSrc)` — a
+     * BOOLEAN — while the sibling clause counted the same question in
+     * `embed.js`. So a SECOND copy of the derivation inside `makeFollower`,
+     * which is the file the assertion's own headline says the answer lives in,
+     * left this green: measured, a second `const hosted = transport != null;`
+     * there did not move the number. The claim is that the deck asks ONCE
+     * ANYWHERE, so both files are counted and the total is pinned at one.
+     */
+    const derivesHosted = [...stateSrc.matchAll(/transport\s*!=\s*null/g)].length;
     const asksTwice = [...embedSrc.matchAll(/transport\s*!=\s*null/g)].length;
     const framesInDeck = [...embedSrc.matchAll(/\bwindow\.parent\b|\bparent\.postMessage\b/g)].map((m) => m[0]);
     ok('THE DECK ASKS THE HOST, NOT THE WINDOW, AND ASKS ONCE: `hosted` is derived inside makeFollower from the '
       + 'transport the deck was handed, and embed.js names no frame at all  '
       + '[entry point: extension/ui/embed.js module scope and extension/ui/embed-state.js makeFollower(), comments stripped]',
-      handsTransport && derivesHosted && asksTwice === 0 && framesInDeck.length === 0,
+      handsTransport && derivesHosted === 1 && asksTwice === 0 && framesInDeck.length === 0,
       !handsTransport
         ? 'no `const follower = makeFollower(transport, {` at embed.js module scope — whatever decides hosted, '
           + 'it is not the value assertHostOption returned'
-        : !derivesHosted
-          ? 'no `const hosted = transport != null;` in embed-state.js — the input to follow()`s hosted branch is not the Host'
+        : derivesHosted !== 1
+          ? `embed-state.js asks \`transport != null\` ${derivesHosted} time(s), not once — `
+            + (derivesHosted === 0
+              ? 'the input to follow()`s hosted branch is not the Host'
+              : 'two answers that can disagree, in the very file this assertion says holds the one answer')
           : asksTwice
             ? `embed.js asks \`transport != null\` ${asksTwice} more time(s) — two answers that can disagree`
             : framesInDeck.length
               ? `embed.js still names ${framesInDeck.join(', ')} — under a desktop Host that is the wrong question`
-              : 'hosted <- transport != null, once, inside makeFollower; no window.parent anywhere in the deck');
+              : `hosted <- transport != null, ${derivesHosted}× in embed-state.js and ${asksTwice}× in embed.js, `
+                + 'inside makeFollower; no window.parent anywhere in the deck');
 
     ok('...and the frame test is the HOST\'s, where it is true: ui/host.js is the one file that asks it',
       /window\.parent !== window/.test(hostSrc),
@@ -10669,6 +10683,38 @@ if (group('host')) {
         ? 'a follower with no start() was ACCEPTED — the deck would decide to run and nothing would run'
         : shortFx);
 
+    /**
+     * `listen()` PUTS THE HANDLERS UP ONCE, HOWEVER OFTEN IT IS CALLED, and the
+     * latch inside it is the only thing that makes that true. Nothing above
+     * called it twice, so the latch was six words of code no assertion watched:
+     * deleting it left the suite green.
+     *
+     * THE STUB KEEPS EVERY HANDLER IT IS GIVEN, which is the half that makes
+     * this a real test. A stub that overwrote its handler would hide a double
+     * registration behind its own shape, and a REAL transport does not
+     * overwrite — `ui/host.js` adds a listener per call, so a second
+     * registration is a second delivery, and `onPlaying` firing twice for one
+     * transition is a capture grant asked for twice.
+     */
+    const twiceHandlers = [];
+    const twiceTransport = {
+      ...fileTransport,
+      onState(fn) { twiceHandlers.push(fn); },
+      onJump() {}, onSpeedReport() {},
+    };
+    const [twiceRec, twiceFx] = recorder();
+    const twiceFollower = makeFollower(twiceTransport, twiceFx);
+    twiceFollower.listen();
+    twiceFollower.listen();
+    twiceFollower.listen();
+    for (const fn of twiceHandlers) fn({ playing: true, currentTime: 1, duration: 10, ended: false, seeking: false, atMs: 1 });
+    ok('listen() IS IDEMPOTENT: three calls put ONE handler up, so one report is ONE event and not three  '
+      + '[entry point: makeFollower().listen(), called from embed.js at one specific point in the deck\u2019s boot]',
+      twiceHandlers.length === 1 && twiceRec.states === 1 && twiceRec.flips.join(',') === 'true'
+      && twiceRec.captures === 0,
+      `${twiceHandlers.length} handler(s) registered for three listen() calls -> ${twiceRec.states} onState, `
+        + `flips [${twiceRec.flips.join(',')}]`);
+
     // -------------------------------- the report IS the engine's playback clock
     /**
      * ON EVERY EVENT THAT MOVES IT. The deck is walked through its transport
@@ -10734,6 +10780,28 @@ if (group('host')) {
       `${reports.length} report(s) from three heartbeats with the playhead still and three different atMs`);
 
     /**
+     * ...AND `atMs` IS A READING OF THE CLOCK TAKEN INSIDE THE CALL, pinned
+     * between two readings of the same clock taken either side of it. The check
+     * this replaces was `typeof w.got.atMs === 'number'`, which passes on `0`
+     * — measured — and on a timestamp sampled once at construction and reused
+     * for the life of the deck, which is the shape the field exists to prevent:
+     * a Host relaying a stale sample time cannot tell the hop took 50 ms from
+     * the hop having taken 5 minutes.
+     */
+    const beforeMs = Date.now();
+    const stampRep = cd.transportReport();
+    const afterMs = Date.now();
+    ok('...and `atMs` is SAMPLED IN THE CALL — pinned between two readings of the real clock taken either side of '
+      + 'it, so a constant is a red rather than a number of the right type  '
+      + '[entry point: CachedDeck.transportReport(), the payload a Host relays across the bus hop]',
+      Number.isFinite(stampRep.atMs) && stampRep.atMs >= beforeMs && stampRep.atMs <= afterMs,
+      `atMs=${stampRep.atMs} against [${beforeMs}, ${afterMs}] — `
+        + (stampRep.atMs === 0 ? 'zero: the report carries no sample time at all'
+          : stampRep.atMs < beforeMs ? 'sampled BEFORE the call, so it is a stored value and not a reading'
+            : stampRep.atMs > afterMs ? 'later than the clock: not this clock'
+              : 'inside the window'));
+
+    /**
      * NEVER `seeking: true`, INCLUDING ON THE REPORT seek() ITSELF PUSHES, and
      * it is a loop rather than a nicety: `embed.js::onVideoState` turns every
      * report into `PAGE_VIDEO { currentTime, seeking }` and `engine.js` seeks a
@@ -10755,10 +10823,21 @@ if (group('host')) {
     /**
      * THE WRITE SET IS CLOSED AT THE DECK. `offscreen/engine.js` hands
      * `CachedDeck.drive()` the RAW inbound message, envelope and all, so this
-     * call is shaped exactly as the engine shapes it — plus two fields a Host
-     * might smuggle in. Two of the three land; the smuggled pair land nowhere,
-     * and the rate is the engine's to refuse (`qa/speed-pitch.mjs` forbids the
-     * deck from naming it at all).
+     * call is shaped exactly as the engine shapes it — plus the fields a Host
+     * might send that this deck must not act on.
+     *
+     * `playbackRate` IS IN THE PATCH AND IT IS THE ONE THAT MATTERS. It used to
+     * be absent: the patch smuggled `volume` and `seekTo`, and NO HOST SENDS
+     * EITHER — so the closure was proved against two fields nobody would ever
+     * pass and left untested against the one field a Host really does pass.
+     * `ui/embed.js::syncVideoLock` sends `playbackRate` on EVERY correcting
+     * tick, at ~4 Hz, for as long as a lock is held. It is the THIRD member of
+     * the write set (ADR 0001 decision 4), it is refused rather than applied,
+     * and the refusal is the ENGINE's — `qa/speed-pitch.mjs` forbids this deck
+     * from naming the page rate in code at all, so what this assertion proves
+     * at the deck is that the field lands NOWHERE, and the engine chain at the
+     * foot of this section is what proves the refusal is recorded rather than
+     * silently dropped.
      */
     cd.setMasterGain(-6);
     gainMsgs.length = 0;
@@ -10769,17 +10848,19 @@ if (group('host')) {
     const beforeDrive = stateOf();
     const applied = cd.drive({
       v: 1, to: 'off', from: 'ui', type: 'TRANSPORT_DRIVE', deck: 'A',
-      muted: true, currentTime: 5, volume: 0.1, seekTo: 99,
+      muted: true, currentTime: 5, playbackRate: 1.02, volume: 0.1, seekTo: 99,
     });
     pump();
     const masterAfterMute = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
-    ok('drive() WRITES MUTE AND POSITION AND NOTHING ELSE — the envelope, a smuggled `volume` and a smuggled '
-      + '`seekTo` all land nowhere  '
+    ok('drive() WRITES MUTE AND POSITION AND NOTHING ELSE — the `playbackRate` a real lock sends at 4 Hz, the '
+      + 'envelope, a smuggled `volume` and a smuggled `seekTo` all land nowhere  '
       + '[entry point: CachedDeck.drive(), handed the raw message by offscreen/engine.js case TRANSPORT_DRIVE]',
       applied.join(',') === 'muted,currentTime'
       && cd.transportMuted === true && Math.abs(cd.positionSec() - 5) < 0.01
-      && cd.volume === undefined && stateOf() === beforeDrive,
+      && cd.volume === undefined && cd.playbackRate === undefined && cd.rate === undefined
+      && cd.semitones === 0 && stateOf() === beforeDrive,
       `applied [${applied.join(',')}], muted=${cd.transportMuted}, at ${cd.positionSec().toFixed(2)}s, `
+        + `playbackRate=${String(cd.playbackRate)}, rate=${String(cd.rate)}, semitones=${cd.semitones}, `
         + `volume=${String(cd.volume)}, everything else ${stateOf() === beforeDrive ? 'unchanged' : 'MOVED'}`);
 
     ok('...and the mute REACHES THE GRAPH rather than only the field: the master slot goes to zero while the user\'s '
@@ -10804,6 +10885,40 @@ if (group('host')) {
         ? 'release() sent nothing to the graph — a deck muted by a lock stays silent with every meter saying otherwise'
         : `muted=${cd.transportMuted}, master -> ${masterAfterRelease.value.toFixed(6)} `
           + `(${dbToGain(-6).toFixed(6)} is −6 dB), playhead ${cd.positionSec().toFixed(2)}s`);
+
+    /**
+     * ...AND THE RELEASE REACHES THE GRAPH AND NOT THE WIRE — the positive
+     * form of a line that used to be here and did nothing.
+     *
+     * `release()` ended with a `pushState()` whose comment claimed a Host could
+     * "see the lock was given back rather than assume it". MEASURED, THAT WAS
+     * FALSE: the transport report is deduped on
+     * `playing|currentTime|duration|ended|seeking` and a release moves none of
+     * them, so `pushTransport()` returned early; the `LIVE_STATE` behind it
+     * carried an ordinary heartbeat with no mute field on it. Deleting the line
+     * changed no number in this suite. It is gone, and THIS is what keeps it
+     * gone: a release puts ZERO messages on the bus, and the whole of its
+     * effect is one gain message on the worklet port.
+     */
+    bus.length = 0;
+    gainMsgs.length = 0;
+    cd.drive({ muted: true });
+    bus.length = 0;
+    gainMsgs.length = 0;
+    cd.release();
+    const releaseBus = bus.splice(0);
+    const releaseGain = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('...and the release says NOTHING ON THE BUS: its whole effect is the graph, so no Host is woken by a '
+      + 'heartbeat that carries no news of what it is a heartbeat for  '
+      + '[entry point: CachedDeck.release(), reached from offscreen/engine.js case TRANSPORT_RELEASE]',
+      releaseBus.length === 0 && releaseGain != null
+      && Math.abs(releaseGain.value - dbToGain(-6)) < 1e-12,
+      releaseBus.length
+        ? `release() put ${releaseBus.length} message(s) on the bus — [${releaseBus.map((m) => m.type).join(', ')}] — `
+          + 'and not one of them carries the mute it is reporting'
+        : releaseGain == null
+          ? 'the bus is silent AND the graph got nothing: the release did not happen at all'
+          : `0 bus messages, master slot -> ${releaseGain.value.toFixed(6)} (${dbToGain(-6).toFixed(6)} is −6 dB)`);
 
     /**
      * A NEW TRACK IS NOT UNDER ANYONE'S LOCK. A `transportMuted` carried across
@@ -10920,29 +11035,45 @@ if (group('host')) {
     const playingReport = reports[reports.length - 1];
     const wantDeckClock = videoLockWant({ ...lockAt, isDeckClock: fileTransport.isDeckClock });
     const wantPagePlayer = videoLockWant({ ...lockAt, isDeckClock: deckHost.transport.isDeckClock });
-    // What the acquire does, through the Host wire and the real drive().
+    /**
+     * WHAT THE ACQUIRE DOES, THROUGH THE HOST WIRE AND THE REAL `drive()` — and
+     * the wire itself is COUNTED, not merely passed through. Everything else in
+     * this section calls `cd.drive(...)` directly; this is the one place the
+     * loop is closed in the WRITE direction, engine -> Host -> engine, and an
+     * outbox that was built and never read is how a section can look end to end
+     * while only its read half is joined up. So the messages are held and
+     * counted before they are relayed.
+     */
     gainMsgs.length = 0;
     toEngine.length = 0;
     fileTransport.drive({ muted: true });
-    for (const m of toEngine.splice(0)) if (m.type === 'TRANSPORT_DRIVE') cd.drive(m);
+    const acquireWire = toEngine.splice(0);
+    for (const m of acquireWire) if (m.type === 'TRANSPORT_DRIVE') cd.drive(m);
     const mutedGain = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
     gainMsgs.length = 0;
     fileTransport.release();
-    for (const m of toEngine.splice(0)) if (m.type === 'TRANSPORT_RELEASE') cd.release();
+    const releaseWire = toEngine.splice(0);
+    for (const m of releaseWire) if (m.type === 'TRANSPORT_RELEASE') cd.release();
     const backGain = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    const wireSaid = [...acquireWire, ...releaseWire].map((m) => m.type).join(',');
     ok('THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK, and it still takes the page\'s player under the '
       + 'IDENTICAL engine state — the acquire it would have sent silences this deck for the whole track  '
       + '[entry point: videoLockWant(), the gate of ui/embed.js::syncVideoLock, on every LIVE_STATE]',
       lockAt.source === 'cache' && lockAt.status === 'running'
       && wantDeckClock === false && wantPagePlayer === true
       && playingReport != null && playingReport.playing === true
+      && wireSaid === 'TRANSPORT_DRIVE,TRANSPORT_RELEASE'
+      && acquireWire[0].muted === true
       && mutedGain != null && mutedGain.value === 0
       && backGain != null && backGain.value > 0,
       lockAt.source !== 'cache' || lockAt.status !== 'running'
         ? `the deck reported source=${lockAt.source} status=${lockAt.status} — the lock's own gate never arose, `
           + 'so this assertion could not look'
-        : `engine says source=${lockAt.source}/${lockAt.status} — want(isDeckClock=true)=${wantDeckClock}, `
-          + `want(isDeckClock=false)=${wantPagePlayer}; the acquire puts the master slot at `
+        : wireSaid !== 'TRANSPORT_DRIVE,TRANSPORT_RELEASE'
+          ? `the Host wire carried [${wireSaid}] — the write direction is not closed, so the mute below was `
+            + 'applied by this file rather than delivered by a transport'
+          : `engine says source=${lockAt.source}/${lockAt.status} — want(isDeckClock=true)=${wantDeckClock}, `
+          + `want(isDeckClock=false)=${wantPagePlayer}; the wire carried [${wireSaid}]; the acquire puts the master slot at `
           + `${mutedGain ? mutedGain.value : 'NOTHING'} while the deck's own report says playing=`
           + `${playingReport ? playingReport.playing : '?'}, and the release puts it back to `
           + `${backGain ? backGain.value.toFixed(6) : 'NOTHING'}`);
@@ -11014,7 +11145,104 @@ if (group('host')) {
         ? `${repKeys} — five plus atMs, exactly as DeckTransport.onState is documented to be short by one`
         : `the report is now {${repKeys}} — see shared/host.js freeze item 11 before adding to it`);
 
+    /**
+     * ...AND `ended` IS OBSERVED TRUE, WHICH IS THE DIRECTION THE WHOLE MESSAGE
+     * EXISTS FOR. The pair assertion above only ever read `ended === false`:
+     * the fixture never drove the deck off the end of its track, so
+     * `ended: this.status === 'ended'` could be replaced by the constant
+     * `false` with nothing red — measured. That is the architectural claim in
+     * `cacheddeck.js` ("an `ended` deck reported as `paused` is a deck the Host
+     * will never rewind") going entirely unasserted.
+     *
+     * THE DECK IS DRIVEN THERE THE WAY THE WORKLET DRIVES IT: fill the ring,
+     * then move the READ counter up to the write counter, which is what a
+     * device consuming the audio does. `fill()` promotes `playing` to `ended`
+     * when the writer has run off the end of the track AND the ring has
+     * drained — both halves, so a track that has merely been written out is
+     * still playing.
+     *
+     * AND THE READOUT IS READ IN THE SAME BREATH. `LIVE_STATE` flattens
+     * `loaded`, `paused` and `ended` into the single word `ready` — that
+     * flattening is WHY the transport report has to carry the pair — so the
+     * assertion holds both at once: the report says ended, the readout says
+     * `ready`, and neither is inferred from the other.
+     */
+    reports.length = 0;
+    let toEnd = 0;
+    while (cd.status !== 'ended' && toEnd++ < 500) {
+      cd.fill();
+      Atomics.store(cd.out.hdr, 1, cd.out.writeFrames());   // the device consumed it all
+    }
+    pump();
+    const endedRep = reports[reports.length - 1];
+    const endedLive = lastLive.m;
+    ok('...and the report says ENDED when the track runs out, while the readout can only say "ready" — the pair the '
+      + 'transport carries and LIVE_STATE cannot  '
+      + '[entry point: CachedDeck.fill(), which promotes playing -> ended and pushes]',
+      cd.status === 'ended' && endedRep != null
+      && endedRep.ended === true && endedRep.playing === false
+      && endedLive != null && endedLive.status === 'ready',
+      cd.status !== 'ended'
+        ? `the deck never reached ended after ${toEnd} fills — this assertion could not look`
+        : endedRep == null
+          ? 'the deck ended and put no report on the wire at all'
+          : `deck=${cd.status}: report says ended=${endedRep.ended}/playing=${endedRep.playing}, `
+            + `readout says status="${endedLive ? endedLive.status : 'NOTHING'}"`);
+
+    /**
+     * A TRACK BOUNDARY CLEARS THE DEDUPE KEY, and without that the first report
+     * of a new track can be swallowed by the last report of the old one.
+     * `load()` sets `transportAt = null` for this and nothing else; deleting
+     * that line left the suite green, because nothing here ever loaded two
+     * tracks whose reports were EQUAL IN VALUE.
+     *
+     * THESE TWO ARE EQUAL IN VALUE ON PURPOSE — same length, so same
+     * `playing|currentTime|duration|ended|seeking` — which is exactly the case
+     * the dedupe swallows and the case a DJ hits by loading the same track
+     * twice. The second load must still speak.
+     */
+    reports.length = 0;
+    await cd.load(mkTrack(SR * 5, 1));
+    pump();
+    const load1 = reports[reports.length - 1];
+    reports.length = 0;
+    await cd.load(mkTrack(SR * 5, 1));
+    pump();
+    const load2 = reports[reports.length - 1];
+    const keyOf = (r) => (r ? `${r.playing}|${r.currentTime}|${r.duration}|${r.ended}|${r.seeking}` : 'NOTHING');
+    ok('...and a NEW TRACK always speaks, even when its report is identical in value to the last one: the dedupe key '
+      + 'is cleared at the track boundary  '
+      + '[entry point: CachedDeck.load(), which resets transportAt before its one pushState()]',
+      load1 != null && load2 != null && keyOf(load1) === keyOf(load2),
+      load2 == null
+        ? `the second load of an identical track put NOTHING on the wire (the first said ${keyOf(load1)}) — `
+          + 'its first report was deduped against the previous track'
+        : `both loads reported ${keyOf(load2)} — equal in value, and said twice`);
+
+    /**
+     * ...AND STOPPING UNDER A LOCK TELLS THE GRAPH, not just the field.
+     * `stop()` cleared `transportMuted` without pushing, unlike `load()` — so
+     * the deck's own state said "not muted" while the worklet's master slot was
+     * still at zero, and the two disagreed until whatever happened next
+     * happened to push. Deleting the clear entirely left the suite green: the
+     * only `cd.stop()` in this section was immediately followed by `dispose()`.
+     */
+    cd.drive({ muted: true });
+    gainMsgs.length = 0;
     cd.stop();
+    pump();
+    const masterAfterStop = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('...and a deck STOPPED UNDER A LOCK hands the graph back too — the field and the worklet agree at the track '
+      + 'boundary, exactly as they do across a load  '
+      + '[entry point: CachedDeck.stop(), the other track boundary]',
+      cd.transportMuted === false && masterAfterStop != null
+      && Math.abs(masterAfterStop.value - dbToGain(cd.masterDb)) < 1e-12,
+      masterAfterStop == null
+        ? `muted=${cd.transportMuted} but the graph was told NOTHING — the master slot is still at 0 while the `
+          + 'deck says it is not muted'
+        : `muted=${cd.transportMuted}, master slot -> ${masterAfterStop.value.toFixed(6)} `
+          + `(${dbToGain(cd.masterDb).toFixed(6)} is the user's ${cd.masterDb} dB)`);
+
     cd.dispose();
 
     // ----------------------------- the page-hosted path, over the SHIPPED Host
@@ -11078,13 +11306,33 @@ if (group('host')) {
         ? `the chain is broken at: ${brokenLinks.join('; ')} — every count above still passes and means something else`
         : `${chain.length} of ${chain.length} links`);
 
+    /**
+     * ...AND THE THIRD LEG OF THE WRITE SET, WHICH IS THE ENGINE'S AND NOT THE
+     * DECK'S. `drive()` above proves `playbackRate` lands NOWHERE on the deck.
+     * That is only half the contract: a field that lands nowhere and is also
+     * never mentioned is indistinguishable from a field silently dropped, and a
+     * lock re-asserting a correction at 4 Hz for a whole track would leave no
+     * trace of having been refused. The record — count always, log once per
+     * lock, clear on release — is the other half.
+     *
+     * READ AS TEXT because `offscreen/engine.js` cannot be evaluated from Node
+     * (measured: it throws `self is not defined` at import), and BY IDENTIFIER
+     * rather than by prose, so a reworded log line does not read as a deleted
+     * one. The three links are the three places the record lives, and each was
+     * individually deletable with this suite staying green.
+     */
     const engineChain = [
       ['TRANSPORT_DRIVE reaches the cached deck', /case 'TRANSPORT_DRIVE':[\s\S]{0,900}?cachedDecks\[id\]\.drive\(m\);/],
       ['TRANSPORT_RELEASE reaches it too', /case 'TRANSPORT_RELEASE':[\s\S]{0,900}?cachedDecks\[id\]\.release\(\);/],
+      ['the refusal record exists at module scope', /const transportRateRefusals = \{[^}]*\};/],
+      ['...TRANSPORT_DRIVE counts a refused rate and logs the FIRST one only',
+        /case 'TRANSPORT_DRIVE':[\s\S]{0,1200}?Number\(m\.playbackRate\)[\s\S]{0,300}?transportRateRefusals\[id\]\+\+;[\s\S]{0,200}?transportRateRefusals\[id\] === 1/],
+      ['...and TRANSPORT_RELEASE clears the latch, so the next lock gets its own first line',
+        /case 'TRANSPORT_RELEASE':[\s\S]{0,600}?transportRateRefusals\[id\] = 0;/],
     ];
     const engineBroken = engineChain.filter(([, re]) => !re.test(engineTxt)).map(([w]) => w);
-    ok('...and the engine really carries both halves of the wire, with the RAW message, so a Host has somewhere '
-      + 'honest to land drive and release  '
+    ok('...and the engine really carries both halves of the wire with the RAW message, AND KEEPS THE RATE REFUSAL '
+      + 'RECORD the deck is forbidden to keep — counted always, logged once, cleared by the release  '
       + '[entry point: extension/offscreen/engine.js handle(), comments stripped]',
       engineBroken.length === 0,
       engineBroken.length ? engineBroken.join('; ') : `${engineChain.length} of ${engineChain.length}`);

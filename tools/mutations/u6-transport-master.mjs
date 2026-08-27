@@ -143,6 +143,20 @@ const CUT_AGAINST = 'd75a6fd';
  * line. This constant was prose until the commit above existed.
  */
 const CUT_REPAIR = '980ef24';
+/**
+ * ...AND A THIRD, FOR THE COVERAGE REPAIR. M25-M33 patch lines that arrived
+ * with the review's D3/D4/D5/D7 — the `ended` direction, the release that no
+ * longer speaks, `stop()`'s push, `load()`'s dedupe reset, the `listen()` latch,
+ * `atMs`, the engine's rate-refusal record and the second `hosted` derivation.
+ * None of those lines existed at `980ef24`; several of them CONTRADICT it, so
+ * stamping them to it would be a claim this file can be checked against and
+ * would lose.
+ *
+ * PROSE UNTIL THE COMMIT EXISTS, which is the third answer the check below
+ * keeps for exactly this: "not committed yet" and "rebased away" are opposite
+ * findings and must not print as the same line. Re-stamp after landing.
+ */
+const CUT_MAJORS = 'HEAD (the D3/D4/D5/D7 coverage repair; re-stamp at integration)';
 
 const SUITES = {
   host: { argv: ['test.js', 'host'], label: 'node test.js host' },
@@ -288,7 +302,7 @@ const MUTATIONS = [
       // reds two assertions and claims one is a case nobody can reconcile.
       'THE RECORDER ABOVE IS STANDING IN FOR A REAL CAPTURE GRANT AND A REAL MODEL LOAD',
     ],
-    green: ['and the engine really carries both halves of the wire, with the RAW message'],
+    green: ['and the engine really carries both halves of the wire'],
   },
   {
     id: 'M14', suite: 'host', cut: CUT_AGAINST,
@@ -494,7 +508,7 @@ const MUTATIONS = [
       find: '        cachedDecks[id].drive(m);',
       replace: '        cachedDecks[id].drive({ muted: m.muted, currentTime: m.currentTime });   // U6/M15 mutation',
     }],
-    red: ['and the engine really carries both halves of the wire, with the RAW message'],
+    red: ['and the engine really carries both halves of the wire'],
     green: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
   },
   // ------------------------------- the declaration, and the lock it stops (D1)
@@ -621,6 +635,140 @@ const MUTATIONS = [
     red: ['...and a transport that never SAID which it is'],
     green: ['A FILE SOURCE\'S TRANSPORT DECLARES IT IS THE DECK\'S OWN CLOCK'],
   },
+  // ---- THE COVERAGE REPAIR: D3, D4, D5 and D7 --------------------------------
+  /**
+   * NINE CASES FOR NINE BLOCKS THAT WERE DELETABLE AT 149/0. Each one is the
+   * reviewer's own mutation, kept as a standing case rather than a finding in a
+   * document: the review deleted these individually and the suite did not move,
+   * which is the definition of code no instrument watches.
+   */
+  {
+    id: 'M25', suite: 'host', cut: CUT_MAJORS,
+    what: 'listen() drops its idempotence latch — the handlers go up once per call',
+    why: 'Six words no assertion watched. A real transport ADDS a listener per call, so a second registration '
+      + 'is a second delivery and one play/pause transition asks for two capture grants.',
+    edits: [{
+      file: 'extension/ui/embed-state.js',
+      find: '      if (listening) return;',
+      replace: '      if (false) return;   // U6/M25 mutation: listen() stops being idempotent',
+    }],
+    red: ['listen() IS IDEMPOTENT'],
+    green: ['THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE', 'THE PAGE-HOSTED PATH IS UNCHANGED'],
+  },
+  {
+    id: 'M26', suite: 'host', cut: CUT_MAJORS,
+    what: 'the report\u2019s `atMs` becomes the constant 0',
+    why: 'The reviewer\u2019s: `atMs: Date.now()` -> `atMs: 0` left the suite green, because the only check was '
+      + '`typeof === "number"`. A Host relaying a stale sample time cannot tell a 50 ms hop from a 5 minute one.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '      atMs: Date.now(),',
+      replace: '      atMs: 0,   // U6/M26 mutation: a number of the right type and no clock behind it',
+    }],
+    red: ['and `atMs` is SAMPLED IN THE CALL'],
+    // Straight apostrophe in the source (`ENGINE\'S`), so the needle is cut
+    // short of it: a curly one matched nothing and the pre-check said so.
+    green: ['onState REPORTS THE ENGINE', 'and a deck that has not moved says NOTHING'],
+  },
+  {
+    id: 'M27', suite: 'host', cut: CUT_MAJORS,
+    what: 'the report\u2019s `ended` becomes the constant false',
+    why: 'The reviewer\u2019s, and the one the whole message exists for: `ended: this.status === "ended"` -> '
+      + '`ended: false` left the suite green because the fixture never drove the deck off the end of its track. '
+      + 'An ended deck reported as paused is a deck the Host will never rewind.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: "      ended: this.status === 'ended',",
+      replace: '      ended: false,   // U6/M27 mutation: the pair the readout cannot carry, un-carried',
+    }],
+    red: ['and the report says ENDED when the track runs out'],
+    green: ['and it carries the playing/ended pair the readout cannot'],
+  },
+  {
+    id: 'M28', suite: 'host', cut: CUT_MAJORS,
+    what: 'release() speaks on the bus again — the heartbeat that reports nothing comes back',
+    why: 'The line D4 was about, in the direction that puts it back rather than the one that deletes it. It '
+      + 'carries no mute field, so what it wakes a Host for is nothing at all.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '     * the worklet port, and the bus stays SILENT across the release.\n     */\n  }',
+      replace: '     * the worklet port, and the bus stays SILENT across the release.\n     */\n'
+        + '    this.pushState();   // U6/M28 mutation: a heartbeat with no news on it\n  }',
+    }],
+    red: ['and the release says NOTHING ON THE BUS'],
+    green: ['release() HANDS THE PLAYER BACK, READ BACK OFF THE DECK'],
+  },
+  {
+    id: 'M29', suite: 'host', cut: CUT_MAJORS,
+    what: 'stop() clears the lock flag without telling the graph',
+    why: 'D5a. The field says "not muted" while the worklet\u2019s master slot is still at zero — the field is the '
+      + 'half that lies, and it lies until whatever happens next happens to push.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '    this.pushMaster();\n    this.pushState();\n  }',
+      replace: '    this.pushState();   // U6/M29 mutation: the graph is never told\n  }',
+    }],
+    red: ['and a deck STOPPED UNDER A LOCK hands the graph back too'],
+    green: ['and a NEW TRACK does not inherit a lock that was never released'],
+  },
+  {
+    id: 'M30', suite: 'host', cut: CUT_MAJORS,
+    what: 'load() stops clearing the transport dedupe key at the track boundary',
+    why: 'D5c. The first report of a new track is then swallowed by the last report of the old one whenever the '
+      + 'two are equal in value — which is what loading the same track twice does.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '    this.transportMuted = false;\n    this.transportAt = null;\n    this.pushGains(0);',
+      replace: '    this.transportMuted = false;\n    this.pushGains(0);   // U6/M30 mutation: the key survives the boundary',
+    }],
+    red: ['and a NEW TRACK always speaks'],
+    green: ['and a NEW TRACK does not inherit a lock that was never released'],
+  },
+  {
+    id: 'M31', suite: 'host', cut: CUT_MAJORS,
+    what: 'the engine stops RECORDING a refused rate write — it is dropped silently instead',
+    why: 'D5e, the third leg of the write set. A field that lands nowhere AND is never mentioned is '
+      + 'indistinguishable from a field silently dropped; a lock re-asserting at 4 Hz for a whole track would '
+      + 'leave no trace of having been refused.',
+    edits: [{
+      file: 'extension/offscreen/engine.js',
+      find: '          transportRateRefusals[id]++;\n          if (transportRateRefusals[id] === 1) {',
+      replace: '          if (true) {   // U6/M31 mutation: refused, and not recorded',
+    }],
+    red: ['and the engine really carries both halves of the wire'],
+    green: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
+  },
+  {
+    id: 'M32', suite: 'host', cut: CUT_MAJORS,
+    what: 'a SECOND `transport != null` appears inside makeFollower',
+    why: 'D7, and it is the reviewer\u2019s exact mutation. "Asks once" was a BOOLEAN test in this file and a '
+      + 'COUNT in the sibling, so a second answer in the file that holds the one answer left it green.',
+    edits: [{
+      file: 'extension/ui/embed-state.js',
+      find: '  const hosted = transport != null;',
+      replace: '  const hosted = transport != null;\n'
+        + '  const hostedAgain = transport != null;   // U6/M32 mutation: two answers that can disagree\n'
+        + '  void hostedAgain;',
+    }],
+    red: ['THE DECK ASKS THE HOST, NOT THE WINDOW, AND ASKS ONCE'],
+    green: ['THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE'],
+  },
+  {
+    id: 'M33', suite: 'host', cut: CUT_MAJORS,
+    what: 'drive() does the obvious thing — Object.assign(this, patch)',
+    why: 'The closure, against the field a REAL Host sends. The patch now carries `playbackRate`, which '
+      + '`ui/embed.js` sends on every correcting tick; before D5e it carried only `volume` and `seekTo`, which '
+      + 'no Host sends at all, so the closure was proved against fields nobody would pass.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '  drive(patch) {\n    const p = patch || {};\n    const applied = [];',
+      replace: '  drive(patch) {\n    const p = patch || {};\n'
+        + '    Object.assign(this, p);   // U6/M33 mutation: the Host that inherits whatever the unit passed\n'
+        + '    const applied = [];',
+    }],
+    red: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
+    green: ['and the mute REACHES THE GRAPH rather than only the field'],
+  },
 ];
 
 // ---------------------------------------------------------------- the runner
@@ -691,10 +839,11 @@ function stampState(stamp) {
   }
 }
 
-console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST} (M1-M17) and ${CUT_REPAIR} (M18-M24); `
-  + `HEAD is ${head}`);
+console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST} (M1-M17), ${CUT_REPAIR} (M18-M24) `
+  + `and ${CUT_MAJORS} (M25-M33); HEAD is ${head}`);
 console.log(`  stamp M1-M17  ${CUT_AGAINST}: ${stampState(CUT_AGAINST)}`);
 console.log(`  stamp M18-M24 ${CUT_REPAIR}: ${stampState(CUT_REPAIR)}`);
+console.log(`  stamp M25-M33 ${CUT_MAJORS}: ${stampState(CUT_MAJORS)}`);
 console.log(`${cases.length} case(s), ${new Set(cases.map((c) => c.suite)).size} suite(s)\n`);
 
 /**
