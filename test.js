@@ -4598,6 +4598,31 @@ if (group('host')) {
    *      point.
    *   3. The stubs exist only to break ONE declared duty at a time, which is the
    *      one thing a real Host cannot be asked to do on demand.
+   *
+   * ---- U4, HOST INTERFACE v1.1: EVERY ASSERTION ADDED HERE, WATCHED RED -----
+   * AGENTS.md: "An assertion never observed failing is one whose ability to fail
+   * is an assumption." Each row was applied, run, and reverted; the tree is
+   * green with all of them undone. `file:line` is where the mutation was made,
+   * NOT where the red appeared — for the first two rows those are different
+   * files, which is the whole reason C3 is a trap.
+   *
+   *   mutation                                          | made at                  | gate         | red
+   *   --------------------------------------------------+--------------------------+--------------+----
+   *   delete the `sourceBytes` @property                 | shared/host.js:392       | unit-check   | "EngineHost is one interface, not two … CHECKED BUT UNDOCUMENTED: sourceBytes (in ENGINE_HOST_DUTIES, in no @property)"  90/1
+   *   delete the `sourceBytes` key from the duty table   | shared/host.js:504       | unit-check   | "…DOCUMENTED BUT UNCHECKED: sourceBytes (in the typedef, in no duty table, and not a declared namespace)"  90/1
+   *   `missing` filter skips `sourceBytes`               | shared/host.js:671       | test.js host | "A HOST THAT IS SHORT `sourceBytes` IS REFUSED… — a Host with no sourceBytes was ACCEPTED"  127/1
+   *   `missing` filter skips `exportSink`                | shared/host.js:671       | test.js host | "A HOST THAT IS SHORT `exportSink` IS REFUSED… — a Host with no exportSink was ACCEPTED"  127/1
+   *   the refusal drops each duty's SENTENCE             | shared/host.js:674       | test.js host | both new rows plus captureStream's and the transport's: "…missing 1 of its 11 duties: sourceBytes()"  123/5
+   *   engine.js acquires a `host.sourceBytes(` caller    | offscreen/engine.js:96   | test.js host | "…no duty is exempted for longer than its reason lasts — sourceBytes HAS a caller now"  127/1
+   *   the shipping `sourceBytes` resolves `ArrayBuffer(0)`| offscreen/host.js:147   | test.js host | "sourceBytes() REFUSES BY REJECTING… — RESOLVED with {}"  127/1
+   *   the shipping `exportSink` resolves `{}`            | offscreen/host.js:160    | test.js host | "exportSink() REFUSES BY REJECTING… — RESOLVED with {}"  127/1
+   *   the shipping `sourceBytes` loses its `async`       | offscreen/host.js:147    | test.js host | "sourceBytes() threw SYNCHRONOUSLY … a caller that attaches .catch() without awaiting first never sees it"  127/1
+   *   the shipping Host loses `sourceBytes` entirely     | offscreen/host.js:147    | test.js host | "THE SHIPPING EngineHost SATISFIES EVERY DECLARED DUTY — missing 1 of its 11 duties: sourceBytes()"  126/2
+   *   the exemption row for `sourceBytes` is deleted     | test.js:4884             | test.js host | "…every declared duty is actually reached for — declared but never called: sourceBytes"  127/1
+   *
+   * The last row is the one that says the exemption below is not a free pass: it
+   * still reds for a duty that is unreached and unnamed, exactly as it did
+   * before v1.1 added two duties one tag ahead of their callers.
    */
   const {
     assertHost, assertHostOption,
