@@ -5,7 +5,16 @@
  * batteries were permanently lost in this build because they lived in /tmp, and
  * a "watched red" nobody can re-run is a claim rather than evidence.
  *
- *   ANCHORS CUT AGAINST LANDED COMMIT 5993d32
+ *   ANCHORS CUT AGAINST LANDED COMMIT 5993d32, PLUS THIS SLICE'S OWN NEW FILES
+ *
+ * Stated in two halves because a stamp that names a commit a reader cannot
+ * resolve the anchor in is worse than none. Two of the four files below —
+ * `extension/offscreen/playback-processor.js` and `extension/offscreen/engine.js`
+ * — exist at `5993d32` and their anchors were cut against it. The other two,
+ * `extension/engine/bounce.js` and `extension/offscreen/bounce.js`, are NEW in
+ * this slice and did not exist at that commit; their anchors were cut against
+ * the same commit that introduces them, which is the earliest resolvable
+ * revision there can be for a file a slice creates.
  *
  * ===========================================================================
  * A BATTERY IS ONLY VALID AGAINST THE SOURCE IT WAS CUT FOR
@@ -59,7 +68,11 @@ import { spawnSync } from 'node:child_process';
 const HERE = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.join(HERE, '..');
 const SUITE = path.join(HERE, 'bounce.mjs');
-const REVISION = '5993d32';
+/**
+ * The landed base this battery's anchors were cut against. Files this slice
+ * CREATES have no earlier revision to name; see the header.
+ */
+const REVISION = '5993d32 (+ this slice\'s own new files)';
 
 const F_ENGINE = 'extension/engine/bounce.js';
 const F_OFF = 'extension/offscreen/bounce.js';
