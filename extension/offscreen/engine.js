@@ -83,6 +83,15 @@ import { effectiveXfPosition } from '../engine/mixer.js';
  * to be the same shape in both contexts (../shared/host.js).
  */
 import * as host from './host.js';
+/**
+ * BOUNCE — what a deck IS PLAYING, rendered offline as one file. Distinct from
+ * Export, which is the six raw stems at unity: a DAW wants the stems, a listener
+ * wants what they heard, so they get different names. `engine/bounce.js` carries
+ * the design, the arithmetic and the reason SPEED is not one of the things a
+ * bounce bakes.
+ */
+import { bounceSettings, isBounceCode, BOUNCE_CODES } from '../engine/bounce.js';
+import { bounceToSink } from './bounce.js';
 import { assertHost, ENGINE_HOST_DUTIES, modelSourceWord } from '../shared/host.js';
 
 /**
@@ -1139,6 +1148,37 @@ async function readOpfsRoot(name) {
  */
 const pageRate = { A: 1, B: 1 };
 
+/**
+ * ONE BOUNCE PER DECK AT A TIME, and a cancel flag beside it.
+ *
+ * TWO FLAGS AND NOT ONE, because they answer different questions: `bouncing`
+ * refuses a second start while a render is in flight (two renders on one deck
+ * would fight over the same track and both write to the Host's one gesture), and
+ * `bounceCancelled` is polled BETWEEN producer stops, never mid-quantum, for the
+ * same reason the ahead-of-time runner's cancel is checked between windows.
+ *
+ * `bounceCancelled` is cleared at the START of a run rather than at the end of
+ * one, so a cancel that arrives after a run has already finished cannot silently
+ * kill the next one.
+ */
+const bouncing = { A: false, B: false };
+const bounceCancelled = { A: false, B: false };
+
+/**
+ * Report a bounce failure on the wire, with a code from the CLOSED set.
+ *
+ * `isBounceCode` is checked at the call sites rather than trusted: a code that
+ * this unit never declared reaching a surface is exactly what #29 measured —
+ * `ARM_CODES` is a closed set of 8 the seam never checks, and an invented one
+ * gets an undismissable banner with a dead button and nothing red anywhere.
+ */
+function bounceFailed(id, code, detail) {
+  const c = isBounceCode(code) ? code : 'RENDER_FAILED';
+  const message = detail || BOUNCE_CODES[c];
+  log(`ERROR [${id}] bounce ${c}: ${message}`);
+  send({ type: 'BOUNCE_ERROR', deck: id, code: c, message });
+}
+
 // The Host owns the routing guard and the listener's return value; `handle` is
 // handed the raw envelope and its promise is deliberately not awaited — every
 // case reports through `send`/`push`, and `handle`'s own catch is the only
@@ -1649,6 +1689,69 @@ async function handle(m) {
         await writeRoot(root, 'dev-capture.wav', encodeWav([l, r], { sampleRate: SR, bitDepth: 32, float: true }));
         log(`dev capture dumped: ${l.length} frames`);
         return push(true);
+      }
+
+      // ------------------------------------------------------------- bounce
+      /**
+       * A FILE SOURCE IS THE ONLY KIND A BOUNCE CAN RENDER, and the refusal says
+       * WHICH of the two reasons applies rather than reporting one for both: a
+       * deck with nothing loaded and a deck playing live are different problems
+       * with different fixes, and a single "cannot bounce" would make the user
+       * guess which they have.
+       *
+       * The settings are read ONCE, here, into a flat record. A render takes
+       * minutes and a user who moves a fader during one must not silently change
+       * what is already half-written — a bounce is of the settings AS THEY WERE
+       * WHEN IT WAS ASKED FOR, which is also the only definition a progress bar
+       * can be honest about.
+       */
+      case 'BOUNCE_START': {
+        const id = normalizeDeckId(m.deck);
+        const cd = cachedDecks[id];
+        if (bouncing[id]) return void bounceFailed(id, 'BUSY');
+        if (!cd || !cd.track) return void bounceFailed(id, isCached(id) ? 'NO_TRACK' : 'NOT_CACHED');
+        bouncing[id] = true;
+        bounceCancelled[id] = false;
+        const t0 = Date.now();
+        const title = (cd.track.meta && (cd.track.meta.title || cd.track.meta.videoId)) || `deck ${id}`;
+        try {
+          const r = await bounceToSink({
+            track: cd.track,
+            settings: bounceSettings(cd),
+            title,
+            assetUrl: host.assetUrl,
+            // Called through a wrapper rather than handed over by reference so
+            // that the seam scan in test.js sees a CALL here. A duty consumed
+            // only by hand-off reads as one nothing reaches for.
+            exportSink: (plan) => host.exportSink(plan),
+            cancelled: () => bounceCancelled[id],
+            /**
+             * PROGRESS RIDES ITS OWN MESSAGE, not `STATE`. `push()` coalesces on
+             * a microtask and ships the whole snapshot, so a per-stop tick would
+             * either be dropped by the coalescer or drag the full state dozens of
+             * times a track.
+             */
+            onProgress: (p) => send({
+              type: 'BOUNCE_PROGRESS', deck: id, stage: 'render',
+              frame: p.frame, frames: p.frames, pct: +p.pct.toFixed(4),
+              elapsedMs: Date.now() - t0,
+            }),
+          });
+          log(`[${id}] bounced ${(r.frames / SR).toFixed(1)} s to ${r.files[0]} · `
+            + `${(r.bytes / 1e6).toFixed(1)} MB in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+          return void send({ type: 'BOUNCE_DONE', deck: id, files: r.files, bytes: r.bytes, frames: r.frames });
+        } catch (e) {
+          return void bounceFailed(id, e && e.code, String((e && e.message) || e));
+        } finally {
+          bouncing[id] = false;
+        }
+      }
+
+      case 'BOUNCE_CANCEL': {
+        const id = normalizeDeckId(m.deck);
+        bounceCancelled[id] = true;
+        log(`[${id}] bounce cancel requested${bouncing[id] ? '' : ' — nothing is running'}`);
+        return;
       }
 
       case 'TEARDOWN':

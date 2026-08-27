@@ -215,19 +215,20 @@
       "why": "ADR 0001 decision 3, verbatim. Whole-directory for the same reason. shared/config.js is the constants and the model's identity; shared/host.js is the Host interface itself."
     },
     {
-      "adr": "the audio graph in extension/offscreen/ (deck.js, live.js, master.js, cacheddeck.js, the worklet processors)",
+      "adr": "the audio graph in extension/offscreen/ (deck.js, live.js, master.js, cacheddeck.js, bounce.js, the worklet processors)",
       "paths": [
         "offscreen/engine.js",
         "offscreen/deck.js",
         "offscreen/live.js",
         "offscreen/master.js",
         "offscreen/cacheddeck.js",
+        "offscreen/bounce.js",
         "offscreen/worklets.js",
         "offscreen/capture-processor.js",
         "offscreen/playback-processor.js",
         "offscreen/master-meter-processor.js"
       ],
-      "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it."
+      "why": "Named rather than taken wholesale, because extension/offscreen/ is the one directory with files on both sides of the seam: host.js and host-pin.js are the Host. offscreen/engine.js is the file ADR 0001 wrote as offscreen.js, before S1 split the chrome half out of it. offscreen/bounce.js is the OFFLINE half of the same audio graph: it drives the SHIPPED playback worklet on an OfflineAudioContext so a deck can be rendered to a file with its own settings baked in, and it is unit for the same reason cacheddeck.js is — a second Host supplies the destination through exportSink and nothing else."
     },
     {
       "adr": "extension/workers/ — inference.worker.js and, since S6 (#8), workerbackend.js",
@@ -278,6 +279,11 @@
       "step": "passthrough",
       "path": "qa/passthrough-gain.mjs",
       "why": "QA-15 — G_PASS = min(resolved stem gains) — on the real emitter and the real mixer, engine/live.js and engine/mixer.js, no browser."
+    },
+    {
+      "step": "bounce",
+      "path": "qa/bounce.mjs",
+      "why": "BOUNCE, and the first offline-render harness in this repository: before it, neither OfflineAudioContext nor startRendering appeared anywhere under tools/ or qa/. Its whole subject is unit — engine/bounce.js's plan arithmetic, offscreen/bounce.js's render path, shared/stemring.js, engine/mixer.js's resolved gains, shared/wav.js's streaming encoder, and offscreen/playback-processor.js itself, which it boots BYTE FOR BYTE in a vm realm and pumps at the 128-frame render quantum. It declares no `reads`: everything it opens is unit, and the completeness half in tools/unit-check.mjs is what says so rather than this sentence. IT TRAVELS, and a copy gets a great deal out of it: the failure it exists to catch — startRendering() outrunning the ring producer, so a bounce is correct for 11.89 s and then fades to silence — is a property of the shipped worklet and the shipped ring, not of this Host, and its fixture is fourteen seconds long on purpose. WHAT IT DOES NOT COVER, said here as well as in its own header: Chromium's OfflineAudioContext honouring the suspension schedule. That was measured directly in Electron/Chromium (3/3) and is not re-measured by a plain-node suite; a green `bounce` is evidence about this project's code, not about the browser's."
     },
     {
       "step": "pitch",
