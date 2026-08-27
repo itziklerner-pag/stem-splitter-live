@@ -2026,6 +2026,35 @@ if (group('ring')) {
 
 // ===========================================================================
 if (group('live')) {
+  /**
+   * THE SAME GUARD `group('host')` GOT IN v0.3.0 (#30), AND FOR THE SAME REASON.
+   *
+   * This group runs a `LivePipeline` against a simulated clock across ~2400
+   * lines. A throw anywhere in it — and one was hit while writing the drain
+   * assertions below, a plain `ReferenceError` from an import that had not been
+   * added — ends the PROCESS. What that looked like: four reds from earlier
+   * assertions, a stack trace, no summary line, and `tools/verify.mjs`
+   * reporting `RED — 0 failing assertions`, which names nothing at all. The
+   * groups after this one never ran either.
+   *
+   * ITS BOUND, WHICH MATTERS AS MUCH AS THE GUARD. This is a REPORTING
+   * improvement and NOT a completeness guarantee: it converts a crash into one
+   * named red and does not recover the assertions after the throw. A guarded
+   * group that went red must not be read as fully covered. What makes the
+   * truncation visible rather than merely absent is `tools/verify.mjs`'s
+   * coverage diff, which prints `no longer runs: <assertion name>` under the
+   * warning that an ABSENT assertion reads as green; the guard's job is to leave
+   * a completed run for that diff to compare against.
+   *
+   * There is no `importHole()` half here — this group imports no holes. The
+   * group-level guard is the transferable half of that pattern.
+   *
+   * The body is deliberately not re-indented, for the reason `group('host')`
+   * gives: it would bury a small change in a whole-file diff.
+   */
+  let liveGroupThrew = null;
+  const liveGroupAt = pass + fail;
+  try {
   head('live — causal chunk plan (spike/FINDINGS.md §5)');
 
   for (const hop of LIVE_HOPS) {
@@ -2330,6 +2359,69 @@ if (group('live')) {
       Math.abs(after - before) > DELTA * 0.5,
       `${before.toFixed(4)} before the join, ${after.toFixed(4)} after — a difference of ${Math.abs(after - before).toFixed(4)} `
       + `against the ${DELTA.toFixed(1)} the passes were built to differ by`);
+  }
+
+  /**
+   * THE PIPELINE REALLY CALLS IT, AND IN THE RIGHT ORDER — read as TEXT.
+   *
+   * `finish()` working proves nothing about `offscreen/live.js` ever calling
+   * it, which is the gap `test.js` already records for `assertHost`: review
+   * deleted a module-scope call and watched the whole tree stay green while two
+   * assertion names went on claiming it as their entry point. `LivePipeline`
+   * builds an AudioContext and a worklet at construction, so its stop path
+   * cannot be evaluated from Node; the source is what can be checked, the same
+   * shape the `host` group uses on `engine.js`. Comments are stripped: a claim
+   * a doc comment can satisfy is not a claim.
+   *
+   * THREE ORDERING FACTS, not one, because each is separately breakable:
+   *   1. `stop()` sets `stopped` BEFORE it awaits the drain — ruling 24. Every
+   *      other path bails on that flag, so a drain running ahead of it races
+   *      the pump.
+   *   2. the drain runs BEFORE `this.plan = null` — it needs the geometry.
+   *   3. `dispose()`'s stop passes `{ drain: false }` — a teardown may not
+   *      block on an inference.
+   */
+  {
+    const { readFileSync } = await import('node:fs');
+    const strip = (s) => s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+    const liveSrc = strip(readFileSync(new URL('./extension/offscreen/live.js', import.meta.url), 'utf8'));
+    const deckSrc = strip(readFileSync(new URL('./extension/offscreen/deck.js', import.meta.url), 'utf8'));
+
+    const stopBody = (liveSrc.split(/async stop\(/)[1] || '').split(/\n  \}/)[0];
+    const flagAt = stopBody.indexOf('this.stopped = true');
+    const drainAt = stopBody.indexOf('await this.drain()');
+    const planAt = stopBody.indexOf('this.plan = null');
+    ok('LivePipeline.stop() RAISES THE FLAG, THEN DRAINS, THEN DROPS THE PLAN — in that order  '
+      + '[entry point: extension/offscreen/live.js stop(), comments stripped]',
+      flagAt >= 0 && drainAt > flagAt && planAt > drainAt,
+      flagAt < 0 ? 'stop() no longer sets `stopped` at all'
+        : drainAt < 0 ? 'stop() does not await the drain — a recording still ends one buffer short'
+          : drainAt < flagAt ? 'the drain runs BEFORE the stop flag, so the pump can still fire underneath it'
+            : planAt < drainAt ? 'the plan is dropped before the drain, which needs the geometry'
+              : `stopped@${flagAt} -> drain@${drainAt} -> plan=null@${planAt}`);
+
+    ok('...and the drain never borrows the in-flight scratch — it allocates its own, because `infer` detaches mixBuf/outBuf  '
+      + '[entry point: extension/offscreen/live.js drain()]',
+      /async drain\(\)/.test(liveSrc)
+      && /const mixBuf = new ArrayBuffer/.test(liveSrc.split(/async drain\(\)/)[1].slice(0, 3000)),
+      /async drain\(\)/.test(liveSrc)
+        ? 'drain() allocates its own mixBuf/outBuf'
+        : 'there is no drain() in the pipeline at all');
+
+    ok('...and a DISPOSE stops WITHOUT draining — a teardown has a budget the browser can cut, and may not wait for an inference  '
+      + '[entry point: extension/offscreen/deck.js dispose(), ruling 24\u2019s carve-out]',
+      /dispose\(\)[\s\S]{0,300}?live\.stop\(\{ drain: false \}\)/.test(deckSrc),
+      /live\.stop\(\{ drain: false \}\)/.test(deckSrc)
+        ? 'dispose() passes { drain: false }'
+        : 'dispose() awaits a full drain — a document going away can lose more than the tail it was saving');
+
+    const skipBody = (liveSrc.split(/  skipOne\(n\) \{/)[1] || '').split(/\n  \}/)[0];
+    ok('...and a PASSTHROUGH SPAN IS COUNTED ON THE WRITER, not only aborted — the refusal can name how many  '
+      + '[entry point: extension/offscreen/live.js skipOne(), the call site shared/stemcache.js noteDrop() names]',
+      skipBody.includes('noteDrop()') && skipBody.includes('abort()'),
+      !skipBody.includes('noteDrop()')
+        ? 'skipOne() aborts the prime without counting the drop, so a refusal cannot say how many chunks were lost'
+        : 'noteDrop() then abort(), both');
   }
 
   /**
@@ -4452,6 +4544,17 @@ if (group('live')) {
       `key ${lp.keyTap.wasReset}, bpm ${lp.bpmTap.wasReset}`);
     await lp.stop();                                  // release the 10 Hz interval
   }
+  } catch (e) {
+    liveGroupThrew = e;
+  }
+  ok('group(live) REACHED ITS LAST ASSERTION — a throw anywhere in this group turns THIS red, and the report still prints  '
+    + '[entry point: test.js group(\'live\'), ~2400 lines driving LivePipeline against a simulated clock]',
+    liveGroupThrew === null,
+    liveGroupThrew === null
+      ? `${pass + fail - liveGroupAt} assertions, none of them a crash`
+      : `IT THREW after ${pass + fail - liveGroupAt} assertions, so the rest of this group never ran — and the `
+        + 'assertions it did not reach are ABSENT rather than red, which verify.mjs\'s coverage diff is what shows: '
+        + String((liveGroupThrew && liveGroupThrew.stack) || liveGroupThrew));
 }
 
 // ===========================================================================

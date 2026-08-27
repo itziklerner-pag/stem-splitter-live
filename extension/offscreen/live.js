@@ -387,6 +387,17 @@ export class LivePipeline {
     this.stopped = true;
     this.drops = 0;
     this.overruns = 0;
+    /**
+     * THE DRAIN'S OWN BOOKKEEPING (U7, #44), and `drainAbandoned` is the half
+     * that must be TRUE rather than reassuring. A drain that did not happen and
+     * was not counted is a recording that is one buffer short with nothing
+     * saying so — the defect this whole path exists to remove, wearing a
+     * success line. Every early return in `drain()` below either counts here or
+     * is a state where there was genuinely nothing to recover.
+     */
+    this.drainedFrames = 0;
+    this.drainAbandoned = 0;
+    this.drainWhy = null;
     this.staleReads = 0;
     this.chunkMs = [];
     this.chunkLog = [];
@@ -745,6 +756,9 @@ export class LivePipeline {
     this.marginalWarned = false;
     this.inFlight = false;
     this.stopped = false;
+    this.drainedFrames = 0;
+    this.drainAbandoned = 0;
+    this.drainWhy = null;
     this.lastHealthAt = performance.now();
     this.silentTicks = 0;
     this.outputAlarm = null;
@@ -793,9 +807,36 @@ export class LivePipeline {
     this.pump();
   }
 
-  async stop() {
+  /**
+   * End the session. **THIS MAY TAKE ONE INFERENCE, and the promise it returns
+   * means "drained or honestly abandoned" rather than "drained"** — a Host
+   * author calling this from a user gesture needs both halves of that sentence.
+   *
+   * THE FLAG GOES UP FIRST AND THE DRAIN RUNS BEHIND IT (ruling 24). `stopped`
+   * is what every other path — `pump()`, `runChunk()`'s post-await return,
+   * `forceDrop()`, the heartbeat — checks to bail out, so it is set on the
+   * first line and nothing races the drain. `drain()` does not consult it; it
+   * has its own state and its own buffers.
+   *
+   * `{ drain: false }` IS FOR TEARDOWN AND ONLY TEARDOWN. A document going away
+   * has a budget the browser may cut at any moment, and blocking it on an
+   * inference risks losing more than the tail it was trying to save — so
+   * `dispose()` passes it and the abandonment is COUNTED rather than quietly
+   * skipped. A user's own stop may await one inference; a teardown may not.
+   *
+   * @param {{drain?: boolean}} [opts]
+   */
+  async stop({ drain = true } = {}) {
     if (this.status === 'idle') return;
+    // FIRST LINE, before anything can await: everything else bails on this.
     this.stopped = true;
+    // The drain runs BEFORE `this.plan = null` below, because it needs the
+    // geometry, and before `status` stops meaning anything.
+    if (drain) await this.drain();
+    else if (this.plan && this.out && this.emitter && !this.emitter.finished) {
+      this.drainAbandoned++;
+      this.drainWhy = 'teardown: a document going away may not wait for an inference';
+    }
     this.status = 'idle';
     this.phase = null;
     // Drop the plan so `hopSec` reports null when nothing is running. It used to
@@ -806,11 +847,19 @@ export class LivePipeline {
     if (this.startTimer) { clearTimeout(this.startTimer); this.startTimer = null; }
     if (this.pushTimer) { clearInterval(this.pushTimer); this.pushTimer = null; }
     if (this.out) this.out.play(false);
-    this.d.log(`live stop · ${this.k} chunks, ${this.drops} drops, ${this.health.underruns} underruns`);
+    this.d.log(`live stop · ${this.k} chunks, ${this.drops} drops, ${this.health.underruns} underruns`
+      + (this.drainedFrames ? `, drained ${this.drainedFrames} frames` : '')
+      + (this.drainAbandoned ? `, DRAIN ABANDONED (${this.drainWhy})` : ''));
     this.pushState(true);
   }
 
-  /** Full teardown. The graph is expensive to rebuild but must not leak. */
+  /**
+   * Full teardown. The graph is expensive to rebuild but must not leak.
+   *
+   * Callers that reach here through a document going away must have stopped
+   * with `{ drain: false }` — see `stop()`. This method itself cannot drain: it
+   * is synchronous, and the emitter it would need is nulled below.
+   */
   dispose() {
     if (this.pushTimer) { clearInterval(this.pushTimer); this.pushTimer = null; }
     if (this.startTimer) { clearTimeout(this.startTimer); this.startTimer = null; }
@@ -1104,7 +1153,15 @@ export class LivePipeline {
     // track they are already playing; a poisoned entry costs them trust in the
     // feature. `CacheWriter.abort()` is sticky and makes commit() return null,
     // so a single call here kills the whole prime, which is the intent.
-    if (this.cacheWriter) this.cacheWriter.abort();
+    if (this.cacheWriter) {
+      // COUNTED BEFORE IT IS ABORTED, and both, because they answer different
+      // questions. `abort()` makes commit() return null — the entry does not
+      // exist. `noteDrop()` records WHY, and it is the number a refusal can
+      // name: "this recording dropped 3 chunks" instead of "this recording was
+      // refused". `stemcache.js` says this is where the call belongs.
+      this.cacheWriter.noteDrop();
+      this.cacheWriter.abort();
+    }
     this.fill(n);
     this.k++;
     this.drops++;
@@ -1130,6 +1187,105 @@ export class LivePipeline {
     if (c.emitTo <= this.emitter.commit) return { fired: false, why: 'span already published', ...st };
     this.skipOne(c.emitTo - this.emitter.commit);
     return { fired: true, why: 'forced', ...st };
+  }
+
+  /**
+   * THE DRAIN (U7, #44) — one last inference over the audio the chunk grid can
+   * never reach, so a recording ends where the capture ended.
+   *
+   * WHAT IS LEFT AND WHY. `chunk(k)` publishes `[emitFrom, inputEnd - X)`: the
+   * last X frames of every model output are held back for the next chunk's
+   * crossfade, and chunks only fire once the capture clock passes `(k+1)*H`. So
+   * at stop the unpublished span is `F - commit`, under `H + X` — 1.05 s to
+   * 3.95 s across the shipping ladder. `shared/stemcache.js` sized
+   * `PRIME_TAIL_MAX_SEC` to tolerate that and named this fix in its own words:
+   * "drain the pipeline's ring after the capture ends".
+   *
+   * IT USES ITS OWN BUFFERS, and that is not tidiness. `mixBuf`/`outBuf` are
+   * DETACHED whenever a chunk is in flight — `infer` transfers them — and a
+   * stop landing mid-chunk is the common case, not the rare one (~45 % at hop
+   * 1.95, measured when the reclaim bug was found). Reaching for them here
+   * would throw "Cannot perform Construct on a detached ArrayBuffer" on the
+   * stop path. These are allocated once per RECORDING, at its end, which is the
+   * distinction the retained-buffer count asserts: not per hop.
+   *
+   * EVERY EXIT EITHER RECOVERS FRAMES OR COUNTS THE ABANDONMENT. A drain that
+   * silently did nothing is the original defect wearing a success line.
+   */
+  async drain() {
+    const p = this.plan;
+    // Nothing to drain, and nothing to count: these are states where no
+    // recording is in progress at all.
+    if (!p || !this.out || !this.emitter || this.emitter.finished) return;
+    const ring = this.d.ring();
+    if (!ring) { this.drainAbandoned++; this.drainWhy = 'the capture ring is already gone'; return; }
+    const F = ring.writeFrames() - this.baseFrame;
+    const len = F - this.emitter.commit;
+    // The chunk grid already covers everything captured. Not an abandonment:
+    // there is genuinely nothing left, which is the best case.
+    if (len <= 0) return;
+    if (len > p.H + p.X) {
+      // Chunks were skipped and the ladder never filled the span. `finish()`
+      // would refuse this and it would be right to: a span this long is gap()'s
+      // work, not a drain's, and separating it with one pass would publish
+      // audio the model saw almost no context for.
+      this.drainAbandoned++;
+      this.drainWhy = `${len} frames outstanding, more than one hop plus the crossfade (${p.H + p.X})`;
+      return;
+    }
+    /**
+     * ONE-SHOT BUFFERS. `passL`/`passR` are `H` frames and the drain can publish
+     * `H + X`, so those cannot be borrowed either — a `subarray(0, len)` on a
+     * short array silently under-reads and would publish the passthrough for
+     * part of the span and stale scratch for the rest.
+     */
+    const mixBuf = new ArrayBuffer(2 * SEGMENT * 4);
+    const outBuf = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
+    const passL = new Float32Array(len), passR = new Float32Array(len);
+    const mix = new Float32Array(mixBuf);
+    readWindow(ring, this.baseFrame + F - SEGMENT, SEGMENT,
+      mix.subarray(0, SEGMENT), mix.subarray(SEGMENT, 2 * SEGMENT));
+    readWindow(ring, this.baseFrame + this.emitter.commit, len, passL, passR);
+
+    let res;
+    try {
+      res = await this.d.infer(mixBuf, outBuf, this.budgetMs(), this.deck);
+    } catch (e) {
+      this.drainAbandoned++;
+      this.drainWhy = `the final inference failed: ${String((e && e.message) || e)}`;
+      return;
+    }
+    if (!res || res.demoted) {
+      // The scheduler refused it. There is no later chunk to recover on, so
+      // this is the end of the recording either way.
+      this.drainAbandoned++;
+      this.drainWhy = `the final inference was demoted: ${(res && res.why) || 'no result'}`;
+      return;
+    }
+    // The emitter may have been torn down while the inference was running.
+    if (!this.emitter || this.emitter.finished || !this.out) {
+      this.drainAbandoned++;
+      this.drainWhy = 'the session was disposed while the final inference was running';
+      return;
+    }
+    const flat = new Float32Array(res.stems);
+    const src = [];
+    for (let q = 0; q < STEM_PLANES; q++) src.push(flat.subarray(q * SEGMENT, (q + 1) * SEGMENT));
+    let e;
+    try {
+      e = this.emitter.finish(src, passL, passR, F);
+    } catch (err) {
+      // `finish()` refuses by name; carry the name rather than the fact.
+      this.drainAbandoned++;
+      this.drainWhy = String((err && err.message) || err);
+      return;
+    }
+    if (!this.out.write(e.from, e.planes, e.len)) this.overruns++;
+    // The same structural rule `runChunk` states: this is MODEL OUTPUT, so it
+    // may be cached. A drain never publishes passthrough — if it could not
+    // separate, it abandoned above rather than appending unseparated audio.
+    if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
+    this.drainedFrames = e.len;
   }
 
   /** Passthrough fill for a skipped span. `len` may exceed one hop. */

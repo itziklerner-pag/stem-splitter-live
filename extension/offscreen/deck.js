@@ -501,7 +501,11 @@ export class Deck {
   }
 
   async dispose() {
-    await this.live.stop().catch(() => {});
+    // `{ drain: false }` — ruling 24: a deck being disposed is a teardown-shaped
+    // path and may not block on one more inference. The abandonment is counted
+    // by `stop()` rather than skipped silently. A user's own stop reaches
+    // `detach()` above, which drains.
+    await this.live.stop({ drain: false }).catch(() => {});
     this.live.dispose();
     await this.detach().catch(() => {});
     /**
