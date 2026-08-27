@@ -92,8 +92,11 @@ export const EXPORT_FORMAT = Object.freeze({ sampleRate: SR, bitDepth: 32, float
  *                 smaller export, it is a broken one.
  *   READ_FAILED   the cache entry could not be read back, or disagrees with its
  *                 own manifest row. The entry is the problem; re-separate.
- *   WRITE_FAILED  a destination rejected mid-write — a full disk, a folder
- *                 deleted under the run, a revoked permission.
+ *   WRITE_FAILED  a destination rejected — a full disk, a folder deleted under
+ *                 the run, a revoked permission, or a map that would not yield
+ *                 six writers at all (a Host that returned the same writable
+ *                 under two names locks on the second `getWriter()`). Nothing
+ *                 was closed; everything that had been opened was aborted.
  *   CANCELLED     the user stopped it. Every destination was aborted.
  *   BUSY          an export is already running. Two exports would interleave
  *                 windows into each other's sinks.
@@ -169,8 +172,32 @@ export class ExportError extends Error {
  * itself non-text.
  */
 const ILLEGAL = /[\u0000-\u001f\u007f/\\:*?"<>|]/g;
-/** Windows device names. `NUL.wav` is the null device: it accepts every byte and keeps none. */
-const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])$/i;
+/**
+ * Windows device names, MATCHED ON THE BASE — everything before the first dot.
+ *
+ * THE `$` THAT USED TO END THIS PATTERN WAS SILENT DATA LOSS. It only caught a
+ * title that WAS the device: `NUL` was escaped, and `NUL.wav`, `nul.02`,
+ * `con.brio`, `Con.Fusion`, `com1.set`, `aux.1`, `lpt1.x` and `prn.mix` all went
+ * through untouched — measured, not read off the code. Win32 resolves a reserved
+ * BASE followed by any extension to the device itself (MSDN, *Naming Files,
+ * Paths, and Namespaces*: "NUL.txt and NUL.tar.gz are all equivalent to NUL"),
+ * so on Windows every byte of such an export went to the null device, which
+ * accepts everything and keeps nothing, and the run still reported EXPORT_DONE
+ * with six file names. A successful export of no data is the worst thing this
+ * path can do, and the comment that stood here cited `NUL.wav` as the case it
+ * handled.
+ *
+ * So the guard ends at `(\.|$)` — a dot or the end of the name. The extension is
+ * irrelevant because Windows ignores it; `conch`, whose base is not a device, is
+ * still untouched.
+ *
+ * WHAT THIS REPAIR DID NOT CHANGE, said out loud so its absence is not read as a
+ * decision: the SET is still `com1-9` / `lpt1-9`, while current MSDN also lists
+ * COM0 and LPT0. The defect measured here was the ANCHORING, not the membership,
+ * and whether CreateFile("COM0") resolves to a device cannot be settled from
+ * this box. The suite asserts nothing either way about those two names.
+ */
+const RESERVED = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 /**
  * The longest title that leaves room for ` - <stem>.wav` inside a 255-BYTE name,
  * which is the common limit on ext4, APFS and NTFS alike. Measured in UTF-8
@@ -381,21 +408,62 @@ export class ExportRun {
         + `destinations — missing ${missing.join(', ')}. Five of six files is a broken export, not a smaller one`);
     }
 
-    const writers = names.map((n) => sinks[n].getWriter());
-    const encs = names.map(() => new WavStreamEncoder(EXPORT_FORMAT.channels, {
-      sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: EXPORT_FORMAT.bitDepth, float: true, dither: false, frames,
-    }));
+    /**
+     * ABORT EVERY DESTINATION THAT WAS OPENED, never close one, and release the
+     * locks. A destination a writer was taken for is aborted THROUGH the writer;
+     * one that never got that far is aborted on the stream itself, because an
+     * unlocked `WritableStream` is the only handle left. Each call is attempted
+     * independently and a refusal is swallowed — a stream some other writer holds
+     * the lock on rejects `abort()` — because the claim being kept is that
+     * nothing is left open, not that every call succeeded.
+     */
+    const writers = [];
+    const abortAll = async (reason) => {
+      await Promise.all(writers.map(async (w) => { try { await w.abort(reason); } catch { /* already errored */ } }));
+      for (const w of writers) { try { w.releaseLock(); } catch { /* already released */ } }
+      await Promise.all(names.slice(writers.length).map(async (n) => {
+        try { await sinks[n].abort(reason); } catch { /* locked above, or already errored */ }
+      }));
+    };
+
+    /**
+     * TAKING THE WRITERS AND BUILDING THE ENCODERS IS INSIDE THE GUARD, and that
+     * is a fix rather than a style: BOTH OF THEM THROW, and while they sat above
+     * the `try` both threw PAST the abort.
+     *
+     *   `getWriter()`   refuses a stream something already holds the lock on —
+     *                   which is what a Host that returned the SAME writable for
+     *                   two names hands back. Measured: a raw
+     *                   `TypeError: Invalid state: WritableStream is locked`.
+     *   the constructor  refuses a track over the 4 GiB RIFF ceiling
+     *                   (`shared/wav.js`), before a caller streams three GiB to
+     *                   find out. Measured: a raw `RangeError`.
+     *
+     * Neither is a member of the closed vocabulary, and — the part that reaches a
+     * user — every writable the Host had just opened was left neither closed nor
+     * aborted. This module's header promises that a failure after the sinks open
+     * aborts every writable and closes none; that promise was false for exactly
+     * this window, which is the one window in the run where all six destinations
+     * are open and not one byte has been written.
+     */
+    let encs;
+    try {
+      for (const n of names) writers.push(sinks[n].getWriter());
+      encs = names.map(() => new WavStreamEncoder(EXPORT_FORMAT.channels, {
+        sampleRate: EXPORT_FORMAT.sampleRate, bitDepth: EXPORT_FORMAT.bitDepth, float: true, dither: false, frames,
+      }));
+    } catch (e) {
+      await abortAll(e);
+      throw new ExportError('WRITE_FAILED', `${entry.key}: the destinations could not be prepared — `
+        + `${(e && e.message) || e}. All ${names.length} were aborted rather than closed, so nothing is left open `
+        + 'and no half-written file was created');
+    }
+
     /** ONE window's planes, reused for every stem and every window. */
     const planes = [new Float32Array(this.chunkFrames), new Float32Array(this.chunkFrames)];
     const windows = Math.ceil(frames / this.chunkFrames);
     const total = windows * order.length;
     let done = 0;
-
-    /** Abort EVERY writer — never close one — and release the locks. */
-    const abortAll = async (reason) => {
-      await Promise.all(writers.map((w) => w.abort(reason).catch(() => {})));
-      for (const w of writers) { try { w.releaseLock(); } catch { /* already released */ } }
-    };
 
     try {
       for (const [i, w] of writers.entries()) { await w.write(encs[i].header()); this.bytes += encs[i].headerSize; }
