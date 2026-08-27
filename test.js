@@ -10317,6 +10317,77 @@ if (group('host')) {
   }
 
   // ------------------------------- the deck as transport master (U6, #43)
+  /**
+   * THE MUTATION TABLE FOR THIS SECTION — 17 of 17 watched red, at `619908a`.
+   *
+   * EXECUTABLE COPY: `tools/mutations/u6-transport-master.mjs`, in the tree
+   * beside this suite, cut against `619908a`. Re-run it before any tag: a
+   * battery is only valid against the source it was cut for, and a later slice
+   * that rewrites one of these lines stops its anchor matching with nothing
+   * announcing it. That file reports ANCHOR and RED as two columns, never as
+   * one pass count, because a dead anchor and a lost assertion need opposite
+   * responses.
+   *
+   *  id   mutation                                     file:line                             red it produced
+   *  ---  -------------------------------------------  ------------------------------------  --------------------------------------
+   *  M1   `hosted` stops coming off the transport      extension/ui/embed-state.js:182       4 reds; the gate reads
+   *       — the state `transport: null` puts the deck                                        `hosted=false, videoPlaying=null,
+   *       in, with a transport present                                                       start/start/start — 3 capture grant
+   *                                                                                          request(s), 3 model ask(s)`
+   *  M2   the follower stops registering onState       extension/ui/embed-state.js:208       3 reds; the first-gesture assertion and
+   *       — `videoPlaying` structurally unwritable                                           the page-hosted path
+   *  M3   the shipping Host declares it has no player  extension/ui/host.js:117              4 reds AND 26 of 149 DID NOT RUN — the
+   *       (FRAMED forced false)                                                              group guard reporting a truncation
+   *  M4   the follower's start effect does nothing     extension/ui/embed.js:2238            the chain assertion: the count above
+   *                                                                                          would stand in for nothing
+   *  M5   the deck builds its follower over a          extension/ui/embed.js:2233            2 reds: the hosted derivation, and the
+   *       transport of its own, not the Host's                                               chain regex that anchors on it
+   *  M6   the deck stops putting its report on         extension/offscreen/cacheddeck.js:862 5 reds; the playhead, the first
+   *       the wire                                                                           gesture, the pair, the seeking check
+   *  M7   the report carries a constant position       extension/offscreen/cacheddeck.js:718 the playhead assertion, plus the pair
+   *       instead of the playhead                                                            assertion the collapsed dedupe starves
+   *  M8   the dedupe key includes atMs                 extension/offscreen/cacheddeck.js:747 a still deck reports 3 times
+   *  M9   the report says it is seeking                extension/offscreen/cacheddeck.js:721 the seeking check
+   *  M10  drive() spreads its patch                    extension/offscreen/cacheddeck.js:778 the closed write set: `volume=0.1`
+   *  M11  pushMaster ignores the transport mute        extension/offscreen/cacheddeck.js:545 the mute never reaches the graph
+   *  M12  release() does not unmute                    extension/offscreen/cacheddeck.js:804 the player is not handed back
+   *  M13  load() lets a mute survive the track         extension/offscreen/cacheddeck.js:237 the next track inherits the lock
+   *  M14  the effects bag is not checked               extension/ui/embed-state.js:169       a half-wired follower is accepted
+   *  M15  the engine filters the patch before the      extension/offscreen/engine.js:1265    the closure leaves the deck
+   *       deck sees it
+   *  M16  the follower decides and dispatches nothing  extension/ui/embed-state.js:242       SEE BELOW
+   *  M17  `videoPlaying` becomes a plain property      extension/ui/embed-state.js:194       a fixture can overwrite the flag
+   *
+   * M16 IS THE ONE WORTH READING TWICE, AND IT IS NOT ABOUT THE CODE. Delete
+   * the follower's `start` dispatch and nothing can ever start. The gate above
+   * — "ZERO capture grants" — GOES ON PASSING, because zero is what it asks for
+   * and zero is what it gets:
+   *
+   *     PASS  THE DECK DOES NOT START THE PIPELINE ON BOOT …
+   *           hosted=true, videoPlaying=null, hold/hold/hold — 0 capture grant request(s), 0 model ask(s)
+   *     FAIL  CONTROL — WITH `transport: null` THE SAME BOOT TICK STARTS THE PIPELINE …
+   *           hosted=false, start — 0 capture grant request(s), 0 model ask(s) on the first tick
+   *
+   * The gate's number got BETTER when the code broke. That is the third of the
+   * three ways a gate fails and it is the one nobody asks about, because the
+   * usual question — "can this assertion fail?" — has the honest answer yes.
+   * The CONTROL is the answer to it, and it is an assertion rather than a
+   * one-off mutation precisely so it cannot decay: it demands the 1 that the
+   * gate demands be a 0, from the same fixture, on the same tick.
+   *
+   * TWO INSTRUMENT DEFECTS THIS BATTERY FOUND IN ITSELF, both on its first run
+   * and both recorded because they are the shape that hides:
+   *   1. Two `red` needles spelled an apostrophe U+2019 where this file spells
+   *      U+0027. Four cases reported DID NOT RUN against assertions that were
+   *      passing two lines away — indistinguishable, in the output, from an
+   *      assertion a mutation had truncated. The battery now checks every
+   *      needle against the green baseline BEFORE it mutates anything.
+   *   2. `...a deck that has not moved says NOTHING` could not fail. Three
+   *      `pushState()` calls in one synchronous turn land in the same
+   *      millisecond, so M8 deduped anyway and the assertion read 0 either way.
+   *      It now stamps the clock forward between heartbeats — a count of
+   *      reports, not a wait — and M8 reds.
+   */
   head('host — THE DECK AS TRANSPORT MASTER: a File source gets a real transport, and does not start the pipeline on boot');
   /**
    * THE BOOT LAYER, DRIVEN. Read this before changing anything below.
@@ -10572,12 +10643,24 @@ if (group('host')) {
     cd.pause();
     pump();
     reports.length = 0;
-    cd.pushState(); cd.pushState(); cd.pushState();
+    /**
+     * EACH HEARTBEAT CARRIES A DIFFERENT `atMs`, AND WITHOUT THAT THIS ASSERTION
+     * CANNOT FAIL. Measured: three `pushState()` calls in one synchronous turn
+     * land in the same millisecond, so a build that put `atMs` IN the dedupe key
+     * still deduped them and this read 0 either way — an assertion passing on
+     * the coincidence that Node is fast. Stamping the clock forward is what
+     * gives it the range its claim needs; it is not a wait, and nothing here
+     * reads elapsed time.
+     */
+    const realNow = Date.now;
+    let stamp = realNow();
+    Date.now = () => { stamp += 100; return stamp; };
+    try { cd.pushState(); cd.pushState(); cd.pushState(); } finally { Date.now = realNow; }
     pump();
-    ok('...and a deck that has not moved says NOTHING — three heartbeats with the playhead still put no report on '
-      + 'the wire, so a Host is not woken ten times a second by a paused deck',
+    ok('...and a deck that has not moved says NOTHING — three heartbeats a tenth of a second apart, with the '
+      + 'playhead still, put no report on the wire: a Host is not woken ten times a second by a paused deck',
       reports.length === 0,
-      `${reports.length} report(s) from three heartbeats with the playhead still`);
+      `${reports.length} report(s) from three heartbeats with the playhead still and three different atMs`);
 
     /**
      * NEVER `seeking: true`, INCLUDING ON THE REPORT seek() ITSELF PUSHES, and
