@@ -111,6 +111,10 @@
  * 0 needing attention. `guard-without-its-finally` is counted RED because the
  * suite HANGS rather than reporting, which is the whole point of layer 2.
  *
+ * RE-VERIFIED BY THE INTEGRATOR after the rebase onto `b0485a1` (v0.3.1 + U11),
+ * same day, same figures: 34/34 MATCH, 33 RED with the declared sets, 1 EQUIV,
+ * 0 needing attention - so only the battery's stamp moved, not the anchors.
+ *
  * ===========================================================================
  * THE TWO-LAYER GUARD, AND ITS BOUND
  * ===========================================================================

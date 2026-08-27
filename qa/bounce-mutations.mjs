@@ -118,15 +118,20 @@ const ONLY = (() => {
  * (INTEGRATION.md section 22).
  *
  * `offscreen/playback-processor.js` is untouched by this slice, so its anchor is
- * cut against `b9dc537` - the tip of `main`, in history, resolvable by anyone.
- * The other three files are created or rewritten by this slice and have no
- * earlier revision that contains the lines being patched; their anchors are cut
- * against the slice's own commits, on top of that base.
+ * cut against `b0485a1` - the tip of `main` the branch was re-cut onto, in
+ * history, resolvable by anyone. The other three files are created or rewritten
+ * by this slice and have no earlier revision that contains the lines being
+ * patched; their anchors are cut against the slice's own commits, on top of
+ * that base.
  *
- * The branch was REBASED onto `b9dc537` after the first stamp was written, which
- * rewrote every commit it named. Re-stamped here for exactly that reason.
+ * The branch was REBASED twice: onto `b9dc537` after the first stamp was
+ * written, and onto `b0485a1` (v0.3.1 + U11) by the integrator, which rewrote
+ * every commit it named both times. Re-stamped here for exactly that reason.
+ * After the second rebase the anchors were re-verified against the rebased
+ * tree, all 34 still matching exactly once and reddening exactly their declared
+ * sets (33 RED + 1 EQUIV), so nothing needed re-cutting - only the stamp.
  */
-const CUT_AGAINST = 'b9dc537 (main) for offscreen/playback-processor.js; '
+const CUT_AGAINST = 'b0485a1 (main) for offscreen/playback-processor.js; '
   + "this slice's own commits on top of it for the other three";
 
 const F_ENGINE = 'extension/engine/bounce.js';
