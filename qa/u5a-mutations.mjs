@@ -112,10 +112,10 @@ const CUT = {
   base: '5993d32',
   slice: 'U5a — the ahead-of-time separation runner (#41)',
   files: {
-    'extension/engine/offline.js': '__OFF__',
-    'extension/shared/stemcache.js': '__SC__',
-    'extension/engine/live.js': '__LIVE__',
-    'test.js': '__SUITE__',
+    'extension/engine/offline.js': '443bd355019ec2b3bcce6c8725e5696e5a8c93a26db9fa2e8069309f48ed5688',
+    'extension/shared/stemcache.js': '37cba4c8ddd7ef6e8a106a9eeca6adb45b4febc9b66039ccfb994c77f8c71a30',
+    'extension/engine/live.js': '7965f8b6d0b4809d49cd5c919616e597e9fea65f7956fbeafdd1a05689522a53',
+    'test.js': '9e802662e1e39b9612bc8f527da09755c408a3c36a7223087b91190c4562987d',
   },
 };
 
@@ -149,273 +149,614 @@ const MUTATIONS = [
   // ---------------------------------------------------------------- geometry
   { id: 'N1', file: OFF, what: 'the window count loses its +1',
     find: 'Math.ceil((frames - segment) / stride) + 1)',
-    to: 'Math.ceil((frames - segment) / stride))' },
+    to: 'Math.ceil((frames - segment) / stride))',
+    expect: [
+      'a sample gets ONE or TWO contributions, ',
+      'an identity separator reconstructs every',
+      '...and the run really crossed joins, so ',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      '...and the fixture really did straddle j',
+      'maxD at every SEAM — the multiples of ST',
+      'the FIRST window does not fade in and th',
+      'every window is separated EXACTLY ONCE a',
+      'the assembled track is the input back, s',
+      'finish() before every window is folded i',
+      '...and every window was separated exactl',
+      'every stage is reported, in order, once ',
+      '...and pct is the fraction of the track ',
+      '...and every sample of every stem carrie',
+      'a window the model fails on is SEPARATE_',
+      '...and the run had somewhere to stop: th',
+      'every code THIS RUNNER produced is a mem',
+      '...and runOffline drives the separator’s',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'N2', file: OFF, what: 'windows advance by SEGMENT instead of STRIDE',
     find: '  const inputStart = k * p.stride;',
-    to: '  const inputStart = k * p.segment;' },
+    to: '  const inputStart = k * p.segment;',
+    expect: [
+      'windows advance by STRIDE and each is a ',
+      'a sample gets ONE or TWO contributions, ',
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N3', file: OFF, what: 'the FIRST window fades in — its own head ramped to silence',
     find: '        if (!w.first && i < p.overlap) g = this.fi[i];',
-    to: '        if (i < p.overlap) g = this.fi[i];' },
+    to: '        if (i < p.overlap) g = this.fi[i];',
+    expect: [
+      'an identity separator reconstructs every',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      'the twelve planes land as six stereo ste',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N4', file: OFF, what: 'the LAST window fades out — the track ends in a ramp to silence',
     find: '        else if (!w.last && i >= w.fadeOutAt) g = this.fo[i - w.fadeOutAt];',
-    to: '        else if (i >= w.fadeOutAt) g = this.fo[i - w.fadeOutAt];' },
+    to: '        else if (i >= w.fadeOutAt) g = this.fo[i - w.fadeOutAt];',
+    expect: [
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      '...and the fixture really did straddle j',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N5', file: OFF, what: 'the ramp is the 50 ms SEAM crossfade rather than the overlap',
     find: '    const { fi, fo } = makeFades(plan.overlap, law);',
-    to: '    const { fi, fo } = makeFades(2205, law);' },
+    to: '    const { fi, fo } = makeFades(2205, law);',
+    expect: [
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N6', file: OFF, what: 'equal-power ramps: +3.01 dB through the middle of every join',
     find: '    const { fi, fo } = makeFades(plan.overlap, law);',
-    to: "    const { fi, fo } = makeFades(plan.overlap, 'equalPower');" },
+    to: "    const { fi, fo } = makeFades(plan.overlap, 'equalPower');",
+    expect: [
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N7', file: OFF, what: 'a join OVERWRITES instead of summing — the outgoing half is lost',
     find: '        if (!w.first && i < p.overlap) d[abs] += s[i] * g;',
-    to: '        if (!w.first && i < p.overlap) d[abs] = s[i] * g;' },
+    to: '        if (!w.first && i < p.overlap) d[abs] = s[i] * g;',
+    expect: [
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
   { id: 'N9', file: OFF, what: 'the stride validation is dropped — gaps no window covers',
     find: '  if (!(stride > 0 && stride < segment)) {',
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a stride at or past the segment is refus',
+    ] },
   { id: 'N10', file: OFF, what: 'the window-index validation is dropped',
     find: '  if (!Number.isInteger(k) || k < 0 || k >= p.windows) {',
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a window index outside the plan is refus',
+    ] },
   { id: 'N11', file: OFF, what: 'the window-order check is dropped',
     find: '    if (k !== this.next) {',
-    to: '    if (false) {' },
+    to: '    if (false) {',
+    expect: [
+      'a window that arrives out of order is re',
+    ] },
   { id: 'N12', file: OFF, what: 'the plane-length check is dropped — a short plane is read past its end',
     find: '      if (s.length < p.segment) {',
-    to: '      if (false) {' },
+    to: '      if (false) {',
+    expect: [
+      'a plane shorter than a window is refused',
+    ] },
   { id: 'N13', file: OFF, what: 'finish() stops refusing a short run — the tail commits as silence',
     find: '    if (this.next !== this.p.windows) {',
-    to: '    if (false) {' },
+    to: '    if (false) {',
+    expect: [
+      'finish() before every window is folded i',
+    ] },
   { id: 'N14', file: OFF, what: 'bufferRing stops checking that the channels are the same length',
     find: "  if (r.length !== frames) throw new RangeError(`offline: channels differ",
-    to: '  if (false) throw new RangeError(`offline: channels differ' },
+    to: '  if (false) throw new RangeError(`offline: channels differ',
+    expect: [
+      'channels of different lengths are refuse',
+      'a decoder that RETURNS something malform',
+    ] },
   { id: 'N15', file: OFF, what: 'the overlap is computed from the seam crossfade, not from the geometry',
     find: '  const overlap = segment - stride;',
-    to: '  const overlap = 2205;' },
+    to: '  const overlap = 2205;',
+    expect: [
+      'the overlap is SEGMENT - STRIDE, which i',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+    ] },
   { id: 'N16', file: OFF, what: 'THE JOIN BECOMES A BUTT SPLICE — every ramp deleted. The COLA '
       + 'residual IMPROVES to 0.00e+0 under this, which is why the join has its own instrument',
     find: '        let g = 1;',
-    to: '        let g = 1;\n        d[abs] = s[i];\n        continue;\n        // eslint-disable-next-line' },
+    to: '        let g = 1;\n        d[abs] = s[i];\n        continue;\n        // eslint-disable-next-line',
+    expect: [
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+    ] },
   { id: 'N17', file: OFF, what: 'the ramp reaches unity after 2205 frames and holds — complementary, '
       + 'so COLA still reconstructs and only the join instrument can see it',
     find: '    this.fi = fi; this.fo = fo;',
     to: '    this.fi = fi.map((v, i) => Math.min(1, i / 2205));\n'
-      + '    this.fo = fo.map((v, i) => Math.max(0, 1 - i / 2205));' },
+      + '    this.fo = fo.map((v, i) => Math.max(0, 1 - i / 2205));',
+    expect: [
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'maxD at every SEAM — the multiples of ST',
+    ] },
   { id: 'N18', file: OFF, what: 'THE PLANE-COUNT GUARD IS DROPPED — the assertion that named it used '
       + 'to pass anyway, because the loop then dies on undefined.length, which is also a throw',
     find: '    if (src.length !== this.out.length) {',
-    to: '    if (false) {' },
+    to: '    if (false) {',
+    expect: [
+      'the wrong number of planes is refused BY',
+    ] },
   { id: 'N19', file: OFF, what: 'the stride refusal becomes BLANKET — one frame inside the segment '
       + 'is refused too, which only the control assertion can see',
     find: '  if (!(stride > 0 && stride < segment)) {',
-    to: '  if (!(stride > 0 && stride < segment - 1)) {' },
+    to: '  if (!(stride > 0 && stride < segment - 1)) {',
+    expect: [
+      '...but a stride inside the segment is ac',
+    ] },
 
   // ------------------------------------------------------------- the runner
   { id: 'R1', file: OFF, what: 'the cancel check between windows is removed',
     find: '    if (cancelled && cancelled()) return { cancelled: true, windows: plan.windows, done, planes: null };\n'
       + '    readWindow(',
-    to: '    readWindow(' },
+    to: '    readWindow(',
+    expect: [
+      'a run cancelled before it starts separat',
+      'a cancel raised during a window lets THAT window finish and stops before the next  [entry point: runOffline, f',
+      '...and the backend is never abandoned mi',
+      'a cancel raised during a window lets THAT window finish and stops before the next — abandoning a separate() in',
+    ] },
   { id: 'R2', file: OFF, what: 'a cancelled run hands back the PARTIAL planes instead of none',
     find: '    if (cancelled && cancelled()) return { cancelled: true, windows: plan.windows, done, planes: null };\n'
       + '    readWindow(',
     to: '    if (cancelled && cancelled()) return { cancelled: true, windows: plan.windows, done, planes: asm.out };\n'
-      + '    readWindow(' },
+      + '    readWindow(',
+    expect: [
+      'a run cancelled before it starts separat',
+      '...and a cancelled run hands back NO PLA',
+    ] },
   { id: 'R3', file: OFF, what: 'progress is emitted only for the last window',
     find: '    if (onProgress) {',
-    to: '    if (onProgress && done === plan.windows) {' },
+    to: '    if (onProgress && done === plan.windows) {',
+    expect: [
+      'progress is emitted ONCE PER WINDOW, mon',
+      'every stage is reported, in order, once ',
+      '...and pct is the fraction of the track ',
+    ] },
   { id: 'R4', file: OFF, what: 'pct counts windows STARTED rather than finished',
     find: '        pct: done / plan.windows,',
-    to: '        pct: (done + 1) / plan.windows,' },
+    to: '        pct: (done + 1) / plan.windows,',
+    expect: [
+      'progress is emitted ONCE PER WINDOW, mon',
+      '...and pct is the fraction of the track ',
+    ] },
   { id: 'R5', file: OFF, what: 'the ETA averages over the whole plan rather than over what ran',
     find: '        etaMs: done ? Math.round((elapsedMs / done) * (plan.windows - done)) : null,',
-    to: '        etaMs: done ? Math.round((elapsedMs / plan.windows) * (plan.windows - done)) : null,' },
+    to: '        etaMs: done ? Math.round((elapsedMs / plan.windows) * (plan.windows - done)) : null,',
+    expect: [
+      '...and the ETA is the average so far pro',
+    ] },
   { id: 'R6', file: OFF, what: 'a throwing separator is swallowed and the loop grinds on',
     find: '    } catch (e) {\n'
       + '      // Named with the window, because "the model threw" three layers down is',
-    to: '    } catch (e) {\n      continue;\n      // eslint-disable-next-line' },
+    to: '    } catch (e) {\n      continue;\n      // eslint-disable-next-line',
+    expect: [
+      'a separator that throws is reported NAMI',
+      '...and the loop stops there rather than ',
+      'a window the model fails on is SEPARATE_',
+    ] },
   { id: 'R7', file: OFF, what: 'the failure no longer names the window',
     find: '      throw new Error(`offline: window ${k} of ${plan.windows} failed to separate: `\n'
       + '        + `${String((e && e.message) || e)}`);',
-    to: '      throw new Error(`separation failed: ${String((e && e.message) || e)}`);' },
+    to: '      throw new Error(`separation failed: ${String((e && e.message) || e)}`);',
+    expect: [
+      'a separator that throws is reported NAMI',
+      'a window the model fails on is SEPARATE_',
+    ] },
   { id: 'R8', file: OFF, what: 'every window is folded in as window 0 — the throw that escaped the '
       + 'group and killed the whole file before the group guard existed',
     find: '    asm.add(k, out);',
     to: '    asm.add(0, out);',
+    expect: [
+      'NOTHING ESCAPED THIS GROUP — an unexpect',
+    ],
     truncates: true },
   { id: 'R9', file: OFF, what: 'the separator type check is removed',
     find: "  if (typeof separate !== 'function') {",
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a missing separator is refused at the do',
+    ] },
   { id: 'R10', file: OFF, what: 'each window is separated twice — the seam allows it, the count does not',
     find: '      out = await separate(mixL, mixR, k);',
-    to: '      out = await separate(mixL, mixR, k);\n      out = await separate(mixL, mixR, k);' },
+    to: '      out = await separate(mixL, mixR, k);\n      out = await separate(mixL, mixR, k);',
+    expect: [
+      'every window is separated EXACTLY ONCE a',
+      'a cancel raised during a window lets THAT window finish and stops before the next  [entry point: runOffline, f',
+      '...and the backend is never abandoned mi',
+      '...and the loop stops there rather than ',
+      '...and every window was separated exactl',
+      'a cancel raised during a window lets THAT window finish and stops before the next — abandoning a separate() in',
+    ] },
   { id: 'R11', file: OFF, what: 'a finished run reports done: 0, so the caller cannot tell it finished',
     find: '  return { cancelled: false, windows: plan.windows, done, planes: asm.finish() };',
-    to: '  return { cancelled: false, windows: plan.windows, done: 0, planes: asm.finish() };' },
+    to: '  return { cancelled: false, windows: plan.windows, done: 0, planes: asm.finish() };',
+    expect: [
+      '...and the run reports it finished rathe',
+      '...and runOffline drives the separator’s',
+    ] },
 
   // -------------------------------------------------------------- the wiring
   { id: 'W1', file: OFF, what: 'the Source is read TWICE, and the one-shot obligation goes with it',
     find: '    if (read) {',
-    to: '    await sourceBytes(token);\n    if (false) {' },
+    to: '    await sourceBytes(token);\n    if (false) {',
+    expect: [
+      '...and the Host was asked for the file E',
+    ] },
   { id: 'W2', file: OFF, what: 'the capacity refusal is computed and IGNORED, so the model runs for '
       + 'an entry that cannot be stored',
     find: "  if (whyCap) return fail('CACHE_FULL', whyCap);",
-    to: "  if (false) return fail('CACHE_FULL', whyCap);" },
+    to: "  if (false) return fail('CACHE_FULL', whyCap);",
+    expect: [
+      'a track that cannot fit in the tier is r',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W3', file: OFF, what: 'the decode-clock check is dropped — the model is fed the wrong rate',
     find: '  if (track.sampleRate !== SR) {',
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a decode at the WRONG CLOCK is refused, ',
+    ] },
   { id: 'W4', file: OFF, what: 'the file identity refusal is dropped — an empty file is separated',
     find: "  if (whyFile) return fail('SOURCE_REJECTED', whyFile);",
-    to: "  if (false) return fail('SOURCE_REJECTED', whyFile);" },
+    to: "  if (false) return fail('SOURCE_REJECTED', whyFile);",
+    expect: [
+      'an EMPTY file is SOURCE_REJECTED — it ha',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W5', file: OFF, what: 'the key is built by hand instead of from the tier instance, so the '
       + 'key and the bytes can disagree about depth and geometry',
     find: '  const key = cache.keyFor(fileId, hopSeconds);',
-    to: '  const key = `${fileId}--legacy`;' },
+    to: '  const key = `${fileId}--legacy`;',
+    expect: [
+      '...and its key carries the tier, so it c',
+    ] },
   { id: 'W6', file: OFF, what: 'a cancelled run does NOT abort the writer, so commit() lands a '
       + 'part-separated track under the whole track’s key',
     find: '  if (res.cancelled) {\n    writer.abort();',
-    to: '  if (res.cancelled) {' },
+    to: '  if (res.cancelled) {',
+    expect: [
+      '...and the WRITER itself came out aborte',
+    ] },
   { id: 'W8', file: OFF, what: 'the commit policy is ignored — a short run becomes an entry',
     find: '  if (whyCommit) {',
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a run that came up SHORT is COMMIT_REFUS',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W9', file: OFF, what: 'the progress re-stamp is dropped, so elapsedMs restarts mid-run',
     find: "      onProgress: (p) => emit({ type: 'SEPARATE_PROGRESS', deck, ...p, elapsedMs: now() - t0 }),",
-    to: "      onProgress: (p) => emit({ type: 'SEPARATE_PROGRESS', deck, ...p })," },
+    to: "      onProgress: (p) => emit({ type: 'SEPARATE_PROGRESS', deck, ...p }),",
+    expect: [
+      'elapsedMs never goes backwards across a ',
+    ] },
   { id: 'W10', file: OFF, what: 'progress rides STATE, where push() would coalesce it away',
     find: "    type: 'SEPARATE_PROGRESS', deck, stage, window, windows, pct,",
-    to: "    type: 'STATE', deck, stage, window, windows, pct," },
+    to: "    type: 'STATE', deck, stage, window, windows, pct,",
+    expect: [
+      'the run’s WHOLE wire output is SEPARATE_',
+      'every stage is reported, in order, once ',
+    ] },
   { id: 'W11', file: OFF, what: 'building the envelope no longer checks the code',
     find: "  checkSeparateCode(code, 'SEPARATE_ERROR');\n  return { type: 'SEPARATE_ERROR', deck, code, message };",
-    to: "  return { type: 'SEPARATE_ERROR', deck, code, message };" },
+    to: "  return { type: 'SEPARATE_ERROR', deck, code, message };",
+    expect: [
+      '...and building the envelope is what run',
+    ] },
   { id: 'W12', file: OFF, what: 'the vocabulary is opened up — every code is accepted',
     find: '  if (SEPARATE_CODES.has(code)) return null;',
-    to: '  return null;' },
+    to: '  return null;',
+    expect: [
+      'an undeclared code is reported LOUDLY, n',
+      '...and building the envelope is what run',
+    ] },
   { id: 'W13', file: OFF, what: 'the twelve planes fan out from one — six identical stems, the '
       + 'failure an identity separator cannot see',
     find: '  writer.append(planes, plan.frames);',
-    to: '  writer.append(planes.map(() => planes[0]), plan.frames);' },
+    to: '  writer.append(planes.map(() => planes[0]), plan.frames);',
+    expect: [
+      'the twelve planes land as six stereo ste',
+      '...and the run really distinguished them',
+      '...and every sample of every stem carrie',
+    ] },
   { id: 'W15', file: OFF, what: 'the commit stage is never reported, so the wire goes quiet at the '
       + 'longest step of the run',
     find: "  say('commit', plan.windows, plan.windows, 1);",
-    to: '  ;' },
+    to: '  ;',
+    expect: [
+      'every stage is reported, in order, once ',
+    ] },
   { id: 'W16', file: OFF, what: 'a cancelled run APPENDS AND COMMITS what it has — the stem files '
       + 'land under the whole track’s key, which the old "nothing landed" assertion could not see '
       + 'because it compared against a null key',
     find: '  if (res.cancelled) {\n    writer.abort();',
     to: '  if (res.cancelled) {\n    writer.append(Array.from({ length: STEMS.length * 2 }, '
-      + '() => new Float32Array(plan.frames)), plan.frames);' },
+      + '() => new Float32Array(plan.frames)), plan.frames);',
+    expect: [
+      'a cancel raised during a window lets THAT window finish and stops before the next — abandoning a separate() in',
+      '...and NOTHING LANDED — no manifest entr',
+      '...and the WRITER itself came out aborte',
+      '...and the wire says so: a SEPARATE_ERRO',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W17', file: OFF, what: 'SEPARATE_DONE is never emitted — the run succeeds in silence',
     find: "  emit({\n    type: 'SEPARATE_DONE',",
-    to: "  if (false) emit({\n    type: 'SEPARATE_DONE'," },
+    to: "  if (false) emit({\n    type: 'SEPARATE_DONE',",
+    expect: [
+      'a whole run commits ONE entry and says s',
+      '...and the run really was over cap, so s',
+    ] },
   { id: 'W18', file: OFF, what: 'the progress payload loses etaMs, one of the five fields state.job '
       + 'never wrote',
     find: '    elapsedMs: now() - t0, etaMs: null,\n  });',
-    to: '    elapsedMs: now() - t0,\n  });' },
+    to: '    elapsedMs: now() - t0,\n  });',
+    expect: [
+      '...and the five fields state.job never w',
+    ] },
   { id: 'W19', file: OFF, what: 'an unreadable Source raises the WRONG code — a receiver offers the '
       + 'wrong action for it',
     find: "    return fail('SOURCE_UNREADABLE', `the Host could not hand over this file: ${why(e)}`);",
-    to: "    return fail('CACHE_FULL', `the Host could not hand over this file: ${why(e)}`);" },
+    to: "    return fail('CACHE_FULL', `the Host could not hand over this file: ${why(e)}`);",
+    expect: [
+      'a Host that cannot hand over the bytes i',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W20', file: OFF, what: 'a failed decode raises SOURCE_UNREADABLE instead of DECODE_FAILED',
     find: "    return fail('DECODE_FAILED', `this file could not be decoded: ${why(e)}`);",
-    to: "    return fail('SOURCE_UNREADABLE', `this file could not be decoded: ${why(e)}`);" },
+    to: "    return fail('SOURCE_UNREADABLE', `this file could not be decoded: ${why(e)}`);",
+    expect: [
+      'a file this platform cannot decode is DE',
+    ] },
   { id: 'W21', file: OFF, what: 'an unreadable TIER is assumed empty instead of refused, so the '
       + 'capacity question is answered by a guess',
     find: '    entries = await cache.list();',
-    to: '    entries = await cache.list().catch(() => []);' },
+    to: '    entries = await cache.list().catch(() => []);',
+    expect: [
+      'a tier that cannot be READ is CACHE_UNRE',
+      'every code THIS RUNNER produced is a mem',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W22', file: OFF, what: 'a failed WRITE is reported as COMMIT_REFUSED — the UI then offers '
       + 'Retry for the one thing retrying cannot fix, or withholds it from the one it can',
     find: "    return fail('COMMIT_FAILED', `the entry could not be written: ${why(e)}`);",
-    to: "    return fail('COMMIT_REFUSED', `the entry could not be written: ${why(e)}`);" },
+    to: "    return fail('COMMIT_REFUSED', `the entry could not be written: ${why(e)}`);",
+    expect: [
+      'a WRITE that fails is COMMIT_FAILED and ',
+    ] },
   { id: 'W23', file: OFF, what: 'a failure is returned but never put ON THE WIRE — the caller is '
       + 'told and the receiver waits for ever',
     find: '    emit(separateError(deck, code, message));',
-    to: '    ;' },
+    to: '    ;',
+    expect: [
+      'a decoder that RETURNS something malform',
+      '...and a writer whose append THROWS is C',
+      '...and the wire says so: a SEPARATE_ERRO',
+    ] },
   { id: 'W24', file: OFF, what: 'a LEGAL code is reported too — the check fires on everything, so '
       + 'the console line stops meaning anything',
     find: '  if (SEPARATE_CODES.has(code)) return null;',
-    to: '  if (SEPARATE_CODES.has(code) && false) return null;' },
+    to: '  if (SEPARATE_CODES.has(code) && false) return null;',
+    expect: [
+      'a declared code passes and says NOTHING ',
+      '...and building the envelope is what run',
+    ] },
   { id: 'W25', file: OFF, what: 'the envelope REWRITES the message, taking the user’s actual problem '
       + 'off the screen and replacing it with a second failure',
     find: "  return { type: 'SEPARATE_ERROR', deck, code, message };",
-    to: "  return { type: 'SEPARATE_ERROR', deck, code, message: 'unknown separation error' };" },
+    to: "  return { type: 'SEPARATE_ERROR', deck, code, message: 'unknown separation error' };",
+    expect: [
+      '...because honouring it would write caus',
+      '...and it does NOT throw and does NOT ch',
+    ] },
   { id: 'W26', file: OFF, what: 'a declared code is removed from the set',
     find: "  'COMMIT_REFUSED', 'COMMIT_FAILED', 'CANCELLED',",
-    to: "  'COMMIT_REFUSED', 'COMMIT_FAILED'," },
+    to: "  'COMMIT_REFUSED', 'COMMIT_FAILED',",
+    expect: [
+      'every code THIS RUNNER produced is a mem',
+      'a declared code passes and says NOTHING ',
+      '...and building the envelope is what run',
+      'the set is exactly the eleven codes decl',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'W27', file: OFF, what: 'THE PINS ARE NOT THREADED TO THE COMMIT — a pinned entry is evicted '
       + 'by the very put that follows it, and it goes FIRST because LRU takes the oldest',
     find: '    committed = await writer.commit(cache, pins);',
-    to: '    committed = await writer.commit(cache);' },
+    to: '    committed = await writer.commit(cache);',
+    expect: [
+      'A PINNED ENTRY SURVIVES THE COMMIT THAT ',
+      '...and the run really was over cap, so s',
+    ] },
   { id: 'W28', file: OFF, what: 'the malformed-decode guard RETHROWS, so a decoder that returns '
       + 'mismatched channels rejects out of the runner with nothing on the wire — the shape the '
       + 'guard exists to prevent, and it kills the block',
     find: "    return fail('DECODE_FAILED', `the decoder produced audio the geometry cannot use: ${why(e)}`);",
     to: '    throw e;',
+    expect: [
+      'offline — the whole run — the block ran to its end without throwing  THREW: offline: channels differ — 516970 vs 516969  ...the assertions after that point DID NOT RUN and are not counted. This names the death; it does not undo it.',
+      '...and ALL ELEVEN were raised by code th',
+    ],
     truncates: true },
 
   // ------------------------------------------ what the engine hands over (D6)
   { id: 'E1', file: OFF, what: 'the slot lets TWO runs start — the capacity question becomes '
       + 'unanswerable and the peak memory doubles',
     find: '    if (this.job) {',
-    to: '    if (false) {' },
+    to: '    if (false) {',
+    expect: [
+      'ONE ahead-of-time run per engine: the se',
+      '...and BUSY reaches the wire as a SEPARA',
+      'a cancel names the deck it belongs to: t',
+      '...and the slot is released only by the ',
+      '...and ALL ELEVEN were raised by code th',
+    ] },
   { id: 'E2', file: OFF, what: 'a cancel ignores which deck it names, so cancelling deck B stops '
       + 'deck A',
     find: '    if (!this.job || this.job.deck !== deck) return false;',
-    to: '    if (!this.job) return false;' },
+    to: '    if (!this.job) return false;',
+    expect: [
+      'a cancel names the deck it belongs to: t',
+    ] },
   { id: 'E3', file: OFF, what: 'the slot is released by ANY job — a late finally from a finished run '
       + 'frees the slot a new run is holding',
     find: '    if (this.job === job) this.job = null;',
-    to: '    this.job = null;' },
+    to: '    this.job = null;',
+    expect: [
+      '...and the slot is released only by the ',
+    ] },
   { id: 'E4', file: OFF, what: 'a per-message geometry override is honoured, so causal stems land in '
       + 'a directory whose keys say offline',
     find: '  if (asked == null || asked === tierGeometry) return null;',
-    to: '  return null;' },
+    to: '  return null;',
+    expect: [
+      'the geometry is the TIER’S, not the mess',
+      '...because honouring it would write caus',
+    ] },
   { id: 'E5', file: OFF, what: 'a MONO file up-mixes to a silent right channel instead of the same '
       + 'signal',
     find: '  const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;',
-    to: '  const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : new Float32Array(buf.length);' },
+    to: '  const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : new Float32Array(buf.length);',
+    expect: [
+      'a MONO file is UP-MIXED rather than refu',
+    ] },
   { id: 'E6', file: OFF, what: 'a decode that produced nothing is accepted rather than thrown',
     find: '  if (!buf || !(buf.length > 0) || !(buf.numberOfChannels > 0)) {',
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      '...and a decode that produced NOTHING is',
+    ] },
   { id: 'E7', file: OFF, what: 'an ahead-of-time window is given a FINITE budget, which is what makes '
       + 'it demotable by the GPU scheduler',
     find: '      res = await infer(mix, out, Infinity);',
-    to: '      res = await infer(mix, out, 1950);' },
+    to: '      res = await infer(mix, out, 1950);',
+    expect: [
+      '...and the budget is Infinity, which is ',
+    ] },
   { id: 'E8', file: OFF, what: 'a demotion is folded in as audio — it carries none, so the track gets '
       + 'undefined',
     find: '    if (res && res.demoted) {',
-    to: '    if (false) {' },
+    to: '    if (false) {',
+    expect: [
+      'a demotion is a NAMED THROW and never fo',
+    ] },
   { id: 'E9', file: OFF, what: 'the buffers are not re-owned after a failure, so the next window '
       + 'meets a detached ArrayBuffer',
     find: '      mix = new ArrayBuffer(2 * segment * 4);\n      out = new ArrayBuffer(planes * segment * 4);\n      throw e;',
-    to: '      throw e;' },
+    to: '      throw e;',
+    expect: [
+      '...and after a failure the buffers are R',
+    ] },
   { id: 'E10', file: OFF, what: 'a separator built with no infer is accepted, and fails at the first '
       + 'window instead of at the door',
     find: "  if (typeof infer !== 'function') {",
-    to: '  if (false) {' },
+    to: '  if (false) {',
+    expect: [
+      'a separator built without the deck’s inf',
+    ] },
   { id: 'E11', file: OFF, what: 'every plane view is the FIRST plane — twelve copies of one stem, '
       + 'read straight off the lent-back buffer',
     find: '    for (let i = 0; i < planes; i++) planeViews.push(stems.subarray(i * segment, (i + 1) * segment));',
-    to: '    for (let i = 0; i < planes; i++) planeViews.push(stems.subarray(0, segment));' },
+    to: '    for (let i = 0; i < planes; i++) planeViews.push(stems.subarray(0, segment));',
+    expect: [
+      'the separator returns ONE VIEW PER PLANE',
+    ] },
 
   // --------------------------------------------------- the tier it writes to
   { id: 'S1', file: SC, what: 'put() stops threading the pins to evict — the same defect as W27, one '
       + 'layer down, and either alone is enough to lose a pinned entry',
     find: '    return this.evict(pins);',
-    to: '    return this.evict();' },
+    to: '    return this.evict();',
+    expect: [
+      'A PINNED ENTRY SURVIVES THE COMMIT THAT ',
+      '...and the run really was over cap, so s',
+    ] },
   { id: 'S2', file: SC, what: 'the manifest records depth 16 for a 32-bit-float entry — the key still '
       + 'says d32f, so the entry and its own record disagree',
     find: '      depth: this.depth, geometry: this.geometry, drops: 0, ...meta,',
-    to: '      depth: 16, geometry: this.geometry, drops: 0, ...meta,' },
+    to: '      depth: 16, geometry: this.geometry, drops: 0, ...meta,',
+    expect: [
+      'the entry is in the 32-BIT-FLOAT tier an',
+    ] },
   { id: 'S3', file: SC, what: 'every tier writes its stems into the LIVE directory — the 32f entry '
       + 'lands where a 16-bit causal one lives',
     find: '      await writeFile(d, `${key}.${s}.wav`, wav);',
-    to: '      await writeFile(await dir(CACHE_DIR), `${key}.${s}.wav`, wav);' },
+    to: '      await writeFile(await dir(CACHE_DIR), `${key}.${s}.wav`, wav);',
+    expect: [
+      'the entry is in the 32-BIT-FLOAT tier an',
+      '...and it is keyed by the file’s CONTENT',
+      '...and NOTHING went into the live tier —',
+      '...and a COMMITTED run leaves exactly on',
+      'the twelve planes land as six stereo ste',
+      '...and the run really distinguished them',
+      '...and every sample of every stem carrie',
+    ] },
   { id: 'S4', file: SC, what: 'the stem files drop the key from their names, so two entries in one '
       + 'tier overwrite each other',
     find: '      await writeFile(d, `${key}.${s}.wav`, wav);',
-    to: '      await writeFile(d, `${s}.wav`, wav);' },
+    to: '      await writeFile(d, `${s}.wav`, wav);',
+    expect: [
+      'the entry is in the 32-BIT-FLOAT tier an',
+      '...and it is keyed by the file’s CONTENT',
+      '...and a COMMITTED run leaves exactly on',
+      'the twelve planes land as six stereo ste',
+      '...and the run really distinguished them',
+      '...and every sample of every stem carrie',
+    ] },
 
   // ----------------------------------------- the join it borrows from `live`
   { id: 'L1', file: LIVE, what: 'makeFades stops being complementary — fi+fo no longer sums to one, '
       + 'so the offline weighting silently needs a division it does not do',
     find: '    else { fi[i] = u; fo[i] = 1 - u; }',
-    to: '    else { fi[i] = u; fo[i] = 1 - u * 0.5; }' },
+    to: '    else { fi[i] = u; fo[i] = 1 - u * 0.5; }',
+    expect: [
+      'an identity separator reconstructs every',
+      'THE JOIN IS A CROSSFADE, NOT A BUTT SPLI',
+      'the ramps are the LIVE module’s makeFade',
+      'the FIRST window does not fade in and th',
+      'the assembled track is the input back, s',
+      '...and every sample of every stem carrie',
+      '...and runOffline drives the separator’s',
+    ] },
 ];
 
 // ---------------------------------------------------------------------------
@@ -440,7 +781,7 @@ if (args.includes('--list')) {
  * tell coverage that MIGRATED between two mutations from coverage that is intact
  * — the union is the same either way.
  */
-function runSuite() {
+function runSuiteOnce() {
   let out = '';
   try {
     out = execFileSync(process.execPath, ['test.js', 'offline'],
@@ -458,6 +799,24 @@ function runSuite() {
   const m = /(\d+) passed, (\d+) failed/.exec(clean);
   if (!m) return { passed: 0, failed: 0, crashed: true, names };
   return { passed: +m[1], failed: +m[2], crashed: false, names };
+}
+
+/**
+ * ONE RETRY ON A CRASH, AND THE CRASH IS REPORTED EITHER WAY.
+ *
+ * A run with NO SUMMARY LINE is not a red set of size zero — it is a
+ * measurement that did not happen, and treating the two alike is how a battery
+ * reports "this mutation reds nothing" about a suite that never finished. This
+ * box runs several agents' gates at once; a `--measure` pass here had two cases
+ * come back `0 of 89 ran` that reproduce as `89 of 89, 1 red` when re-run alone,
+ * which is the machine and not the code. So: retry once, and if it crashes twice
+ * say CRASH rather than folding it into the red count.
+ */
+function runSuite() {
+  const first = runSuiteOnce();
+  if (!first.crashed) return first;
+  const second = runSuiteOnce();
+  return second.crashed ? { ...second, crashedTwice: true } : second;
 }
 
 /**
@@ -551,6 +910,7 @@ if (measure) {
   console.log('\n  --measure: the OBSERVED red set per case, as pasteable declarations\n');
   for (const r of rows) {
     if (!r.match) { console.log(`  // ${r.id}: NO MATCH (${r.hits})`); continue; }
+    if (r.r.crashed) { console.log(`  // ${r.id}: THE SUITE CRASHED TWICE — nothing measured, re-run this one alone`); continue; }
     const keys = r.r.names.fail.map((n) => `'${uniqueKey(n, baseNames).replace(/'/g, "\\'")}'`);
     console.log(`  ${r.id}: expect: [${keys.join(', ')}]${r.ran < baseRan ? `, truncates: true, // ${r.ran}/${baseRan} ran` : ','}`);
   }
@@ -588,6 +948,13 @@ for (const r of rows) {
     continue;
   }
   matched++;
+  if (r.r.crashed) {
+    problems.push(`${r.id}: the suite CRASHED twice under this mutation — no summary line, so `
+      + 'nothing was measured. That is not an empty red set.');
+    console.log(`  ${r.id.padEnd(4)}  ${'MATCHES'.padEnd(12)}  ${'CRASH'.padEnd(12)}  `
+      + `${'0/-'.padEnd(6)}  ${(r.at || '-').padEnd(24)}  ${m.what.slice(0, 38)}`);
+    continue;
+  }
   /**
    * MATCHED BY KEY, IN BOTH DIRECTIONS. A declared key with no red is coverage
    * that was lost; a red no key claims is coverage that MOVED HERE from

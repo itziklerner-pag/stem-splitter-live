@@ -7581,8 +7581,39 @@ if (group('cache')) {
 
 // ===========================================================================
 /**
- * WATCHED RED BY MUTATION — every assertion below. Each was applied to a green
- * tree, `node test.js offline` run, the red read, and the file restored.
+ * WATCHED RED BY MUTATION — AND THE CLAIM IS A MEASUREMENT, NOT THIS SENTENCE.
+ *
+ * This header used to read "every assertion below", full stop. It was FALSE for
+ * EIGHTEEN OF SIXTY-FIVE. A reviewer applied each of the 39 committed anchors,
+ * captured the FAILING ASSERTION NAMES rather than the counts, unioned them and
+ * subtracted from the baseline: eighteen names never appeared under any anchor,
+ * under a header claiming all of them were watched. One of the eighteen — "the
+ * wrong number of planes is refused" — could not fail at all, because deleting
+ * the guard it named produced a DIFFERENT throw and `threw() !== null` was
+ * satisfied either way.
+ *
+ * A HEADER THAT CLAIMS MORE THAN THE BATTERY DOES IS THE SAME DEFECT AS A NAME
+ * THAT CLAIMS MORE THAN ITS CODE CHECKS, and it is worse for sitting in the
+ * evidence rather than in the code. So the claim moved to where it can be
+ * checked:
+ *
+ *     node qa/u5a-mutations.mjs
+ *
+ * Every case there DECLARES the set of assertions it must turn red, by name, and
+ * the case FAILS if the observed set differs IN EITHER DIRECTION — a declared red
+ * that stopped failing is coverage lost, and an UNDECLARED red is coverage that
+ * MOVED here from some other case, which no aggregate can see because the union
+ * is unchanged. The battery then checks that every assertion this group prints is
+ * either named by some case or listed in its `NOT_WATCHED` table with the reason
+ * it cannot be, and it refuses to print a coverage sentence for a `--only` run,
+ * where it would not have measured one.
+ *
+ * SO: THE ANSWER TO "IS THIS ASSERTION WATCHED?" IS IN THAT FILE AND IS RE-DERIVED
+ * BY RUNNING IT. What this comment can honestly say is the shape: every anchor is
+ * applied to the real file, the suite is run, the reds are read by name, and the
+ * file is restored — and a mutation that makes a block THROW is reported as a
+ * truncation, because the group guard below converts that crash into one named red
+ * while the assertions after it never run. That is a report, not coverage.
  *
  * THE GATE THAT IS NOT HERE, DELIBERATELY. There is no assertion comparing this
  * output to the LIVE path's. Under the symmetric window the two must legitimately

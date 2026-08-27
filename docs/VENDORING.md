@@ -25,7 +25,7 @@ document.
 
 | group | what it is | you may edit it |
 |---|---|---|
-| **the unit** — 35 files | the engine and the deck. `extension/unit.json` declares it; `extension/unit.sha256` fixes it byte for byte | **no.** Edit it and you have forked, not vendored |
+| **the unit** — 36 files | the engine and the deck. `extension/unit.json` declares it; `extension/unit.sha256` fixes it byte for byte | **no.** Edit it and you have forked, not vendored |
 | **the reference Host** — 5 files | `offscreen/host.js`, `ui/host.js`, `offscreen/host-pin.js`, `content.js`, `speed.js`. This repository's Chrome implementation of the seam | **yes — that is the point.** The first two are the *holes* you replace |
 | **the harness** — 14 files | the suites whose subject is the unit, and the two files that run them | **yes**, once you have read §6 |
 
@@ -66,7 +66,7 @@ shasum -a 256 -c extension/unit.sha256      # macOS, and Linux with perl
 # or: sha256sum -c extension/unit.sha256    # GNU coreutils
 ```
 
-Expect 35 lines of `: OK` and exit 0. **Any `FAILED` line means stop.** You have
+Expect 36 lines of `: OK` and exit 0. **Any `FAILED` line means stop.** You have
 a corrupt download, a tarball that was rewritten in transit, or an archive that
 is not the tag it claims to be — and there is nothing further down this page
 worth doing until you know which.
@@ -88,7 +88,7 @@ sums file that had gone stale on our side could not have reached the tag.
  It does
 not hash itself — no sums file can — and it does hash
 `extension/unit.json`, because that is the file everything else is verified
-*against*, and a copy that verified 34 files against a manifest it had taken on
+*against*, and a copy that verified 35 files against a manifest it had taken on
 faith would have checked its own homework. What authenticates the sums file is
 the tag.
 
@@ -105,12 +105,20 @@ const harness = [...d.suites, ...d.runners].map((s) => s.path);
 console.log([...new Set([...unit, ...host, ...harness,
   "extension/unit.sha256", ...d.external.map((e) => e.fetch)])].sort().join("\n"));
 ' > /tmp/vendor-list.txt
-wc -l < /tmp/vendor-list.txt      # 50
+wc -l < /tmp/vendor-list.txt      # 51
 ```
 
-Fifty paths: 35 unit, 5 reference Host, 14 harness (12 suites and 2 runners,
-seven of which are unit files that are their own suite and are therefore already
+Fifty-one paths: 36 unit, 5 reference Host, 14 harness (12 suites and 2 runners,
+SIX of which are unit files that are their own suite and are therefore already
 counted), plus `extension/unit.sha256` and `tools/fetch-vendor.sh`.
+
+> **These are MEASURED, not maintained.** The unit half is the sums file's line
+> count and every one of these moves the moment a unit file is added: v0.4.0's
+> ahead-of-time runner (`extension/engine/offline.js`) took the unit from 35 to
+> 36 and the copy list from 50 to 51, which is why the numbers here are re-derived
+> by running the block above rather than adjusted. `seven of which are unit files`
+> stood here through two tags and was already SIX — a digit nobody re-measured
+> because nothing re-runs prose.
 
 The unit half comes out of the **sums file** rather than out of `unit.json`'s
 `required` clauses, and that is not an accident of convenience: two of those
@@ -124,7 +132,7 @@ verified one step ago.
 DEST=/path/to/your-product/vendor/stem-splitter-live
 mkdir -p "$DEST"
 tar -cf - -T /tmp/vendor-list.txt | tar -x -C "$DEST"
-find "$DEST" -type f | wc -l      # 50
+find "$DEST" -type f | wc -l      # 51
 ```
 
 **The layout is part of the contract, not a preference.**
@@ -142,7 +150,7 @@ cd "$DEST"
 shasum -a 256 -c extension/unit.sha256
 ```
 
-The same 35 `: OK` lines, now about the files you will actually run. Doing it
+The same 36 `: OK` lines, now about the files you will actually run. Doing it
 twice is not superstition: step 2 proves the download, this proves the copy, and
 they fail for different reasons.
 
@@ -396,3 +404,10 @@ verified `: OK` twice, ORT fetched and both hashes matched, and
 `node tools/verify.mjs --unit` printed
 `GREEN (partial — the vendored unit's suites only; 12 of 23 steps)` at exit 0
 with the 12 counts in §7. Nothing in the copy was edited to make that happen.
+
+**Those two figures are a RECORD OF THAT RUN and are deliberately not updated.**
+`50` and `35` are what the procedure copied and verified at `v0.2.0`; at the head
+of this document they read `51` and `36`, because the unit has gained a file
+since. Rewriting the digits here would turn a measurement into an assertion about
+a run nobody made — the numbers to follow are the ones in §§2-5, which are
+re-derived, and the tag body's own verification paragraph.
