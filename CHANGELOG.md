@@ -9,7 +9,16 @@ Because [`PRIVACY.md`](PRIVACY.md) promises that any change to data handling is
 disclosed, **any such change gets its own entry here**, at the top of the
 release, whether or not it is otherwise notable.
 
-## [Unreleased]
+## [0.3.0] — 2026-08-27
+
+Nothing about what the extension does changes. This release is for the second
+product: the Host interface gains the two duties a desktop host needs, the cache
+gains a lossless tier and an identity for sources that are files, and the WAV
+writer learns to stream so a half-gigabyte export is never resident. The engine
+and the deck are unchanged in what they do and stricter in what they check.
+
+One fix here would have destroyed data in any host that ran two cache tiers, and
+it went unnoticed because the code that did it reported success.
 
 ### Security and privacy
 
@@ -25,17 +34,20 @@ release, whether or not it is otherwise notable.
   a user would read to check that claim can no longer contradict it
   (upstream [#28](https://github.com/itziklerner-pag/stem-splitter-live/issues/28)).
 
-### Added — for anyone building on this
+### Fixed
 
-None of this is visible in the browser. It is here because the tag is what a
-second product pins.
-
-- **`MODEL_SOURCES`, and a three-valued `modelBytes` phase.** `shared/host.js`
-  now declares the vocabulary a host announces its model phase from — `cache`,
-  `download`, `bundled` — and `modelSourceWord()` is where the words for each
-  live, so the engine's line and the vocabulary cannot drift. `loadModel()`
-  returns `source` beside `fromCache`; `fromCache` is unchanged and is still the
-  retry decision, which is why the two are two fields.
+- **One `StemCache` owned every `StemCache`'s directory, and `clear()` deleted
+  across tiers reporting success.** `dir()` read the module constant `CACHE_DIR`
+  and ignored `this`, so a second cache constructed for a second tier operated
+  on the *first* tier's directory: `list()` returned the other tier's entries,
+  `evict()` deleted against the wrong cap, and `put()` wrote its stems where
+  another cache would find them. `clear()` was worse and separately hard-coded —
+  it removes the directory whole, and its `.catch(() => {})` swallowed the
+  evidence, so clearing a 32-bit-float tier would have deleted the live 16-bit
+  cache and returned as though it had worked: a cache the caller never named,
+  gone, with nothing red anywhere. Each instance now owns the directory it was
+  constructed with
+  ([#33](https://github.com/itziklerner-pag/stem-splitter-live/issues/33)).
 - **`ARM_ERROR.code` is checked, and says so when it is wrong.** It was always a
   closed vocabulary the unit owns (`ARM_CODES`, eight members, five of them tab
   nouns) and nothing anywhere checked it: a host that invented a plausible code
@@ -53,6 +65,75 @@ second product pins.
   the fix is a safety net for: **a hole must import inertly**, touching its
   platform on the first duty call
   ([#30](https://github.com/itziklerner-pag/stem-splitter-live/issues/30)).
+
+### Changed
+
+- **Host interface v1.1: `ENGINE_HOST_DUTIES` goes 9 → 11.** The addition is
+  additive and therefore MINOR by the freeze's own terms — no v1 name is removed
+  or renamed — but it is not invisible to a host: **a Host vendored against
+  v0.2.0 is refused at boot by `assertHost` until it supplies the two new
+  duties.** That refusal is the upgrade notice, and it is deliberate; a Host that
+  silently lacked them would answer a duty call with `undefined` and the unit
+  would carry that forward as a real answer
+  ([#38](https://github.com/itziklerner-pag/stem-splitter-live/issues/38)).
+
+### Added — for anyone building on this
+
+None of this is visible in the browser. It is here because the tag is what a
+second product pins.
+
+- **`sourceBytes` and `exportSink`.** A Source that is a FILE and a deliverable
+  that is a FOLDER are not expressible on v1: `captureStream` answers a token
+  with a live stream, and nothing on the seam said where finished bytes go. Both
+  duties are declared in `shared/host.js` rather than in a downstream repo,
+  because that file is a unit file — an edit over there is detectable by
+  `shasum -c` and is a fork by definition (ADR 0001 decision 3). The extension's
+  own implementations are honest refusals with named errors: its Sources are
+  tabs and it holds no `downloads` permission.
+- **A streaming WAV writer, so a 508 MB export is never resident.** `encodeWav`
+  allocates `8 + riffSize` and fills it per sample, so the whole file existed in
+  memory before a byte was written — and six 32-bit-float stems of a four-minute
+  track are ~508 MB, the ceiling `ARCHITECTURE` R6 names for export and the one
+  `stemcache.js` names for the cache write. Two writers, because there are two
+  cases and only one of them can seek: `WavStreamEncoder` writes a complete,
+  final header on the first chunk and never patches it, and `WavSyncWriter`
+  serves the cache path ([#35](https://github.com/itziklerner-pag/stem-splitter-live/issues/35)).
+- **A 32-bit-float cache tier, with depth in the key.** The ahead-of-time
+  separation path plays from the cache and the same stems are what an export
+  ships; neither is served by the lossy 16-bit tier. Depth goes in the KEY and
+  never as a flag on `put()` — a flag would let a 32f write land on
+  `${key}.${stem}.wav` for a key a 16-bit entry already owns: same name,
+  different bytes, and `get()` returning whichever was written last. The tier has
+  its own directory and its own cap, and refuses before the model rather than
+  after ([#36](https://github.com/itziklerner-pag/stem-splitter-live/issues/36)).
+- **File sources are identified by their content.** A file has no `videoId`, and
+  every way of borrowing one is wrong: feed a file's address to
+  `videoIdFromUrl` and it returns `null`, which `cacheKey` turns into the literal
+  key `'null--<pipelineVersion>'` — ONE key shared by every file the user ever
+  opens, serving the first file's stems for the second with nothing able to tell.
+  Identity is now the whole file's SHA-256, with its own refusal pair
+  ([#37](https://github.com/itziklerner-pag/stem-splitter-live/issues/37)).
+- **Coverage for the half of `StemCache` that had none.** `test.js` previously
+  imported only the pure half of `stemcache.js`; everything the class does over
+  storage was untested, and this release lands two slices in exactly that code.
+  51 assertions now drive `StemCache` and `CacheWriter` over a real OPFS shim —
+  the `put`/`get` round trip through the real encode and decode, an L/R assertion
+  that fails if the channels are shared or swapped, and the manifest-written-last
+  claim checked by the recorded order in which bytes landed rather than believed
+  ([#34](https://github.com/itziklerner-pag/stem-splitter-live/issues/34)).
+- **Both mutation batteries are files in the repository, not scratch.** A
+  "watched red" is a claim about the source as it stood when it was written, and
+  nothing announces the day a later change rewrites the line an anchor patched.
+  Two of this phase's five batteries had decayed silently — one reported 51/51
+  at branch time and 44/51 against the final tree, and the seven gaps were ten
+  dead anchors rather than seven weak assertions. `tools/mutations/u8-seam-fixes.mjs`
+  and `qa/mutations-u1-wavstream.mjs` are now in the tree beside what they test,
+  each anchor stamped with the landed commit it was cut against. Each reports two
+  answers per case and not one — whether the anchor still MATCHES, and separately
+  whether the mutation still REDS — because a decayed instrument and a real
+  coverage loss need opposite responses and a single pass count collapses them.
+  Neither is a `verify.mjs` step: they edit tracked source, and a gate that writes
+  the tree it gates can leave it written.
 
 ## [0.2.0] — 2026-08-26
 
@@ -157,6 +238,7 @@ First public release.
 - No `downloads` permission, and an automated gate asserts its continued
   absence.
 
-[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/itziklerner-pag/stem-splitter-live/releases/tag/v0.1.0
