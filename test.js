@@ -159,7 +159,8 @@ import {
   PASS_PLANE_L, PASS_PLANE_R,
 } from './extension/engine/live.js';
 import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler, runOffline,
-  runSeparation, SEPARATE_CODES, checkSeparateCode, separateError } from './extension/engine/offline.js';
+  runSeparation, SEPARATE_CODES, checkSeparateCode, separateError,
+  SeparationSlot, geometryRefusal, trackFromAudioBuffer, makeSeparator } from './extension/engine/offline.js';
 import { StemRingWriter, stemRingByteLength, PLANES, H_READ, H_PLAY } from './extension/shared/stemring.js';
 import { outputTick, OUTPUT_DEAD_HOLD_SEC, OUTPUT_DEAD_HOLD_FRAMES, MIXER_SILENT_PEAK } from './extension/offscreen/live.js';
 import {
@@ -7606,6 +7607,18 @@ if (group('offline')) {
    * still reports. The body is deliberately NOT re-indented, so the diff that
    * added this is one line at each end.
    */
+  /**
+   * EVERY CODE THIS GROUP ACTUALLY RAISED, accumulated across all of its blocks.
+   *
+   * IT IS GROUP-LEVEL BECAUSE THE ELEVEN ARE NOT ALL RAISED IN ONE PLACE. Nine
+   * come out of `runSeparation`; `BUSY` comes from `SeparationSlot.claim` and
+   * `GEOMETRY_UNSUPPORTED` from `geometryRefusal` — both of which used to live in
+   * `offscreen/engine.js` where no suite could reach them, which is exactly why
+   * the count stopped at nine. The two-way pin at the foot of the group is what
+   * turns "the set is closed" into "the set is closed AND every member has a live
+   * raise site this suite drives".
+   */
+  const codesSeen = new Set();
   let escaped = null;
   try {
   head('offline — the symmetric window, and what it is NOT');
@@ -7756,17 +7769,74 @@ if (group('offline')) {
     const [out] = asm.finish();
     let maxStep = 0;
     for (let i = 1; i < n; i++) maxStep = Math.max(maxStep, Math.abs(out[i] - out[i - 1]));
-    const ramped = DELTA / plan.overlap;
+    /**
+     * THE REFERENCE COMES FROM THE CONSTANTS, NOT FROM `plan.overlap`.
+     *
+     * It used to read `DELTA / plan.overlap` — the same number the assembler
+     * builds its ramps from — so a defect that moved the overlap moved the
+     * instrument WITH it and this stayed green. MEASURED: with
+     * `const overlap = segment - stride` replaced by `= 2205`, the ramps and the
+     * reference both became 2205-long and only the separate `p.overlap ===
+     * SEGMENT - STRIDE` assertion reddened, while the detail line here went on
+     * saying "a splice would read 85995x larger". An instrument derived from the
+     * code under test cannot see that code being wrong.
+     */
+    const ramped = DELTA / (SEGMENT - STRIDE);
     ok('THE JOIN IS A CROSSFADE, NOT A BUTT SPLICE — the largest step across a join is the '
        + `ramp's (${maxStep.toExponential(2)}), not the whole discontinuity (${DELTA.toFixed(1)}); `
-       + `ramp reference ${ramped.toExponential(2)}, so a splice would read ${plan.overlap}x larger  `
+       + `ramp reference ${ramped.toExponential(2)} from the CONSTANTS, so a splice would read `
+       + `${SEGMENT - STRIDE}x larger  `
        + '[entry point: OfflineAssembler.add over windows separating to different constants]',
-      maxStep > 0 && maxStep < ramped * 4,
+      maxStep > ramped / 2 && maxStep < ramped * 2,
       `maxStep ${maxStep.toExponential(3)} vs ramp ${ramped.toExponential(3)} vs splice ${DELTA}`);
+    /**
+     * BOUNDED ON BOTH SIDES ON PURPOSE. A step SMALLER than the ramp's is a ramp
+     * spread over more than the overlap — gentler, so the number gets BETTER —
+     * and that breaks complementarity, which is the third failure mode wearing
+     * its other face. The window is [0.5x, 2x] against a splice at 85 995x, so
+     * there is still four orders of magnitude of range under it.
+     */
     ok('...and the fixture really did straddle joins with DIFFERENT values on each side, so '
        + 'the step above was measured rather than absent',
       plan.windows >= 3 && out[0] === 0 && out[n - 1] === DELTA * (plan.windows - 1),
       `${plan.windows} windows, out[0] ${out[0]}, out[n-1] ${out[n - 1]}`);
+
+    /**
+     * THE SEAM WALK — PHASE4-CONTRACT §4.3's NAMED SECONDARY INSTRUMENT, and why
+     * it is HERE rather than `qa/compare.mjs stats`.
+     *
+     * The contract's U5a row asks for "maxD @seam(+/-10 ms) at multiples of
+     * STRIDE within bound", and names `qa/compare.mjs stats` as the thing that
+     * already does it. That entry point takes SIX RENDERED STEM WAVS from a real
+     * separation over the ground-truth testbed — it is a model measurement, and
+     * §4.3's own correction says a model-dominated estimator cannot carry a
+     * geometry claim. So the instrument is implemented rather than borrowed:
+     * same walk, same +/-10 ms, same multiples of STRIDE, over a fixture that
+     * needs no model and no weights.
+     *
+     * IT IS A DIFFERENT INSTRUMENT FROM THE `maxStep` ABOVE, not a restatement:
+     * that one is the maximum over the WHOLE track and this one is bounded to the
+     * seams, so a discontinuity parked anywhere else — a wrong stride, a window
+     * folded in at the wrong offset — separates them.
+     */
+    const SEAM_MS = 10;
+    const halfSeam = Math.round((SR * SEAM_MS) / 1000);
+    let seamWorst = 0;
+    let seamsWalked = 0;
+    for (let k = 1; k < plan.windows; k++) {
+      const centre = k * plan.stride;
+      seamsWalked++;
+      for (let i = Math.max(1, centre - halfSeam); i < Math.min(n, centre + halfSeam); i++) {
+        seamWorst = Math.max(seamWorst, Math.abs(out[i] - out[i - 1]));
+      }
+    }
+    ok(`maxD at every SEAM — the multiples of STRIDE, +/-${SEAM_MS} ms — is the ramp's step and `
+       + 'not a discontinuity  [PHASE4-CONTRACT 4.3\'s secondary instrument, implemented here '
+       + 'rather than lifted from qa/compare.mjs stats, which needs six rendered stems from a '
+       + 'real separation and would measure the MODEL]',
+      seamsWalked >= 2 && seamWorst > 0 && seamWorst <= ramped * 2,
+      `${seamsWalked} seams walked, +/-${halfSeam} frames, worst D ${seamWorst.toExponential(3)} `
+      + `vs ramp ${ramped.toExponential(3)}`);
   }
 
   head('offline — the joins, and the two edges that have no join');
@@ -7958,14 +8028,34 @@ if (group('offline')) {
     a2.add(0, full());
     ok('a plane shorter than a window is refused rather than read past its end',
       threw(() => a2.add(1, [new Float32Array(SEGMENT - 1)])) !== null);
-    ok('the wrong number of planes is refused',
-      threw(() => new OfflineAssembler(plan, 2).add(0, full())) !== null);
+    /**
+     * IT MATCHES THE MESSAGE, AND THAT IS THE WHOLE ASSERTION.
+     *
+     * `!== null` ALONE CANNOT FAIL HERE. Delete the guard this names —
+     * `if (src.length !== this.out.length)` -> `if (false)` — and the loop reaches
+     * q = 1, `src[1]` is `undefined`, and `s.length` throws a TypeError. A
+     * DIFFERENT throw, but still a throw, so `threw()` is non-null either way:
+     * MEASURED at 66 passed, 0 failed with the guard gone. The assertion observed
+     * the crash it prevents rather than the guard, which is failure mode 1 in the
+     * file `AGENTS.md` keeps for exactly this.
+     *
+     * So it reads the SENTENCE, and it also refuses the TypeError explicitly —
+     * one clause for what must be there, one for what must not.
+     */
+    const planesMsg = threw(() => new OfflineAssembler(plan, 2).add(0, full()));
+    ok('the wrong number of planes is refused BY NAME, counting both — the bare "it threw" '
+       + 'form cannot fail here, because without the guard the loop dies on undefined.length '
+       + '[entry point: OfflineAssembler.add]',
+      planesMsg !== null && /1 planes for a 2-plane assembly/.test(planesMsg)
+      && !/Cannot read properties|undefined/.test(planesMsg),
+      planesMsg || 'ACCEPTED THE WRONG PLANE COUNT');
     const a3 = new OfflineAssembler(plan, 1);
     a3.add(0, full());
     const shortRun = threw(() => a3.finish());
     ok('finish() before every window is folded in is refused, naming both counts — the '
        + 'rest of the track would be silence, and silence reads back as part of the song',
-      shortRun !== null && /1 of 3|2 of 3|1 of 2/.test(shortRun), shortRun || 'RETURNED A PART-SILENT TRACK');
+      shortRun !== null && /^offline: 1 of 2 windows folded in/.test(shortRun),
+      shortRun || 'RETURNED A PART-SILENT TRACK');
 
     ok('channels of different lengths are refused by the ring adapter',
       threw(() => bufferRing(new Float32Array(10), new Float32Array(11))) !== null);
@@ -7991,7 +8081,7 @@ if (group('offline')) {
    */
   {
     const o = installOpfs();
-    const seenCodes = new Set();
+    const seenCodes = codesSeen;
     try {
       const FRAMES = STRIDE * 2 + 1000;              // exactly two windows
       const LONG = STRIDE * 4 + 1000;                // four, so a cancel has somewhere to land
@@ -8122,6 +8212,19 @@ if (group('offline')) {
         ok('...and NOTHING went into the live tier — two instances, two directories',
           o.names(CACHE_DIR).length === 0 && o.names(CACHE_DIR_32F).length > 0,
           `live ${o.names(CACHE_DIR).length} files, 32f ${o.names(CACHE_DIR_32F).length}`);
+        /**
+         * THE RANGE CONTROL FOR THE CANCEL BLOCK'S FILE CHECK, and it is here
+         * because a control must be measured where the thing it enables is TRUE.
+         * Down there the claim is "no stem file begins with this key"; it is only
+         * a measurement if a committed run really does leave files that do. Six,
+         * one per stem, which also pins the count rather than "more than none".
+         */
+        ok('...and a COMMITTED run leaves exactly one stem file per stem under its own key — '
+           + 'which is what gives the cancelled run\'s "no file under that key" something to be '
+           + 'wrong about  [entry point: StemCache.put naming]',
+          o.names(CACHE_DIR_32F).filter((f) => f.startsWith(good.r.key)).length === STEMS.length,
+          `${o.names(CACHE_DIR_32F).filter((f) => f.startsWith(good.r.key)).length} of `
+          + `${STEMS.length} under ${good.r.key.slice(0, 16)}...`);
 
         /**
          * THROUGH `Math.fround`, because the tier is 32-BIT FLOAT and the fixture
@@ -8141,13 +8244,23 @@ if (group('offline')) {
           new Set(got.flat()).size === STEMS.length * 2, String(new Set(got.flat()).size));
         let worst = 0;
         let holes = 0;
+        let swept = 0;
+        /**
+         * BOTH CHANNELS, AND THE SWEPT COUNT IS PINNED. This used to read channel
+         * 0 only, so a defect that corrupted R past sample 0 passed it — and the
+         * bound `worst <= 2**-23 && holes === 0` is vacuously true over an empty
+         * array, so the count is what stops a zero-length stem reading as clean.
+         */
         STEMS.forEach((s, k) => {
-          const want0 = Math.fround(planeConst(k * 2));
-          for (const v of back.stems[s][0]) {
-            const d = Math.abs(v - want0);
-            if (d > worst) worst = d;
-            if (v === 0) holes++;
-          }
+          [0, 1].forEach((c) => {
+            const wantC = Math.fround(planeConst(k * 2 + c));
+            for (const v of back.stems[s][c]) {
+              const d = Math.abs(v - wantC);
+              if (d > worst) worst = d;
+              if (v === 0) holes++;
+              swept++;
+            }
+          });
         });
         /**
          * AND IT SAYS WHAT IT CANNOT SEE. Both windows carry the SAME constant
@@ -8162,9 +8275,10 @@ if (group('offline')) {
            + 'zeros anywhere — a dropped window or a short tail reads back as silence. IT CANNOT '
            + 'SEE THE JOIN: both windows carry the same value, so a splice reconstructs it too, '
            + 'which is what the separate join instrument above is for',
-          worst <= 2 ** -23 && holes === 0,
+          worst <= 2 ** -23 && holes === 0 && swept === STEMS.length * 2 * FRAMES,
           `worst ${worst.toExponential(2)} against 2^-23 = ${(2 ** -23).toExponential(2)}, `
-          + `${holes} zero samples of ${STEMS.length * back.stems[STEMS[0]][0].length}`);
+          + `${holes} zero samples of ${swept} swept (both channels of all six stems, `
+          + `expected ${STEMS.length * 2 * FRAMES})`);
       }
 
       // -------------------------------------------- the refusals, and where they sit
@@ -8217,6 +8331,42 @@ if (group('offline')) {
         ok('a window the model fails on is SEPARATE_FAILED, naming the window, and NOTHING is '
            + 'committed',
           r.r.code === 'SEPARATE_FAILED' && /window 1 of/.test(r.r.message)
+          && (await r.ports.cache.list()).length === 0, r.r.message);
+      }
+      {
+        /**
+         * A DECODER THAT DOES NOT THROW BUT HANDS BACK SOMETHING MALFORMED, which
+         * is a different failure from the one above and used to have no code at
+         * all: `makeOfflinePlan` and `bufferRing` were the only calls in the whole
+         * run outside a try, so either of them rejected OUT of `runSeparation`
+         * and the shipping caller turned that into a log line with NO
+         * `SEPARATE_ERROR` on the wire — a receiver waiting on the run hears
+         * nothing, for ever. `decodeAtModelClock` cannot produce this today; that
+         * is what makes it a guard, and the only unreported exit is where a guard
+         * belongs.
+         */
+        const r = await run({
+          decode: async () => ({ l: noise(FRAMES, 5), r: noise(FRAMES - 1, 7), frames: FRAMES, sampleRate: SR }),
+        });
+        ok('a decoder that RETURNS something malformed — channels of different lengths — is '
+           + 'DECODE_FAILED on the wire, not a rejection out of the runner with nothing said',
+          r.r.code === 'DECODE_FAILED' && /channels differ/.test(r.r.message)
+          && r.seen.length === 0
+          && r.emitted.some((e) => e.type === 'SEPARATE_ERROR' && e.code === 'DECODE_FAILED'),
+          r.r.message);
+      }
+      {
+        /** The same hole at the other end: `append` throws on the wrong plane count. */
+        const badAppend = (k, m) => {
+          const w = new CacheWriter(k, m);
+          w.append = () => { throw new Error('planes: 11 for a 12-plane entry'); };
+          return w;
+        };
+        const r = await run({ makeWriter: badAppend });
+        ok('...and a writer whose append THROWS is COMMIT_FAILED with the writer aborted, rather '
+           + 'than a silent exit — append was the last unguarded call in the run',
+          r.r.code === 'COMMIT_FAILED' && /12-plane entry/.test(r.r.message)
+          && r.emitted.some((e) => e.type === 'SEPARATE_ERROR' && e.code === 'COMMIT_FAILED')
           && (await r.ports.cache.list()).length === 0, r.r.message);
       }
       {
@@ -8276,9 +8426,36 @@ if (group('offline')) {
         ok('...and the run had somewhere to stop: the plan was four windows, so two unrun is a '
            + 'claim with something to be wrong about',
           makeOfflinePlan(LONG).windows === 4, String(makeOfflinePlan(LONG).windows));
-        ok('...and NOTHING LANDED — no entry, and no stem file under that key',
-          (await cache.list()).length === 0 && o.names(CACHE_DIR_32F).every((f) => !f.startsWith(r.key)),
-          `${(await cache.list()).length} entries`);
+        /**
+         * THE KEY IS RECOMPUTED, BECAUSE THE RESULT'S IS `null` AND THAT MADE THE
+         * FILE HALF OF THIS ASSERTION VACUOUS.
+         *
+         * Every failing path out of `runSeparation` returns through `fail()`,
+         * which sets `key: null`. `String.prototype.startsWith` COERCES its
+         * argument, so `f.startsWith(null)` asks "does this name begin with the
+         * four characters n-u-l-l" — false for every key this tier can mint, so
+         * `every(f => !f.startsWith(r.key))` was TRUE no matter what was on disk.
+         * MEASURED: `['K.vocals.wav'].every(f => !f.startsWith(null))` is `true`.
+         * The clause the name is about — "no stem file under that key" — was
+         * asserted by nothing; only the sibling manifest check did any work.
+         *
+         * So the key this run WOULD have written is derived the way the runner
+         * derives it, and the regex on it is the fail-when-you-cannot-look guard:
+         * a null, empty or malformed key reds here instead of passing quietly.
+         * The inline control proves the predicate can still say NO — without it a
+         * later change to the naming scheme would make this vacuous again in
+         * silence, which is exactly how it got here.
+         */
+        const expectKey = cache.keyFor(await fileIdFromBytes(bytesOf(64)), 1.95);
+        const canSayNo = ![`${expectKey}.${STEMS[0]}.wav`].every((f) => !f.startsWith(expectKey));
+        ok('...and NOTHING LANDED — no manifest entry, and NO STEM FILE under the key this run '
+           + 'would have written  [the key is recomputed, not read off the result: a failed run '
+           + 'reports key null and startsWith(null) asks about the literal string "null"]',
+          /^[0-9a-f]{64}--/.test(expectKey) && canSayNo
+          && (await cache.list()).length === 0
+          && o.names(CACHE_DIR_32F).every((f) => !f.startsWith(expectKey)),
+          `${(await cache.list()).length} entries, ${o.names(CACHE_DIR_32F).length} files in the `
+          + `tier, key ${expectKey.slice(0, 16)}..., predicate can say no: ${canSayNo}`);
         /**
          * AND THE ASSERTION ABOVE IS NOT THE ONE THAT WATCHES `abort()`. MEASURED
          * by mutation: delete the `abort()` on the cancel path and nothing lands
@@ -8301,6 +8478,83 @@ if (group('offline')) {
           emitted.map((e) => e.type).join(','));
       }
 
+      // ----------------------------------------------------- the pin, END TO END
+      /**
+       * A PINNED ENTRY SURVIVES THE `put` THAT WOULD OTHERWISE EVICT IT.
+       *
+       * THE PROTECTION WAS DECLARED AND NOT EFFECTIVE. `planEviction` gained a
+       * pin set for a stated reason — "a File source's working set is ALSO the
+       * export source, and evicting it mid-export is catastrophic" — and then
+       * `put()` called `this.evict()` WITH NO PINS, so nothing in the shipping
+       * write path could ever reach it. A pinned entry could be evicted by the
+       * very `put` that followed it, and it would be evicted FIRST, because LRU
+       * takes the oldest and a pinned entry is one that has been open longest.
+       *
+       * DRIVEN THROUGH `runSeparation`, NOT THROUGH `planEviction`. The pure
+       * function was never the defect; the THREADING was, and a unit test on
+       * `planEviction` passes either way. The entry point is the whole chain:
+       * runSeparation -> CacheWriter.commit(cache, pins) -> StemCache.put(..., pins)
+       * -> evict(pins).
+       *
+       * THE FIXTURE IS SIZED SO EVICTION MUST HAPPEN. `separationRefusal` refuses
+       * when `pinnedBytes + need > maxBytes`, so a cap that merely fits the pinned
+       * entry and the new one would never evict at all and this would pass over a
+       * no-op. There is a third entry, unpinned and NEWER than the pinned one, and
+       * the cap leaves room for only one of the two — so LRU must choose, and
+       * which one it takes is the whole assertion.
+       */
+      {
+        const tier = new StemCache(1e12, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
+        await tier.clear().catch(() => {});
+        const tiny = (v) => Object.fromEntries(STEMS.map((st) => [st,
+          [new Float32Array(2000).fill(v), new Float32Array(2000).fill(v)]]));
+        // 'p' sorts before 'z', which is `planEviction`'s tie-break when two
+        // entries land in the same millisecond — so the pinned one is the one
+        // an unpinned eviction would take first, in both orderings.
+        await tier.put('pinned-entry', { title: 'the track a deck has open' }, tiny(0.1));
+        await tier.put('zz-unpinned-entry', { title: 'a recent listen' }, tiny(0.2));
+        const before = await tier.list();
+        const pinnedBytes = before.find((e) => e.key === 'pinned-entry').bytes;
+        const junkBytes = before.find((e) => e.key === 'zz-unpinned-entry').bytes;
+        const need = bytesForSeconds(FRAMES / SR, 32);
+        // Room for the pinned entry and the new one, and for HALF the unpinned
+        // one: exactly one of the two old entries has to go.
+        tier.maxBytes = pinnedBytes + need + Math.floor(junkBytes / 2);
+
+        const emitted = [];
+        const r = await runSeparation({
+          deck: 'A',
+          token: 'tok',
+          source: { title: 'a file' },
+          hopSeconds: 1.95,
+          cache: tier,
+          pins: ['pinned-entry'],
+          sourceBytes: async () => bytesOf(64),
+          decode: async () => trackOf(FRAMES),
+          separate: separator([]),
+          makeWriter: (k, m) => new CacheWriter(k, m),
+          emit: (msg) => emitted.push(msg),
+          now: () => Date.now(),
+        });
+        if (r.code) seenCodes.add(r.code);
+        const after = (await tier.list()).map((e) => e.key);
+        const done = emitted.find((e) => e.type === 'SEPARATE_DONE');
+        ok('A PINNED ENTRY SURVIVES THE COMMIT THAT EVICTS — the unpinned neighbour goes and the '
+           + 'pinned one stays, through the shipping write path  [entry point: runSeparation -> '
+           + 'CacheWriter.commit(cache, pins) -> StemCache.put(..., pins) -> evict(pins)]',
+          r.ok === true && after.includes('pinned-entry') && after.includes(r.key)
+          && !after.includes('zz-unpinned-entry'),
+          `${r.code || 'ok'} — tier holds [${after.map((k) => k.slice(0, 12)).join(', ')}]`);
+        ok('...and the run really was over cap, so something HAD to be evicted — an eviction that '
+           + 'never happened would pass the assertion above having chosen nothing',
+          !!done && done.cache.removed.length === 1
+          && done.cache.removed[0].key === 'zz-unpinned-entry',
+          done ? `removed ${done.cache.removed.length}: `
+            + `[${done.cache.removed.map((e) => e.key).join(', ')}], `
+            + `${done.cache.bytes} of ${done.cache.maxBytes} bytes` : 'NO SEPARATE_DONE');
+        await tier.clear().catch(() => {});
+      }
+
       // ------------------------------------------------------------ the vocabulary
       /**
        * NINE OF ELEVEN, and the two that are missing are named rather than
@@ -8310,13 +8564,242 @@ if (group('offline')) {
        * what asserts that building the envelope is what runs the check, so a
        * raise site in that file cannot skip it either.
        */
-      ok('every code this runner produced is a member of the declared set, and it produced '
-         + `nine of the eleven  [#29's lesson: ARM_ERROR shipped a closed set nothing consulted]`,
+      ok('every code THIS RUNNER produced is a member of the declared set, and it produced nine '
+         + 'of the eleven — the other two are BUSY and GEOMETRY_UNSUPPORTED, raised by the slot '
+         + `and the geometry refusal below  [#29's lesson: ARM_ERROR shipped a closed set nothing `
+         + 'consulted]',
         [...seenCodes].every((c) => SEPARATE_CODES.has(c)) && seenCodes.size === 9,
         `${seenCodes.size} of ${SEPARATE_CODES.size} exercised: ${[...seenCodes].sort().join(',')}`);
     } catch (e) {
       blockThrew('offline — the whole run', e);
     } finally { o.restore(); }
+  }
+
+  head('offline — what the ENGINE hands over: the slot, the geometry, the decode, the model');
+  /**
+   * THE DEFECT THIS BLOCK EXISTS FOR, STATED SO IT CANNOT COME BACK.
+   *
+   * The first cut of this slice put the one-run-at-a-time rule, the geometry
+   * refusal, the decode shaping and the separator callback in
+   * `offscreen/engine.js` — ~315 lines of DECISIONS in a file no suite can
+   * import, because it owns an AudioContext, a Host and two decks. A reviewer
+   * measured the consequence exactly: not one assertion, anchor or gate reached
+   * a single line of it, while the slice's own report called it "gated".
+   *
+   * A GREP OVER THAT FILE WOULD NOT HAVE FIXED IT. Finding the literal `'BUSY'`
+   * proves a string is present, not that any path reaches it — a scan for string
+   * literals is not a test of reachability, and an assertion that cannot look is
+   * the failure this repository keeps a file of. So the decisions MOVED into
+   * `engine/offline.js`, where every one of them takes its platform as an
+   * argument, and the assertions below drive them.
+   *
+   * WHAT IS STILL UNEXERCISED, NAMED RATHER THAN GLOSSED: the `case` labels in
+   * `offscreen/engine.js`, `ensureContext().decodeAudioData`, `deck.infer` /
+   * `ensureSession`, the two `StemCache` instances, `host.sourceBytes` and
+   * `send`. That is port supply, it needs a browser, and NOTHING in this
+   * repository executes it — the extension's own Host rejects every
+   * `sourceBytes` token by design, so the shipping extension cannot take this
+   * path at all. Its first real execution is behind a desktop Host with File
+   * sources.
+   */
+  {
+    // ---------------------------------------------------------------- the slot
+    const slot = new SeparationSlot();
+    const a = slot.claim('A');
+    const b = slot.claim('B');
+    ok('ONE ahead-of-time run per engine: the second claim is refused BUSY, naming the deck '
+       + 'already running, and hands back no job  [entry point: SeparationSlot.claim]',
+      a.refusal === null && a.job !== null && slot.deck === 'A'
+      && b.job === null && b.refusal !== null && b.refusal.code === 'BUSY'
+      && /deck A is already separating/.test(b.refusal.message),
+      b.refusal ? `${b.refusal.code}: ${b.refusal.message.slice(0, 48)}...` : 'ACCEPTED TWO RUNS');
+    /**
+     * THROUGH `separateError`, WHICH IS THE ENVELOPE THE ENGINE SENDS. Recording
+     * the code off a hand-written literal would prove nothing about the raise
+     * site; building the envelope the shipping `case` builds is what puts these
+     * two on the same footing as the nine the runner raises.
+     */
+    const busyWire = separateError('B', b.refusal.code, b.refusal.message);
+    codesSeen.add(busyWire.code);
+    ok('...and BUSY reaches the wire as a SEPARATE_ERROR through the one envelope builder, '
+       + 'because two runs make the capacity question unanswerable — neither run’s future entry '
+       + 'is in the manifest the other sizes itself against',
+      busyWire.type === 'SEPARATE_ERROR' && busyWire.code === 'BUSY' && busyWire.deck === 'B'
+      && SEPARATE_CODES.has(busyWire.code) && slot.deck === 'A');
+
+    ok('a cancel names the deck it belongs to: the wrong deck is refused and changes nothing, '
+       + 'the right one raises the flag runOffline reads BETWEEN windows  '
+       + '[entry point: SeparationSlot.cancel]',
+      a.job.cancelled() === false && slot.cancel('B') === false && a.job.cancelled() === false
+      && slot.cancel('A') === true && a.job.cancelled() === true);
+
+    const stranger = { deck: 'A', cancel: false, cancelled: () => false };
+    ok('...and the slot is released only by the job HOLDING it — a late finally from a finished '
+       + 'run cannot free the slot a new run has taken  [entry point: SeparationSlot.release]',
+      slot.release(stranger) === false && slot.deck === 'A'
+      && slot.release(a.job) === true && slot.deck === null);
+    ok('...and once released there is nothing to cancel, which is not an error: a SEPARATE_ERROR '
+       + 'for a run that does not exist would be painted beside the one that does',
+      slot.cancel('A') === false && slot.claim('B').refusal === null && slot.deck === 'B');
+
+    // ------------------------------------------------------------ the geometry
+    ok('the geometry is the TIER’S, not the message’s: absent or matching goes ahead, a '
+       + 'different one is refused naming BOTH  [entry point: geometryRefusal]',
+      geometryRefusal(undefined, 'offline') === null
+      && geometryRefusal(null, 'offline') === null
+      && geometryRefusal('offline', 'offline') === null
+      && /offline window and was asked for "causal"/.test(String(geometryRefusal('causal', 'offline'))),
+      String(geometryRefusal('causal', 'offline')).slice(0, 60) + '...');
+    const geoWire = separateError('A', 'GEOMETRY_UNSUPPORTED',
+      String(geometryRefusal('causal', 'offline')));
+    codesSeen.add(geoWire.code);
+    ok('...because honouring it would write causal stems into a directory whose keys say offline '
+       + '— a second geometry is a second tier, and the refusal reaches the wire as a declared '
+       + 'GEOMETRY_UNSUPPORTED through the same envelope builder',
+      geoWire.type === 'SEPARATE_ERROR' && geoWire.code === 'GEOMETRY_UNSUPPORTED'
+      && SEPARATE_CODES.has(geoWire.code) && /second tier, not an argument/.test(geoWire.message));
+
+    // --------------------------------------------------------- the decode shape
+    const fakeBuffer = (chans, frames, rate = SR) => ({
+      numberOfChannels: chans.length,
+      length: frames,
+      sampleRate: rate,
+      getChannelData: (i) => chans[i],
+    });
+    {
+      const L = noise(2048, 71), R = noise(2048, 73);
+      const t = trackFromAudioBuffer(fakeBuffer([L, R], 2048, SR));
+      ok('a STEREO decode keeps two distinct channels, and the frames and the rate come off the '
+         + 'buffer rather than from anywhere else  [entry point: trackFromAudioBuffer]',
+        t.l === L && t.r === R && t.frames === 2048 && t.sampleRate === SR
+        && t.l[0] !== t.r[0]);
+      const M = noise(2048, 77);
+      const m = trackFromAudioBuffer(fakeBuffer([M], 2048, SR));
+      ok('a MONO file is UP-MIXED rather than refused, and both channels are THE SAME ARRAY — '
+         + 'named here because it saves a copy of up to ~100 MB and is only safe while nothing '
+         + 'downstream writes into either channel',
+        m.l === M && m.r === M && m.l === m.r && m.frames === 2048);
+      const empty = (() => { try { trackFromAudioBuffer(fakeBuffer([new Float32Array(0)], 0, SR)); return null; } catch (e) { return e.message; } })();
+      ok('...and a decode that produced NOTHING is a throw, because a zero-length track caches '
+         + 'as a track that is silently not the track',
+        empty !== null && /silently not the track/.test(empty), empty || 'ACCEPTED AN EMPTY DECODE');
+    }
+
+    // ------------------------------------------------------------- the model
+    {
+      /** The Backend's contract: it takes the buffers and lends them back. */
+      const lend = (mix, out) => ({ mix, stems: out });
+      const seenBudgets = [];
+      const sessions = [];
+      const sep = makeSeparator({
+        infer: (mix, out, budgetMs) => {
+          seenBudgets.push(budgetMs);
+          // Write a per-plane constant so the plane VIEWS are readable.
+          const v = new Float32Array(out);
+          for (let i = 0; i < STEMS.length * 2; i++) v.fill(i + 1, i * SEGMENT, (i + 1) * SEGMENT);
+          return Promise.resolve(lend(mix, out));
+        },
+        ensureSession: async () => { sessions.push(1); },
+      });
+      const mixL = noise(SEGMENT, 81), mixR = noise(SEGMENT, 83);
+      const planes = await sep(mixL, mixR, 0);
+      ok('the separator returns ONE VIEW PER PLANE over the lent-back buffer, each a whole '
+         + 'SEGMENT, and the model is asked for the session first  '
+         + '[entry point: makeSeparator over an injected infer]',
+        planes.length === STEMS.length * 2
+        && planes.every((pl, i) => pl.length === SEGMENT && pl[0] === i + 1)
+        && sessions.length === 1,
+        `${planes.length} planes of ${planes[0].length}, ${sessions.length} ensureSession`);
+      ok('...and the budget is Infinity, which is what exempts an ahead-of-time window from L3: '
+         + 'a live chunk can be too late to publish and an offline one cannot',
+        seenBudgets.length === 1 && seenBudgets[0] === Infinity, String(seenBudgets));
+
+      /**
+       * THE DEMOTION BRANCH IS UNREACHABLE THROUGH TODAY’S DECK AND IS GATED
+       * ANYWAY. `Deck.infer` only returns `{demoted:true}` when the budget is
+       * finite, and this passes Infinity — so nothing that ships can raise it.
+       * A branch that cannot be reached through ONE caller is not a branch that
+       * cannot be tested, and the alternative to the throw is folding a result
+       * that carries NO AUDIO into the track as `undefined`.
+       */
+      const demoting = makeSeparator({
+        infer: async () => ({ demoted: true, why: 'deck B has the GPU' }),
+      });
+      let demoted = null;
+      try { await demoting(mixL, mixR, 3); } catch (e) { demoted = e.message; }
+      ok('a demotion is a NAMED THROW and never folded in as audio — it carries no samples, so '
+         + 'accepting it would write undefined into the track',
+        demoted !== null && /demoted window 3/.test(demoted) && /deck B has the GPU/.test(demoted),
+        demoted || 'ACCEPTED A DEMOTION AS PLANES');
+
+      /**
+       * THE BUFFERS WENT TO THE BACKEND AND ARE NOT COMING BACK. A real transfer
+       * DETACHES them, so a caller that retried after a failure would meet a
+       * detached ArrayBuffer rather than the error it was handling — which is
+       * why the re-own sits before the throw propagates. `structuredClone` with a
+       * transfer list detaches for real; a flag would prove nothing.
+       */
+      let firstCall = true;
+      const flaky = makeSeparator({
+        infer: async (mix, out) => {
+          if (firstCall) {
+            firstCall = false;
+            structuredClone(mix, { transfer: [mix] });
+            structuredClone(out, { transfer: [out] });
+            throw new Error('the worker died');
+          }
+          return { mix, stems: out };
+        },
+      });
+      let firstMsg = null;
+      try { await flaky(mixL, mixR, 0); } catch (e) { firstMsg = e.message; }
+      let secondMsg = null;
+      let again = null;
+      try { again = await flaky(mixL, mixR, 1); } catch (e) { secondMsg = e.message; }
+      ok('...and after a failure the buffers are RE-OWNED before the throw propagates, so the '
+         + 'next window does not meet a detached ArrayBuffer  [the transfer above is real: '
+         + 'structuredClone with a transfer list detaches]',
+        firstMsg === 'the worker died' && secondMsg === null
+        && again !== null && again.length === STEMS.length * 2 && again[0].length === SEGMENT,
+        secondMsg || `recovered, ${again ? again.length : 0} planes`);
+
+      ok('a separator built without the deck’s infer is refused at construction, not at the '
+         + 'first window',
+        (() => { try { makeSeparator({}); return false; } catch (e) { return /infer/.test(e.message); } })());
+
+      /**
+       * AND THE TWO COMPOSE. The plane views the separator hands back are what
+       * `OfflineAssembler` copies out of, and the borrow-and-return contract only
+       * holds because `add` copies before the next `separate` lends the buffer
+       * again. Driving `runOffline` THROUGH `makeSeparator` is what checks that,
+       * rather than checking each half against its own idea of the other.
+       */
+      const n = STRIDE * 2 + 500;
+      const track = noise(n, 91);
+      const ring = bufferRing(track, track);
+      const passthrough = makeSeparator({
+        infer: async (mix, out) => {
+          const inp = new Float32Array(mix);
+          const v = new Float32Array(out);
+          for (let i = 0; i < STEMS.length * 2; i++) {
+            v.set(inp.subarray((i % 2) * SEGMENT, ((i % 2) + 1) * SEGMENT), i * SEGMENT);
+          }
+          return { mix, stems: out };
+        },
+      });
+      const res = await runOffline({
+        plan: makeOfflinePlan(n), ring, separate: passthrough, planes: STEMS.length * 2,
+      });
+      let worst = 0;
+      for (const pl of res.planes) for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(pl[i] - track[i]));
+      ok('...and runOffline drives the separator’s LENT-BACK VIEWS correctly end to end: '
+         + 'twelve planes of a passthrough model reconstruct the track to the float32 floor, '
+         + 'which they could not do if a view were read after the next window borrowed it  '
+         + '[entry point: runOffline over makeSeparator]',
+        res.planes.length === STEMS.length * 2 && res.done === makeOfflinePlan(n).windows
+        && worst <= 2 ** -23,
+        `worst ${worst.toExponential(2)} over ${res.planes.length} planes and ${res.done} windows`);
+    }
   }
 
   head('offline — SEPARATE_ERROR’s code is a CLOSED VOCABULARY, checked where it is built');
@@ -8365,6 +8848,19 @@ if (group('offline')) {
       SEPARATE_CODES.size === 11 && SEPARATE_CODES.has('BUSY') && SEPARATE_CODES.has('CANCELLED')
       && SEPARATE_CODES.has('COMMIT_REFUSED') && SEPARATE_CODES.has('COMMIT_FAILED'),
       `${SEPARATE_CODES.size}: ${[...SEPARATE_CODES].join(',')}`);
+    /**
+     * AND EVERY ONE OF THEM HAS A LIVE RAISE SITE THIS GROUP DRIVES. A closed set
+     * whose members nothing raises is a list of adjectives — `ARM_CODES` was
+     * exactly that for a year. This is the direction the size pin cannot check:
+     * a code declared and never raised, or a raise site deleted, moves this and
+     * not the size.
+     */
+    ok('...and ALL ELEVEN were raised by code this group actually ran — nine by runSeparation, '
+       + 'BUSY by SeparationSlot.claim and GEOMETRY_UNSUPPORTED by geometryRefusal  [a closed '
+       + 'set whose members nothing raises is a list of adjectives]',
+      codesSeen.size === SEPARATE_CODES.size
+      && [...SEPARATE_CODES].every((c) => codesSeen.has(c)),
+      `${codesSeen.size} of ${SEPARATE_CODES.size}: ${[...codesSeen].sort().join(',')}`);
   }
   } catch (e) { escaped = e; }
   ok('NOTHING ESCAPED THIS GROUP — an unexpected throw is a named red here rather than a '

@@ -68,14 +68,21 @@
  * either alone: the next reader hits "the answer is no" and reverts the work.
  *
  * ---------------------------------------------------------------------------
- * WHAT ELSE IS IN HERE. The geometry above is the first half; `runOffline` drives
- * the window loop over an INJECTED model, and `runSeparation` drives a whole run
- * — the Host's bytes, the identity, the decode, the refusals, the wire and the
- * commit — over INJECTED PORTS. Everything platform-bound is a port for one
- * reason: `offscreen/engine.js` owns the AudioContext, the Host and the decks,
- * none of which exist under Node, so a runner that reached for them directly
- * would be a runner nothing could drive. `test.js` group('offline') drives all
- * three with no browser, no Host, no worker and no model.
+ * WHAT ELSE IS IN HERE, IN FOUR PARTS. The geometry above is the first;
+ * `runOffline` drives the window loop over an INJECTED model; `runSeparation`
+ * drives a whole run — the Host's bytes, the identity, the decode, the refusals,
+ * the wire and the commit — over INJECTED PORTS; and the last section holds what
+ * the ENGINE hands over: the one-run-at-a-time slot, the geometry refusal, the
+ * decode shaping and the separator callback.
+ *
+ * EVERYTHING PLATFORM-BOUND IS A PORT FOR ONE REASON, and the fourth section is
+ * there because that reason was learned the hard way: `offscreen/engine.js` owns
+ * the AudioContext, the Host and the decks, none of which exist under Node, so
+ * anything that lives there is something NO SUITE CAN IMPORT. The first cut of
+ * this slice left ~315 lines of decisions in that file, and a reviewer measured
+ * that not one assertion, anchor or gate reached any of them. Decisions live
+ * here; effects live there. `test.js` group('offline') drives all four parts with
+ * no browser, no Host, no worker and no model.
  */
 
 import { SR, SEGMENT, STEMS, STRIDE, SEAM_XFADE_LAW } from '../shared/config.js';
@@ -575,8 +582,26 @@ export async function runSeparation({
   if (whyCap) return fail('CACHE_FULL', whyCap);
 
   // ------------------------------------------------------------- 5. the run
-  const plan = makeOfflinePlan(track.frames);
-  const ring = bufferRing(track.l, track.r);
+  /**
+   * GUARDED, BECAUSE A THROW OUT OF HERE IS A RECEIVER WAITING FOR EVER.
+   *
+   * `makeOfflinePlan` throws on a non-integer frame count and `bufferRing` throws
+   * when the channels differ in length — both of which are a DECODER handing back
+   * something malformed rather than throwing, which is a different failure from
+   * the one the `decode` try/catch above covers. Unguarded they reject out of
+   * `runSeparation`, and the shipping caller turns that into a log line with NO
+   * `SEPARATE_ERROR` on the wire: the run stops and the receiver hears nothing,
+   * for ever. `decodeAtModelClock` cannot produce either today; that is what
+   * makes this a guard rather than a fix, and a guard is exactly what belongs in
+   * front of the only unreported exit a function has.
+   */
+  let plan, ring;
+  try {
+    plan = makeOfflinePlan(track.frames);
+    ring = bufferRing(track.l, track.r);
+  } catch (e) {
+    return fail('DECODE_FAILED', `the decoder produced audio the geometry cannot use: ${why(e)}`);
+  }
   const writer = makeWriter(key, {
     fileId,
     title: (source && source.title) || null,
@@ -625,7 +650,7 @@ export async function runSeparation({
      * sticky, this reports it instead of quietly landing a partial track.
      */
     let landed = null;
-    try { landed = await writer.commit(cache); } catch { landed = null; }
+    try { landed = await writer.commit(cache, pins); } catch { landed = null; }
     if (landed) {
       return fail('COMMIT_FAILED', 'a cancelled run committed an entry — CacheWriter.abort() is '
         + 'documented as sticky and commit() must return null after it');
@@ -646,7 +671,16 @@ export async function runSeparation({
    */
   const planes = res.planes;
   res.planes = null;
-  writer.append(planes, plan.frames);
+  try {
+    writer.append(planes, plan.frames);
+  } catch (e) {
+    // `append` throws on the wrong plane count or a non-integer length. Same
+    // reason as the guard above: this is the last place a throw would leave the
+    // wire silent, and COMMIT_FAILED is the honest code — nothing was written and
+    // re-running MIGHT help, which is the distinction that code carries.
+    writer.abort();
+    return fail('COMMIT_FAILED', `the separated track could not be handed to the writer: ${why(e)}`);
+  }
   planes.length = 0;
 
   const whyCommit = fileCommitRefusal(writer, { frames: track.frames });
@@ -657,7 +691,14 @@ export async function runSeparation({
   say('commit', plan.windows, plan.windows, 1);
   let committed;
   try {
-    committed = await writer.commit(cache);
+    /**
+     * THE PINS GO WITH THE COMMIT, because `put()` evicts and this is the only
+     * caller that knows what is open. Without them `planEviction`'s pin set is
+     * unreachable through the write path and the very commit that finishes a
+     * separation can evict an entry a deck is reading — the protection would be
+     * declared and not effective.
+     */
+    committed = await writer.commit(cache, pins);
   } catch (e) {
     return fail('COMMIT_FAILED', `the entry could not be written: ${why(e)}`);
   }
@@ -674,4 +715,219 @@ export async function runSeparation({
     cache: committed,
   });
   return { ok: true, code: null, message: null, key, frames, seconds: frames / SR };
+}
+
+/* ------------------------------------------------- what the ENGINE hands over
+ * THE DECISIONS LIVE HERE; `offscreen/engine.js` KEEPS ONLY THE PORTS.
+ *
+ * This section exists because of a measured defect and not because of taste. The
+ * first cut of this slice put the admission rule, the one-run-at-a-time slot, the
+ * decode shaping and the separator callback in `offscreen/engine.js` — ~315 lines
+ * of DECISIONS in a file no suite can import, because it owns an AudioContext, a
+ * Host and two decks, none of which exist under Node. A reviewer measured the
+ * consequence exactly: no assertion, no anchor and no gate reached ONE line of it,
+ * while the slice's report called it "gated".
+ *
+ * A STRING SCAN OVER THAT FILE WOULD NOT HAVE FIXED IT. Grepping for `BUSY` proves
+ * a literal is present, not that any code path reaches it — and an assertion that
+ * cannot look is the failure this project keeps a file of. So the decisions MOVED
+ * to where they can be driven: everything below takes its platform as an argument
+ * and runs under plain Node.
+ *
+ * WHAT IS LEFT IN `offscreen/engine.js`, STATED SO NOBODY OVERSTATES IT AGAIN:
+ * the `case` labels, `ensureContext().decodeAudioData`, `deck.infer`/
+ * `ensureSession`, the `StemCache` instances, `host.sourceBytes` and `send`. That
+ * is port supply, it needs a browser, and NOTHING IN THIS REPOSITORY EXERCISES IT
+ * — the extension's own Host rejects every `sourceBytes` token by design
+ * (`offscreen/host.js`), so the shipping extension can never take this path at
+ * all. Its first real execution is behind a desktop Host with File sources. Said
+ * plainly here rather than discovered there.
+ */
+
+/**
+ * ONE AHEAD-OF-TIME RUN PER ENGINE, AND THE CANCEL THAT BELONGS TO IT.
+ *
+ * ONE, ENGINE-WIDE, NOT ONE PER DECK — and a refusal rather than a queue. Two
+ * decks have two backends and two ORT sessions, so the seam's one-call-per-backend
+ * rule would happily let both run. What stops it is that two concurrent runs
+ * double the ~1.7 GB peak, halve each run's throughput for no gain, and — the part
+ * that is not merely wasteful — make the capacity question UNANSWERABLE, because
+ * neither run's future entry is in the manifest the other one sizes itself
+ * against. A queue would hide that; a refusal naming the deck already running
+ * does not.
+ *
+ * `release(job)` TAKES THE JOB IT IS RELEASING. A bare `release()` would let a
+ * late `finally` from a finished run free the slot a NEW run is holding, and the
+ * new run would then be cancellable by nobody and joinable by anybody. It is one
+ * comparison and it turns a lifetime bug into a no-op.
+ */
+export class SeparationSlot {
+  constructor() {
+    /** @type {{deck:string, cancel:boolean, cancelled:() => boolean}|null} */
+    this.job = null;
+  }
+
+  /** Which deck is separating, or null. */
+  get deck() { return this.job ? this.job.deck : null; }
+
+  /**
+   * Take the slot for `deck`.
+   * @returns {{job:object|null, refusal:{code:string, message:string}|null}}
+   */
+  claim(deck) {
+    if (this.job) {
+      return {
+        job: null,
+        refusal: {
+          code: 'BUSY',
+          message: `deck ${this.job.deck} is already separating a file, and this engine runs one `
+            + 'ahead-of-time separation at a time: two would double the peak memory and neither '
+            + 'could size itself against the other, because a run in flight has no manifest entry',
+        },
+      };
+    }
+    const job = { deck, cancel: false, cancelled: () => job.cancel };
+    this.job = job;
+    return { job, refusal: null };
+  }
+
+  /**
+   * Ask the run on `deck` to stop after the window in flight. Returns false when
+   * there is nothing to cancel — which is NOT an error on the wire: a
+   * `SEPARATE_ERROR` for a run that does not exist would be painted beside the
+   * one that does.
+   */
+  cancel(deck) {
+    if (!this.job || this.job.deck !== deck) return false;
+    this.job.cancel = true;
+    return true;
+  }
+
+  /** Release the slot, but only if `job` is the one holding it. */
+  release(job) {
+    if (this.job === job) this.job = null;
+    return this.job === null;
+  }
+}
+
+/**
+ * MAY THIS ENGINE SEPARATE WITH THE GEOMETRY THE MESSAGE ASKED FOR?
+ *
+ * THE GEOMETRY IS THE TIER'S, NOT THE MESSAGE'S. `pipelineVersion` folds
+ * `geometry` into the key and `StemCache.keyFor` takes it off the instance, so
+ * honouring a per-message override would write causal stems into a directory
+ * whose keys say `offline` — the key-and-bytes disagreement U2 put the tier on the
+ * instance to make unreachable. The field stays on the wire as the fallback lever
+ * the contract designed; taking it means a SECOND tier instance, not an argument
+ * here.
+ *
+ * `null` (the ordinary case) is "whatever this engine runs", not a request.
+ *
+ * @returns {null|string} null to go ahead, otherwise the refusal's message
+ */
+export function geometryRefusal(asked, tierGeometry) {
+  if (asked == null || asked === tierGeometry) return null;
+  return `this engine separates a file with the ${tierGeometry} window and was asked for `
+    + `${JSON.stringify(asked)} — a second geometry is a second tier, not an argument`;
+}
+
+/**
+ * A DECODED `AudioBuffer` AS THE RUNNER'S TRACK.
+ *
+ * Separated from the `decodeAudioData` call so the SHAPING can be gated: the
+ * decode itself is the platform's and needs a browser, but what is done with what
+ * comes back is a decision, and it was previously made in a file nothing could
+ * import.
+ *
+ * A MONO FILE IS UP-MIXED RATHER THAN REFUSED. The model's input is stereo and
+ * both channels of a mono file are the same signal; refusing one would refuse a
+ * legitimate Source for a reason the user cannot act on.
+ *
+ * BOTH CHANNELS ARE THE SAME ARRAY FOR MONO, AND THAT IS SAFE HERE RATHER THAN
+ * GENERALLY. Nothing downstream writes into `l` or `r`: `bufferRing.readAt` reads
+ * with `subarray`, `readWindow` writes only into the caller's scratch, and the
+ * assembler writes only into its own output. Aliasing them saves a copy of up to
+ * ~100 MB. If a future reader adds a writer, this is the line to change and the
+ * assertion in `test.js` names the aliasing so the change is visible.
+ *
+ * @param {{numberOfChannels:number, length:number, sampleRate:number, getChannelData:Function}} buf
+ */
+export function trackFromAudioBuffer(buf) {
+  if (!buf || !(buf.length > 0) || !(buf.numberOfChannels > 0)) {
+    throw new Error('offline: the decoder produced no audio, and a zero-length track caches as '
+      + 'a track that is silently not the track');
+  }
+  const l = buf.getChannelData(0);
+  const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;
+  return { l, r, frames: buf.length, sampleRate: buf.sampleRate };
+}
+
+/**
+ * THE MODEL, AS THE CALLBACK `runOffline` TAKES: one window of mix in, twelve
+ * planes out, over an INJECTED `infer` so the whole body can be driven under Node.
+ *
+ * `budgetMs` IS `Infinity`, WHICH IS WHAT EXEMPTS AN AHEAD-OF-TIME WINDOW FROM L3.
+ * A live chunk can be "too late to publish" and the scheduler demotes it to protect
+ * the priority deck; an offline window has no deadline at all, so
+ * `demotionDecision`'s `waitMs + estMs <= budgetMs` is trivially true.
+ *
+ * THE DEMOTION THROW IS DEFENCE, AND IT IS SAID OUT LOUD THAT IT IS UNREACHABLE
+ * THROUGH TODAY'S DECK. `Deck.infer` only returns `{demoted:true}` when
+ * `Number.isFinite(budgetMs)`, and this passes `Infinity` — a reviewer measured
+ * that and was right. It is kept, and gated HERE with an injected `infer` that
+ * returns one, because the alternative to a throw is folding a result that carries
+ * NO AUDIO into the track as `undefined`, and the day a future caller passes a
+ * finite budget that is a silent corruption rather than a named failure. A branch
+ * that cannot be reached through one caller is not the same as a branch that
+ * cannot be tested.
+ *
+ * THE PLANES ARE VIEWS OVER THE BUFFER THAT IS LENT BACK NEXT WINDOW, which is
+ * safe for exactly one reason: `OfflineAssembler.add` copies out of them
+ * immediately, and `runOffline` calls it before the next `separate`. That is the
+ * same borrow-and-return contract `LivePipeline.runChunk` runs on.
+ *
+ * ON A THROW THE BUFFERS ARE RE-OWNED BEFORE IT PROPAGATES. They went to the
+ * backend and are not coming back, so a caller that retried would otherwise meet a
+ * detached `ArrayBuffer` — the same repair `LivePipeline` makes, for the same
+ * reason.
+ *
+ * @param {object} o
+ * @param {(mix:ArrayBuffer, out:ArrayBuffer, budgetMs:number) => Promise<{mix:ArrayBuffer, stems:ArrayBuffer, demoted?:boolean, why?:string}>} o.infer
+ * @param {() => Promise<any>} [o.ensureSession]
+ * @param {number} [o.segment] @param {number} [o.planes]
+ */
+export function makeSeparator({ infer, ensureSession, segment = SEGMENT, planes = STEMS.length * 2 }) {
+  if (typeof infer !== 'function') {
+    throw new TypeError(`offline: makeSeparator needs the deck's infer(mix, out, budgetMs) `
+      + `(got ${typeof infer})`);
+  }
+  let mix = new ArrayBuffer(2 * segment * 4);
+  let out = new ArrayBuffer(planes * segment * 4);
+  return async (mixL, mixR, k) => {
+    // Idempotent, and HERE rather than before the run: a 109 MB load and ~8 s of
+    // shader compile must sit BEHIND every refusal, or a track that cannot be
+    // stored still costs the user the model.
+    if (ensureSession) await ensureSession();
+    const view = new Float32Array(mix);
+    view.set(mixL, 0);
+    view.set(mixR, segment);
+    let res;
+    try {
+      res = await infer(mix, out, Infinity);
+    } catch (e) {
+      mix = new ArrayBuffer(2 * segment * 4);
+      out = new ArrayBuffer(planes * segment * 4);
+      throw e;
+    }
+    if (res && res.demoted) {
+      throw new Error(`the GPU scheduler demoted window ${k} (${res.why}) — an ahead-of-time `
+        + 'window has no deadline, so it must never be demoted, and a demotion carries no audio');
+    }
+    mix = res.mix;
+    out = res.stems;
+    const stems = new Float32Array(out);
+    const planeViews = [];
+    for (let i = 0; i < planes; i++) planeViews.push(stems.subarray(i * segment, (i + 1) * segment));
+    return planeViews;
+  };
 }

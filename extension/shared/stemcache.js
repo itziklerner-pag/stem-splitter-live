@@ -813,8 +813,20 @@ export class StemCache {
    * @param {string} key
    * @param {object} meta  free-form; `videoId`, `title`, `seconds`, `hopSeconds`
    * @param {Record<string, Float32Array[]>} stems  stem name -> [L, R]
+   * @param {string|Iterable<string>|null} [pins]  keys this write may not evict
+   *
+   * `pins` IS ON `put` BECAUSE `put` IS THE ONLY WRITE PATH THAT EVICTS, and
+   * leaving it off made the pin set unreachable in the shipping product. MEASURED:
+   * `planEviction` gained a pin set for exactly this — "a File source's working
+   * set is ALSO the export source, and evicting it mid-export is catastrophic" —
+   * and `put()` then called `this.evict()` with none, so a pinned entry could be
+   * evicted by the very `put` that followed it and nothing anywhere would say so.
+   * The protection was DECLARED AND NOT EFFECTIVE. It is threaded from the caller
+   * that knows what is open — `CacheWriter.commit(cache, pins)` — because this
+   * class has no way to know, and inventing a default here would be the same
+   * guess wearing a different hat.
    */
-  async put(key, meta, stems) {
+  async put(key, meta, stems, pins = null) {
     const d = await dir(this.dirName);
     let bytes = 0;
     for (const s of STEMS) {
@@ -855,7 +867,7 @@ export class StemCache {
       depth: this.depth, geometry: this.geometry, drops: 0, ...meta,
     });
     await writeFile(d, MANIFEST, JSON.stringify(m));
-    return this.evict();
+    return this.evict(pins);
   }
 
   async delete(key) {
@@ -1036,10 +1048,19 @@ export class CacheWriter {
     return out;
   }
 
-  async commit(cache) {
+  /**
+   * @param {StemCache} cache
+   * @param {string|Iterable<string>|null} [pins] keys this commit may not evict
+   *
+   * THE PINS COME FROM HERE BECAUSE THIS IS THE LAYER THAT HAS A CALLER. `put()`
+   * evicts, and until this argument existed it evicted with no pin set at all —
+   * so `planEviction`'s pin-awareness was unreachable through the shipping write
+   * path and a pinned entry could be dropped by the next commit. See `put()`.
+   */
+  async commit(cache, pins = null) {
     if (this.aborted || this.frames === 0) return null;
     const meta = { ...this.meta, seconds: +(this.frames / SR).toFixed(2), drops: this.drops };
-    const r = await cache.put(this.key, meta, this.stems());
+    const r = await cache.put(this.key, meta, this.stems(), pins);
     return { key: this.key, frames: this.frames, ...r };
   }
 }
