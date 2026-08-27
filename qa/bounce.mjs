@@ -55,7 +55,9 @@
  * THE MUTATION TABLE - every assertion here was watched red
  * ===========================================================================
  *
- * Anchors cut against LANDED commit 5993d32. Re-run with
+ * Anchors cut against LANDED commit 5993d32 for the two files that exist there
+ * (`offscreen/playback-processor.js`, `offscreen/engine.js`) and against the
+ * commit that introduces them for the two this slice creates. Re-run with
  * `node qa/bounce-mutations.mjs`, which reports per anchor whether it still
  * MATCHES its source (a decayed instrument) and whether it still REDS (decay or
  * a real coverage loss). A pass count alone collapses the two.
