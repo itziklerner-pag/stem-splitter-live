@@ -203,6 +203,47 @@ for (const c of ['DECKS_FULL', 'DECK_BUSY', 'TAB_ON_OTHER_DECK']) {
  * THE LOUDNESS IS THE FEATURE, so it is what is asserted: `console.error` is
  * captured rather than trusted, because a check that returns a sentence nobody
  * prints is exactly the silent failure this replaces.
+ *
+ * ---- U8, #29: THE ELEVEN MUTATIONS THESE ASSERTIONS ARE HELD AGAINST -------
+ *
+ * THEY DO NOT RUN UNDER `node test.js`, AND THAT IS THE TRAP. `test.js` never
+ * loads this file, so re-running #29's battery there reports 766 passed / 0
+ * failed and means nothing at all -- a sweeper came one step from filing these
+ * assertions as toothless on exactly that evidence. The instrument's shape has
+ * to match the claim: these eleven are reported by
+ *
+ *     node extension/ui/dev/selftest.mjs
+ *
+ * and the runnable battery that applies them, one at a time, is
+ *
+ *     node tools/mutations/u8-seam-fixes.mjs M10 M11 M12 M12b M13 M14 M15 M16 M17 M18 M19
+ *
+ * ANCHORS CUT AGAINST `5993d32`. `made at` names the anchor TEXT rather than a
+ * line number, which decays first. Counts are this file's, clean total 124.
+ * The battery reports the ANCHOR and the RED separately (`INTEGRATION.md` 24):
+ * an anchor that stopped matching is a decayed instrument to re-cut, and a
+ * mutation that matches but stops redding is that OR a real coverage loss.
+ *
+ *   #     mutation                                       | made at                          | red here, and the control
+ *   ------+---------------------------------------------------+----------------------------------+------------------------
+ *   M10   checkArmCode accepts every code                 | audio-math.js the ARM_CODES guard | all SIX unknown-code assertions. Control: "a legal code says nothing" still PASSES.   118/6
+ *   M11   it returns the sentence but never prints it     | audio-math.js `console.error(msg);` | the FIVE that read the captured line. Control: "an UNKNOWN code is refused" still PASSES -- which is the point: the return value alone is the silent failure.   119/5
+ *   M12   it refuses a legal member (TAB_BUSY)            | audio-math.js the ARM_CODES guard | "TAB_BUSY is a member ... passes SILENTLY", "a legal code says nothing". Control: NO_ACTIVE_TAB's own row still PASSES.   122/2
+ *   M12b  the same, one member over (NO_ACTIVE_TAB)       | audio-math.js the ARM_CODES guard | its own member row + "a legal code says nothing". Control: TAB_BUSY's row still PASSES. The pair is what says the loop reads each member and not just one.   122/2
+ *   M13   the error names the offender, not the legal set | audio-math.js `[...ARM_CODES].join` | "...names THE WHOLE LEGAL SET". Controls: the offender, the entry point and the cost all still PASS.   123/1
+ *   M14   it names the legal set, not the offender        | audio-math.js `is not one of the` | "the error NAMES THE OFFENDING VALUE". Controls: the legal set and the entry point still PASS.   123/1
+ *   M15   it does not name the entry point                | audio-math.js `const msg = ` + `${where}` | "...names the entry point that received it". Controls: the offender and the legal set still PASS.   123/1
+ *   M16   it no longer says what an unknown code costs    | audio-math.js `An unknown code paints` | "...says what goes wrong if it is ignored". Controls: the offender and the legal set still PASS.   123/1
+ *   M17   embed.js drops the check on the live ARM_ERROR  | embed.js `checkArmCode(err.code, ` | "calls checkArmCode() on BOTH entry points". Control: the import assertion still PASSES.   123/1
+ *   M18   embed.js keeps its own copy of the vocabulary   | embed.js's audio-math.js import list | "...takes it from the unit's own audio-math.js". Control: the call-count assertion still PASSES -- the two call sites are still there, which is exactly how a second copy escapes a count.   123/1
+ *   M19   it refuses every member                         | audio-math.js the ARM_CODES guard | all EIGHT member rows + "a legal code says nothing".   115/9
+ *
+ * M11 IS THE ROW THIS BLOCK'S OWN APPARATUS FAILED FIRST. With the
+ * `console.error` capture spanning the assertions instead of the one call,
+ * `ok()` reported its failures THROUGH the captured `console.error` and the
+ * capture ate its own reds: seven of these mutations produced zero red lines.
+ * The swap is per call and restored before the `ok()` that reads it for that
+ * reason, and it is the reason this comment says so twice.
  */
 {
   /**

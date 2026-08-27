@@ -5994,7 +5994,18 @@ if (group('host')) {
    * against the `reads` this suite declares in `extension/unit.json`, both ways.
    * A path passed in as a variable is invisible to that scan, and the first
    * symptom is `unit` losing its declared read of `offscreen/host.js` with
-   * nothing saying why. Watched: it went red exactly that way.
+   * nothing saying why. Watched: it went red exactly that way, and the watch is
+   * runnable rather than remembered --
+   *
+   *     node tools/mutations/u8-seam-fixes.mjs M20
+   *
+   * anchored on the `import()` literal below and reported by
+   * `node tools/unit-check.mjs`, NOT by this file: "...and every one of them is
+   * really read by the suite that declares it -- NOT IN A READ POSITION, the
+   * declaration outlived the code: test.js -> offscreen/host.js", 90/1. The
+   * control is the assertion beside it, "...and no suite reads across the seam
+   * without declaring it", which stays green -- a needle that had simply
+   * stopped matching would take BOTH red.
    *
    * @param {string} where  the hole's path, extension-relative. It is in the
    *   assertion name, because "something threw" is not a repair instruction and
@@ -6069,6 +6080,38 @@ if (group('host')) {
    * The last row is the one that says the exemption below is not a free pass: it
    * still reds for a duty that is unreached and unnamed, exactly as it did
    * before v1.1 added two duties one tag ahead of their callers.
+   *
+   * ------ U8, #30 AND #28: THE FOUR MUTATIONS THIS GROUP REPORTS, AND WHERE ---
+   * THEY ARE RUN FROM. Unlike the table above, these are not a record of watches
+   * made once at branch time — they are a RUNNABLE battery, because a watch made
+   * at branch time expires the moment another slice edits the file it patched
+   * and nothing announces that (`INTEGRATION.md` §18). Re-run them:
+   *
+   *     node tools/mutations/u8-seam-fixes.mjs M1 M2 M3 M4
+   *
+   * ANCHORS CUT AGAINST `5993d32`. That file reports two answers per case and
+   * not one — whether the ANCHOR still matches, and whether the mutation still
+   * REDS — because a battery that reports a single pass count is how ten dead
+   * anchors once read as 44 of 51 rather than as ten instruments pointing at
+   * nothing.
+   *
+   * THE `made at` COLUMN NAMES THE ANCHOR TEXT, NOT A LINE NUMBER, on purpose:
+   * a line number is the first thing to decay and the battery patches text.
+   *
+   *   #    mutation                                          | made at                       | red here, and the control
+   *   -----+----------------------------------------------------+-------------------------------+-------------------------
+   *   M1   ui/host.js reads a bridge at module scope         | ui/host.js `const ME`         | "THE HOLE AT extension/ui/host.js IMPORTS INERTLY" + the foot. Control: the ENGINE hole's assertion still PASSES.   46/2, 84 did not run
+   *   M2   offscreen/host.js reads a bridge at module scope  | offscreen/host.js `const ME`  | "THE HOLE AT extension/offscreen/host.js IMPORTS INERTLY" + "THE SHIPPING EngineHost…" + the foot. Control: the capture refusal still PASSES — the report survived.   17/3, 112 did not run
+   *   M3   ui/host.js imports fine, send() throws on duty 1  | ui/host.js `send(msg) {`      | the foot ONLY. Controls: BOTH hole assertions still PASS. The case only the group guard can catch.   53/1, 78 did not run
+   *   M4   engine.js words the line off `fromCache` again    | engine.js `log(\`weights `      | "THE `weights …` LOG LINE IS WORDED FROM THE ANNOUNCED SOURCE". Control: the foot still PASSES.   131/1
+   *
+   * THE `did not run` COLUMN IS THE POINT OF THE GUARD AND ITS BOUND IN ONE
+   * NUMBER. M2 costs 112 of this group's 132 assertions: the report survives and
+   * names its cause, and it is NOT a covered run. An assertion that did not run
+   * reads exactly like one that passed if you only look at the red lines, which
+   * is why the battery checks every control as a PASS rather than as "absent
+   * from the reds", and why `tools/verify.mjs`'s coverage diff prints
+   * `no longer runs:` for each one.
    */
   const {
     assertHost, assertHostOption,
@@ -9220,6 +9263,33 @@ if (group('verifyModel')) {
    * THREE HOSTS, THREE ANSWERS, DRIVEN THROUGH THE SHIPPED `loadModel`. The
    * counts ride along because a source that arrived by spending a retry would
    * be the wrong finding reported as the right one.
+   *
+   * ---- U8, #28: THE FIVE MUTATIONS THESE ASSERTIONS ARE HELD AGAINST -------
+   * Runnable, and re-run against `main` rather than trusted from branch time
+   * (`INTEGRATION.md` §18 — a battery is only valid against the source it was
+   * cut for, and nothing announces the day that stops being true):
+   *
+   *     node tools/mutations/u8-seam-fixes.mjs M5 M6 M7 M8 M9
+   *
+   * ANCHORS CUT AGAINST `5993d32`. `made at` names the anchor TEXT, because a
+   * line number decays a slice sooner than the code does. Counts are this
+   * group's, whose clean total is 22.
+   *
+   *   #    mutation                                        | made at                                | red here, and the control
+   *   -----+--------------------------------------------------+----------------------------------------+-------------------------
+   *   M5   loadModel stops recording the announced phase   | modelcache.js `hasOwnProperty…, phase)` | "ALL THREE PROVENANCE VALUES CROSS THE SEAM", "…SHIPPED-WITH-THE-HOST case reports", "…a HEAL reports the attempt that SERVED". Control: the unannounced-Host assertion still PASSES.   19/3
+   *   M6   MODEL_SOURCES.bundled is worded 'downloaded'    | shared/host.js `bundled:`               | "…SHIPPED-WITH-THE-HOST case reports", "…the three READ differently". Control: all three still cross the seam.   20/2
+   *   M7   modelSourceWord guesses 'downloaded' again      | shared/host.js the `:` fallback branch  | "A HOST THAT ANNOUNCES NO PHASE IS QUOTED AS NAMING NO SOURCE". Control: all three still cross the seam.   21/1
+   *   M8   loadModel keeps `source` across attempts        | modelcache.js `source = null;` in the loop | "…it never INHERITS the dropped attempt's phase". Control: the plain heal still PASSES.   21/1
+   *   M9   two MODEL_SOURCES members read the same         | shared/host.js `cache:`                 | "…the three READ differently". Control: the bundled case still PASSES.   21/1
+   *
+   * M8 IS THE ROW THAT NEEDED A SECOND FIXTURE AND SAYS SO. Against the plain
+   * heal it first went GREEN: when the second ask announces a phase, that
+   * announcement overwrites the first whether or not anything was reset, so the
+   * assertion had no dynamic range for the thing it claimed. The discriminating
+   * fixture — a heal whose second ask announces NOTHING — is the one below, and
+   * M8 is red against it. A mutation that will not go red is a finding about the
+   * assertion, not about the mutation.
    */
   const sources = {};
   for (const [name, row] of [['cache', stored], ['download', wire], ['bundled', shipped]]) {
