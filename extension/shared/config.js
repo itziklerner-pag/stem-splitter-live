@@ -291,6 +291,52 @@ export const DUAL_MASTER_TRIM_DB = -3;
 export const STEM_CACHE_MAX_BYTES = 4 * 1024 * 1024 * 1024;
 
 /**
+ * 32-BIT-FLOAT stem cache cap — the DESKTOP tier, separate from the live one above.
+ *
+ * SEPARATE FROM THE LIVE TIER ON PURPOSE, and the separation is the decision rather
+ * than the number. Two different lifetimes must not compete for one budget: a File
+ * source's working set is ALSO the export source, and evicting it mid-export is
+ * catastrophic in a way evicting a prepared listen is not.
+ *
+ * THE ARITHMETIC, so the next reader revises a figure rather than guessing at one.
+ * Six stems, stereo, 32-bit float at 44 100 Hz = 6 * 2 * 4 = 48 bytes/frame
+ * = 2 116 800 B/s = 2.12 MB/s:
+ *
+ *     4 min   508.0 MB (484.5 MiB)      10 min  1 270.1 MB (1.183 GiB)
+ *     6 min   762.0 MB                          -- the SCOPE envelope
+ *
+ *   pinned floor    2 x 1.183 GiB = 2.37 GiB   two decks, both open on 10-minute File
+ *                                              sources. An export in flight READS a
+ *                                              pinned entry rather than adding one.
+ *   recall headroom 4 x 484.5 MiB = 1.89 GiB   four recent 4-minute tracks, so switching
+ *                                              back does not re-run the model.
+ *                   ------------------------
+ *                   4.26 GiB -> round up to 6 GiB
+ *
+ * WHAT 6 GiB BUYS: 2 pinned 10-minute entries PLUS 7 more 4-minute entries; or 5 x
+ * 10-minute with nothing pinned; or ~12 x 4-minute. Comparable LIBRARY DEPTH to the
+ * live tier's ~16 tracks at double the per-track cost -- the same reasoning the block
+ * above uses: a disk budget, not a track count.
+ *
+ * THE CAP MUST EXCEED THE PINNED FLOOR or the tier sits permanently over budget with
+ * nothing evictable. `separationRefusal()` in shared/stemcache.js is what keeps that
+ * honest rather than aspirational: it refuses BEFORE the decode instead of discovering
+ * it at commit, which is the same discipline `primeRefusal` applies to a live prime.
+ *
+ * WHY NOT 24-BIT TO SAVE 25 %. Two reasons and the second is fatal:
+ *   1. An export is defined as the untouched model outputs, so a fixed-point tier makes
+ *      it a re-quantisation rather than a copy -- "the model runs once" stops being true
+ *      in the way that matters.
+ *   2. `encodeWav`'s float path DOES NOT CLAMP while every fixed-point path does
+ *      (shared/wav.js). htdemucs outputs are not bounded to +/-1.0, so any fixed-point
+ *      tier clips inter-sample overs IRREVERSIBLY and the deliverable inherits it.
+ *      32f is forced, not chosen.
+ *
+ * TOTAL DISK for a Host that runs both tiers is therefore 4 GiB + 6 GiB = 10 GiB.
+ */
+export const STEM_CACHE_32F_MAX_BYTES = 6 * 1024 * 1024 * 1024;
+
+/**
  * Model — the IDENTITY half of the pin: what the bytes must be, never where they
  * come from.
  *
