@@ -183,6 +183,23 @@ not one an implementer restates on its own authority. Flagged in S11 (#12) and
 left open deliberately. The WRITE side — `muted`, `currentTime`, `playbackRate`
 — is exact, closed, and enforced at both ends.
 
+**A5 — a File source is decoded at the model's clock, and that is ratified
+here.** Nothing in this repository decoded a file before Phase 4; every sample
+the model saw arrived from a tab capture, and `decodeAudioData` appeared nowhere
+in the tree. The ahead-of-time separation runner (`extension/engine/offline.js`,
+U5a/#41) decodes one on the engine's single 44 100 Hz `AudioContext`, which means
+Blink resamples a file that is not already at 44 100
+(`AudioBus::TryCreateBySampleRateConverting` → `SincResampler`, 32 taps,
+Blackman; `docs/AUDIO.md` §1.3 rates it *Good*). **That breaches no rule and it
+is still recorded**, because the rule it appears to touch — L-rule,
+`CONTRIBUTING.md`, "no JS resampling anywhere on the live path", whose absolute
+prohibition is on conversion *between the capture clock and the model clock* —
+predates the existence of a Source that is not a capture. There is no capture
+clock in this path and no JS resampler in it. Left unwritten, a decoder call in a
+codebase whose rules say "no resampling" is a thing a future reader reverts, so
+it is written in both places: this amendment and the L-rule bullet in
+`CONTRIBUTING.md`.
+
 ## Consequences
 
 Positive:

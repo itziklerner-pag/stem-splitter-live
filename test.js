@@ -158,7 +158,8 @@ import {
   makeLivePlan, chunkPlan, makeFades, LiveEmitter, readWindow, primedPct, skipFrames, STEM_PLANES,
   PASS_PLANE_L, PASS_PLANE_R,
 } from './extension/engine/live.js';
-import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler, runOffline } from './extension/engine/offline.js';
+import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler, runOffline,
+  runSeparation, SEPARATE_CODES, checkSeparateCode, separateError } from './extension/engine/offline.js';
 import { StemRingWriter, stemRingByteLength, PLANES, H_READ, H_PLAY } from './extension/shared/stemring.js';
 import { outputTick, OUTPUT_DEAD_HOLD_SEC, OUTPUT_DEAD_HOLD_FRAMES, MIXER_SILENT_PEAK } from './extension/offscreen/live.js';
 import {
@@ -7969,6 +7970,402 @@ if (group('offline')) {
     ok('channels of different lengths are refused by the ring adapter',
       threw(() => bufferRing(new Float32Array(10), new Float32Array(11))) !== null);
   }
+
+  head('offline — the whole run: the Host’s bytes in, one 32-bit-float entry out');
+  /**
+   * `runSeparation` DRIVEN OVER PORTS, which is the only way this sequence can
+   * be gated at all: the shipping caller is `offscreen/engine.js`, which owns an
+   * AudioContext, a Host and two decks, and none of those exist under Node. What
+   * is asserted here is the ORDER, the REFUSALS and the WIRE — the part that can
+   * be wrong in a way nothing downstream notices, because a run that quietly did
+   * the wrong thing still produces a plausible cache entry.
+   *
+   * THE SEPARATOR GIVES EVERY PLANE ITS OWN CONSTANT. Not because the model does
+   * — it is a fixture — but because a routing defect is invisible under one that
+   * does not: an identity separator makes all twelve planes the same audio, so
+   * `planes[k*2 + c]` fanning one stem out over six, or collapsing L into R,
+   * reconstructs perfectly and asserts nothing. Twelve distinct constants make
+   * the mapping readable in the committed entry. (The MODEL's own claim — that
+   * six real stems differ — belongs to `model-parity` and `backend-audio`, which
+   * run the real weights; it cannot be made here without asserting the fixture.)
+   */
+  {
+    const o = installOpfs();
+    const seenCodes = new Set();
+    try {
+      const FRAMES = STRIDE * 2 + 1000;              // exactly two windows
+      const LONG = STRIDE * 4 + 1000;                // four, so a cancel has somewhere to land
+      const bytesOf = (n) => new Uint8Array(Array.from({ length: n }, (_, i) => (i * 7 + 3) & 255)).buffer;
+      const trackOf = (frames) => ({ l: noise(frames, 61), r: noise(frames, 63), frames, sampleRate: SR });
+
+      const newTier = () => new StemCache(400 * 1024 * 1024, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
+      /** Twelve planes, each a different constant. See the note above. */
+      const planeConst = (i) => (i + 1) / 100;
+      const separator = (seen, over = null) => (mixL, mixR, k) => {
+        seen.push(k);
+        if (over) over(k);
+        const planes = [];
+        for (let i = 0; i < STEMS.length * 2; i++) {
+          const a = new Float32Array(SEGMENT);
+          a.fill(planeConst(i));
+          planes.push(a);
+        }
+        return planes;
+      };
+      /**
+       * One run, with every port defaulted and any of them replaceable. `emitted`
+       * is the WHOLE wire output of the run — nothing is filtered out of it, so
+       * an assertion about what a run does NOT send has something to read.
+       */
+      const run = async (over = {}) => {
+        const emitted = [];
+        const seen = [];
+        let clock = 1000;
+        const reads = [];
+        const ports = {
+          deck: 'A',
+          token: 'tok',
+          source: { title: 'a file' },
+          hopSeconds: 1.95,
+          cache: newTier(),
+          pins: null,
+          sourceBytes: async (t) => { reads.push(t); return bytesOf(64); },
+          decode: async () => trackOf(FRAMES),
+          separate: separator(seen),
+          makeWriter: (k, m) => new CacheWriter(k, m),
+          emit: (msg) => emitted.push(msg),
+          now: () => { clock += 100; return clock; },
+          ...over,
+        };
+        /**
+         * THE SHIM IS ONE FILESYSTEM FOR THE WHOLE BLOCK, so a fresh `StemCache`
+         * is a fresh instance over the SAME directory — which is the point of
+         * the tier being a directory rather than an object. Every run therefore
+         * starts from an empty tier, so "nothing was written" below is a claim
+         * about THIS run rather than an accident of ordering.
+         */
+        if (ports.cache.clear) await ports.cache.clear().catch(() => {});
+        const r = await runSeparation(ports);
+        if (r.code) seenCodes.add(r.code);
+        return { r, emitted, seen, reads, ports };
+      };
+
+      // ------------------------------------------------------------ the happy path
+      const good = await run();
+      ok('a whole run commits ONE entry and says so, carrying the key, the frames and the '
+         + 'eviction result  [entry point: runSeparation over injected ports]',
+        good.r.ok === true && good.r.frames === FRAMES
+        && good.emitted.filter((e) => e.type === 'SEPARATE_DONE').length === 1
+        && good.emitted[good.emitted.length - 1].type === 'SEPARATE_DONE'
+        && good.emitted[good.emitted.length - 1].key === good.r.key
+        && good.emitted[good.emitted.length - 1].frames === FRAMES
+        && good.emitted[good.emitted.length - 1].cache
+        && typeof good.emitted[good.emitted.length - 1].cache.bytes === 'number',
+        `ok=${good.r.ok} frames=${good.r.frames} last=${good.emitted[good.emitted.length - 1].type}`);
+      ok('...and the Host was asked for the file EXACTLY ONCE — a Host may mint a ONE-SHOT '
+         + 'token, and a second read fails in a way that presents as a corrupt file',
+        good.reads.length === 1 && good.reads[0] === 'tok', `${good.reads.length} reads: [${good.reads}]`);
+      ok('...and every window was separated exactly once, in order',
+        good.seen.length === 2 && good.seen.join(',') === '0,1', `[${good.seen}]`);
+
+      ok('the run’s WHOLE wire output is SEPARATE_* and never STATE — progress rides its own '
+         + 'message because push() coalesces on a microtask and would drop or drag it',
+        good.emitted.length > 0
+        && good.emitted.every((e) => e.type === 'SEPARATE_PROGRESS' || e.type === 'SEPARATE_DONE')
+        && good.emitted.every((e) => e.deck === 'A'),
+        [...new Set(good.emitted.map((e) => e.type))].join(','));
+      {
+        const prog = good.emitted.filter((e) => e.type === 'SEPARATE_PROGRESS');
+        const stages = prog.map((e) => e.stage);
+        ok('every stage is reported, in order, once each for fetch/decode/commit and once per '
+           + 'window for separate',
+          stages.join(',') === `fetch,decode,${'separate,'.repeat(2)}commit`, stages.join(','));
+        ok('...and the five fields state.job never wrote are the ones that arrive — window, '
+           + 'windows, pct, elapsedMs, etaMs',
+          prog.every((e) => 'window' in e && 'windows' in e && 'pct' in e
+            && 'elapsedMs' in e && 'etaMs' in e),
+          Object.keys(prog[0]).join(','));
+        const sep = prog.filter((e) => e.stage === 'separate');
+        ok('...and pct is the fraction of the track SEPARATED, ending at exactly 1',
+          sep.length === 2 && sep[0].pct === 0.5 && sep[1].pct === 1
+          && prog[prog.length - 1].pct === 1,
+          sep.map((e) => e.pct).join(','));
+        /**
+         * THE ONE THING A CLOCK IS READ FOR, AND IT IS STILL AN ORDER CLAIM.
+         * `now` is injected and rises 100 per read, so if the separate-stage
+         * messages carried `runOffline`'s own elapsed instead of the whole run's
+         * they would go BACKWARDS at the decode/separate boundary. This asserts
+         * the re-stamp, not a duration; no assertion in this file gates on how
+         * long anything took.
+         */
+        ok('elapsedMs never goes backwards across a run, so one message’s elapsed means what '
+           + 'the next one’s does  [entry point: runSeparation’s onProgress re-stamp]',
+          prog.every((e, i) => i === 0 || e.elapsedMs >= prog[i - 1].elapsedMs),
+          prog.map((e) => e.elapsedMs).join(','));
+      }
+
+      // ------------------------------------------------------- what landed on disk
+      {
+        const back = await good.ports.cache.get(good.r.key);
+        ok('the entry is in the 32-BIT-FLOAT tier and records what it is — depth 32, the '
+           + 'symmetric geometry, and 0 drops by construction',
+          back !== null && back.meta.depth === 32 && back.meta.geometry === 'offline'
+          && back.meta.drops === 0 && back.meta.frames === FRAMES,
+          back ? `depth ${back.meta.depth} ${back.meta.geometry} drops ${back.meta.drops}` : 'NO ENTRY');
+        ok('...and its key carries the tier, so it can never be served where a live 16-bit '
+           + 'causal entry was asked for',
+          /-d32f-go$/.test(good.r.key), good.r.key);
+        ok('...and it is keyed by the file’s CONTENT: 64 hex characters, not videoIdFromUrl’s '
+           + 'null, which every file would share',
+          /^[0-9a-f]{64}--/.test(good.r.key) && back !== null && /^[0-9a-f]{64}$/.test(back.meta.fileId),
+          good.r.key.slice(0, 70));
+        ok('...and NOTHING went into the live tier — two instances, two directories',
+          o.names(CACHE_DIR).length === 0 && o.names(CACHE_DIR_32F).length > 0,
+          `live ${o.names(CACHE_DIR).length} files, 32f ${o.names(CACHE_DIR_32F).length}`);
+
+        /**
+         * THROUGH `Math.fround`, because the tier is 32-BIT FLOAT and the fixture
+         * constants are doubles: 0.01 is not representable in float32 and comes
+         * back as 0.009999999776. Rounding the EXPECTATION rather than widening
+         * the comparison keeps this an equality — a tolerance here would also
+         * accept a neighbouring plane's constant if the two were ever close.
+         */
+        const got = STEMS.map((s) => [back.stems[s][0][0], back.stems[s][1][0]]);
+        const want = STEMS.map((s, k) => [Math.fround(planeConst(k * 2)), Math.fround(planeConst(k * 2 + 1))]);
+        ok('the twelve planes land as six stereo stems in STEMS order, L before R — a fan-out '
+           + 'or an L/R collapse would show here and reconstructs perfectly under an identity '
+           + 'separator  [entry point: runSeparation -> CacheWriter.append -> StemCache.put]',
+          JSON.stringify(got) === JSON.stringify(want), `${JSON.stringify(got)} vs ${JSON.stringify(want)}`);
+        ok('...and the run really distinguished them: the twelve values are twelve DIFFERENT '
+           + 'numbers, so the assertion above had something to be wrong about',
+          new Set(got.flat()).size === STEMS.length * 2, String(new Set(got.flat()).size));
+        let worst = 0;
+        let holes = 0;
+        STEMS.forEach((s, k) => {
+          const want0 = Math.fround(planeConst(k * 2));
+          for (const v of back.stems[s][0]) {
+            const d = Math.abs(v - want0);
+            if (d > worst) worst = d;
+            if (v === 0) holes++;
+          }
+        });
+        /**
+         * AND IT SAYS WHAT IT CANNOT SEE. Both windows carry the SAME constant
+         * here, so complementary ramps sum to a no-op and a butt splice would
+         * reconstruct this exactly — the blind spot measured in this slice and in
+         * U7's. What this DOES see is a window that never ran, a tail left as
+         * zeros, or a plane read from the wrong offset, every one of which lands
+         * five orders of magnitude away from the bound: the defect signal is the
+         * constant itself, ~1e-2, against a 1.19e-7 gate.
+         */
+        ok('...and every sample of every stem carries its constant to the float32 floor with no '
+           + 'zeros anywhere — a dropped window or a short tail reads back as silence. IT CANNOT '
+           + 'SEE THE JOIN: both windows carry the same value, so a splice reconstructs it too, '
+           + 'which is what the separate join instrument above is for',
+          worst <= 2 ** -23 && holes === 0,
+          `worst ${worst.toExponential(2)} against 2^-23 = ${(2 ** -23).toExponential(2)}, `
+          + `${holes} zero samples of ${STEMS.length * back.stems[STEMS[0]][0].length}`);
+      }
+
+      // -------------------------------------------- the refusals, and where they sit
+      {
+        const r = await run({ sourceBytes: async () => { throw new Error('the token is spent'); } });
+        ok('a Host that cannot hand over the bytes is SOURCE_UNREADABLE and nothing is written',
+          r.r.code === 'SOURCE_UNREADABLE' && /token is spent/.test(r.r.message)
+          && r.seen.length === 0 && (await r.ports.cache.list()).length === 0, r.r.code);
+      }
+      {
+        const r = await run({ sourceBytes: async () => new ArrayBuffer(0) });
+        ok('an EMPTY file is SOURCE_REJECTED — it hashes to a perfectly valid-looking identity '
+           + 'and would cache as a track that is silently not the track',
+          r.r.code === 'SOURCE_REJECTED' && /empty/.test(r.r.message) && r.seen.length === 0, r.r.code);
+      }
+      {
+        const r = await run({ decode: async () => { throw new Error('not audio'); } });
+        ok('a file this platform cannot decode is DECODE_FAILED, not a throw out of the runner',
+          r.r.code === 'DECODE_FAILED' && r.seen.length === 0, r.r.code);
+      }
+      {
+        const r = await run({ decode: async () => ({ ...trackOf(FRAMES), sampleRate: 48000 }) });
+        ok('a decode at the WRONG CLOCK is refused, naming both rates — the model would be fed '
+           + 'material at a rate it has never heard and the entry would be keyed as if it were '
+           + 'not  [this is the assertion that fails when it cannot look]',
+          r.r.code === 'DECODE_FAILED' && /48000/.test(r.r.message) && /44100/.test(r.r.message)
+          && r.seen.length === 0, r.r.message);
+      }
+      {
+        const tiny = new StemCache(1000, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
+        const r = await run({ cache: tiny });
+        ok('a track that cannot fit in the tier is refused BEFORE the model — CACHE_FULL, and '
+           + 'the separator was never called once  [W3: a run that succeeds and then cannot be '
+           + 'stored has spent minutes of GPU for nothing]',
+          r.r.code === 'CACHE_FULL' && r.seen.length === 0, `${r.r.code}, ${r.seen.length} windows`);
+      }
+      {
+        const blind = {
+          depth: 32, maxBytes: 1e12, geometry: 'offline',
+          keyFor: (id, h) => `${id}--fake`,
+          list: async () => { throw new Error('the directory is gone'); },
+        };
+        const r = await run({ cache: blind });
+        ok('a tier that cannot be READ is CACHE_UNREADABLE rather than assumed empty — there '
+           + 'is no way to tell whether the track fits, so the run does not start',
+          r.r.code === 'CACHE_UNREADABLE' && r.seen.length === 0, r.r.code);
+      }
+      {
+        const r = await run({ separate: separator([], (k) => { if (k === 1) throw new Error('the model fell over'); }) });
+        ok('a window the model fails on is SEPARATE_FAILED, naming the window, and NOTHING is '
+           + 'committed',
+          r.r.code === 'SEPARATE_FAILED' && /window 1 of/.test(r.r.message)
+          && (await r.ports.cache.list()).length === 0, r.r.message);
+      }
+      {
+        /** A writer one frame short of the file. `fileCommitRefusal` is the policy. */
+        const short = (k, m) => {
+          const w = new CacheWriter(k, m);
+          const real = w.append.bind(w);
+          w.append = (planes, len) => real(planes, len - 1);
+          return w;
+        };
+        const r = await run({ makeWriter: short });
+        ok('a run that came up SHORT is COMMIT_REFUSED — offline there is no causal tail to '
+           + 'forgive, so completeness is equality and a short run is a bug in the runner',
+          r.r.code === 'COMMIT_REFUSED' && /1 frame short of/.test(r.r.message)
+          && (await r.ports.cache.list()).length === 0, r.r.message);
+      }
+      {
+        const wontWrite = (k, m) => {
+          const w = new CacheWriter(k, m);
+          w.commit = async () => { throw new Error('the disk said no'); };
+          return w;
+        };
+        const r = await run({ makeWriter: wontWrite });
+        ok('a WRITE that fails is COMMIT_FAILED and not COMMIT_REFUSED — one says re-running '
+           + 'cannot help and the other says it might, and a UI offers different things for them',
+          r.r.code === 'COMMIT_FAILED' && /disk said no/.test(r.r.message), r.r.message);
+      }
+
+      // ----------------------------------------------------------------- cancellation
+      {
+        const seen = [];
+        let stop = false;
+        const cache = newTier();
+        await cache.clear().catch(() => {});
+        const emitted = [];
+        /** Held, because the writer's own state is what the next assertion reads. */
+        let writer = null;
+        const r = await runSeparation({
+          deck: 'B',
+          token: 'tok',
+          source: { title: 'a long file' },
+          hopSeconds: 1.95,
+          cache,
+          pins: null,
+          sourceBytes: async () => bytesOf(64),
+          decode: async () => trackOf(LONG),
+          separate: separator(seen, (k) => { if (k === 1) stop = true; }),
+          makeWriter: (k, m) => { writer = new CacheWriter(k, m); return writer; },
+          emit: (msg) => emitted.push(msg),
+          cancelled: () => stop,
+          now: () => Date.now(),
+        });
+        seenCodes.add(r.code);
+        ok('a cancel raised during a window lets THAT window finish and stops before the next — '
+           + 'abandoning a separate() in flight is the wedge inference.worker.js exists to prevent',
+          seen.join(',') === '0,1' && r.code === 'CANCELLED', `[${seen}] -> ${r.code}`);
+        ok('...and the run had somewhere to stop: the plan was four windows, so two unrun is a '
+           + 'claim with something to be wrong about',
+          makeOfflinePlan(LONG).windows === 4, String(makeOfflinePlan(LONG).windows));
+        ok('...and NOTHING LANDED — no entry, and no stem file under that key',
+          (await cache.list()).length === 0 && o.names(CACHE_DIR_32F).every((f) => !f.startsWith(r.key)),
+          `${(await cache.list()).length} entries`);
+        /**
+         * AND THE ASSERTION ABOVE IS NOT THE ONE THAT WATCHES `abort()`. MEASURED
+         * by mutation: delete the `abort()` on the cancel path and nothing lands
+         * anyway, because this runner appends ONCE after the loop and a cancelled
+         * run has never appended at all — `commit()` returns null on `frames === 0`
+         * without ever consulting `aborted`. So "nothing landed" is true for a
+         * reason that has nothing to do with the cancellation mechanism, and it
+         * would go on being true through the change that makes `abort()` the only
+         * thing holding the line: a per-window append, which is the obvious way to
+         * stop holding the whole track twice. This reads the writer instead.
+         */
+        ok('...and the WRITER itself came out aborted, not merely empty — the assertion above '
+           + 'cannot see that, because a cancelled run never appended anything and commit() '
+           + 'returns null on an empty writer whether or not abort() was ever called',
+          writer !== null && writer.aborted === true && writer.frames === 0,
+          writer ? `aborted ${writer.aborted}, frames ${writer.frames}` : 'NO WRITER');
+        ok('...and the wire says so: a SEPARATE_ERROR, and no SEPARATE_DONE anywhere in the run',
+          emitted.some((e) => e.type === 'SEPARATE_ERROR' && e.code === 'CANCELLED')
+          && !emitted.some((e) => e.type === 'SEPARATE_DONE'),
+          emitted.map((e) => e.type).join(','));
+      }
+
+      // ------------------------------------------------------------ the vocabulary
+      /**
+       * NINE OF ELEVEN, and the two that are missing are named rather than
+       * rounded away: `BUSY` and `GEOMETRY_UNSUPPORTED` are raised by
+       * `offscreen/engine.js`, which needs a Host and an AudioContext and cannot
+       * be imported here. Both go through `separateError` — the block below is
+       * what asserts that building the envelope is what runs the check, so a
+       * raise site in that file cannot skip it either.
+       */
+      ok('every code this runner produced is a member of the declared set, and it produced '
+         + `nine of the eleven  [#29's lesson: ARM_ERROR shipped a closed set nothing consulted]`,
+        [...seenCodes].every((c) => SEPARATE_CODES.has(c)) && seenCodes.size === 9,
+        `${seenCodes.size} of ${SEPARATE_CODES.size} exercised: ${[...seenCodes].sort().join(',')}`);
+    } catch (e) {
+      blockThrew('offline — the whole run', e);
+    } finally { o.restore(); }
+  }
+
+  head('offline — SEPARATE_ERROR’s code is a CLOSED VOCABULARY, checked where it is built');
+  {
+    /**
+     * THE CAPTURE IS ITS OWN CONTROL. A console spy that observes nothing looks
+     * exactly like one watching a function that says nothing, so both directions
+     * are asserted: a legal code logs NOTHING and an illegal one logs EXACTLY ONE
+     * line. Restored in a `finally`, because a suite that leaves console.error
+     * replaced takes every later red with it.
+     */
+    const seen = [];
+    const real = console.error;
+    console.error = (...a) => seen.push(a.join(' '));
+    let legal, illegal, envelope;
+    try {
+      legal = checkSeparateCode('CANCELLED', 'here');
+      const quiet = seen.length;
+      illegal = checkSeparateCode('NO_SOURCE', 'here');
+      envelope = separateError('A', 'ALSO_NOT_A_CODE', 'the message the user sees');
+      console.error = real;
+      ok('a declared code passes and says NOTHING — the control, without which a spy that '
+         + 'observes nothing is indistinguishable from a check that never fires',
+        legal === null && quiet === 0, `${legal} / ${quiet} lines`);
+    } finally { console.error = real; }
+    ok('an undeclared code is reported LOUDLY, naming the code and the whole legal set  '
+       + '[entry point: checkSeparateCode]',
+      typeof illegal === 'string' && /NO_SOURCE/.test(illegal)
+      && [...SEPARATE_CODES].every((c) => illegal.includes(c)),
+      illegal || 'ACCEPTED AN UNDECLARED CODE');
+    ok('...and it does NOT throw and does NOT change the message — the run has already failed, '
+       + 'and replacing its reason with a second failure takes the user’s problem off the screen',
+      envelope.type === 'SEPARATE_ERROR' && envelope.code === 'ALSO_NOT_A_CODE'
+      && envelope.message === 'the message the user sees' && envelope.deck === 'A');
+    ok('...and building the envelope is what runs the check, so a raise site cannot skip it: '
+       + 'both calls above were reported',
+      seen.length === 2 && seen.every((l) => /is not one of the/.test(l)), `${seen.length} lines`);
+    /**
+     * A TWO-WAY PIN. A slice that adds a code updates this number, which is the
+     * moment to ask whether the receiver really has a different thing to do with
+     * it — the question that keeps a vocabulary from becoming a list of
+     * adjectives.
+     */
+    ok('the set is exactly the eleven codes declared, each one a different thing a receiver '
+       + 'can do about it',
+      SEPARATE_CODES.size === 11 && SEPARATE_CODES.has('BUSY') && SEPARATE_CODES.has('CANCELLED')
+      && SEPARATE_CODES.has('COMMIT_REFUSED') && SEPARATE_CODES.has('COMMIT_FAILED'),
+      `${SEPARATE_CODES.size}: ${[...SEPARATE_CODES].join(',')}`);
+  }
   } catch (e) { escaped = e; }
   ok('NOTHING ESCAPED THIS GROUP — an unexpected throw is a named red here rather than a '
      + 'stack trace that takes the whole file\u2019s verdict down with it  '
@@ -9422,8 +9819,14 @@ if (group('host')) {
    *   - a name below that is in no duty table is a red too, so a duty that gets
    *     renamed or removed cannot leave a permanent hole behind it.
    */
+  /**
+   * `sourceBytes` LEFT THIS TABLE IN U5a, WHICH IS THE POINT OF THE TABLE. The
+   * ahead-of-time separation runner is its consumer and `offscreen/engine.js`
+   * now calls it, so the exemption is deleted in the same commit as the caller
+   * — the pin below is what made that unmissable rather than remembered: it went
+   * RED naming the duty the moment the call site landed.
+   */
   const DECLARED_AHEAD_OF_ITS_CONSUMER = Object.freeze({
-    sourceBytes: 'the ahead-of-time separation runner, which reads a Source that is a file',
     // `exportSink` WAS HERE, and U11 (#42) deleted it in the same commit as its
     // caller, which is the discipline the assertion below exists to enforce:
     // `offscreen/engine.js`'s EXPORT_START case now calls `host.exportSink(plan)`,

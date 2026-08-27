@@ -109,6 +109,17 @@ is fine, but start from the reason it was settled rather than from scratch —
   - `extension/engine/pitch.js` interpolates **filter coefficients** between
     sub-phase branches, not the signal. Do not read this as "linear interpolation
     is fine now" — signal interpolation measured −8.6 dB and is banned.
+  - **A File source is decoded at the model's clock, and that is RATIFIED rather
+    than tolerated.** `decodeAudioData()` on the 44 100 Hz context converts a file
+    that is not already at 44 100 inside Blink
+    (`AudioBus::TryCreateBySampleRateConverting` → `SincResampler`, 32 taps,
+    Blackman) — the call `docs/AUDIO.md` §1.3 evaluates and rates *Good*. It
+    breaches no letter of the rule above: there is no capture clock in that path
+    (a file is not a tab) and no JS resampler anywhere in it. It is written down
+    because it is a **new** clock conversion the rule predates, and a decoder call
+    in a codebase whose rules say "no resampling" is otherwise exactly the thing a
+    future reader reverts. `extension/engine/offline.js` is the only path that
+    does it, and ADR 0001 amendment A5 carries the same sentence.
 - **Speed is key-locked. It changes tempo and nothing else.** TRANSPOSE is the only
   control that moves the key, at any speed, and the two compose. A user who slows a
   video down to learn a line expects the key to stay put, because every player they

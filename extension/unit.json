@@ -105,10 +105,6 @@
     {
       "path": "workers/workerbackend.js",
       "why": "Backend #1 — the unit's own implementation of the Backend the EngineHost hands over, and the only file in the unit whose sole importer is a hole (offscreen/host.js imports it; nothing else in the tree does). Seeded here because a crawl that stops at the hole misses it AND everything below it: workers/inference.worker.js, engine/demucs.js, the tensor names and the six-stem layout — the most unit-ish code in the repository, sitting behind the one edge a crawl must not follow. ADR 0001 decision 3 names it for the same reason, and workers/workerbackend.js's own header says a computed closure must seed it explicitly. It is a root, not an entry: an entry is a thing a Host loads, and no Host loads this — the Host CHOOSES it."
-    },
-    {
-      "path": "engine/offline.js",
-      "why": "The SYMMETRIC ahead-of-time geometry (U5a, #41) — the window plan, the complementary-ramp overlap-add, and the whole-buffer adapter that lets engine/live.js's readWindow be REUSED rather than re-derived. A root ONLY BECAUSE IT LANDED BEFORE ITS CALLER: the module and its identity gate are a reviewable piece on their own and the separation runner that imports it is the next one. THE MOMENT THAT RUNNER LANDS the crawl reaches this file from offscreen/engine.js and THIS ENTRY SHOULD BE DELETED — unlike engine/pitchbank.js, which is a root because nothing imports it at all, and workers/workerbackend.js, which is a root because its only importer is a hole. Left standing it would claim a reachability exemption the file no longer needs, which is exactly the kind of declaration that outlives its reason."
     }
   ],
 

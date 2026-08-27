@@ -34,11 +34,17 @@
  * file touches — plain web platform, all of it — so a second Host supplies the
  * five duties and this file runs unchanged (ADR 0001 decision 5).
  *
- * There is NO export job — the header said there was for a long time. `state.job`
- * survives as a shape: only `status`, `error` and `stage` are ever written (by
- * `fail()`), the other five fields only by the reset literal, and no surface
- * reads any of it. It is kept, not revived, because `fail()` has nowhere else to
- * record and removing it is not this slice's change.
+ * THE EXPORT JOB IS GONE AND ITS SHAPE IS NOW ON THE WIRE. `state.job` carried
+ * five progress fields — `chunk`, `chunks`, `pct`, `elapsedMs`, `etaMs` — that
+ * NOTHING EVER WROTE, kept because the object had to survive for `fail()`. Those
+ * five are what an ahead-of-time separation actually needs to report, and they
+ * ride `SEPARATE_PROGRESS` (`engine/offline.js`) rather than this object.
+ *
+ * THEY COULD NOT HAVE RIDDEN `STATE`. `push()` coalesces on a microtask and
+ * ships the whole snapshot, so a per-window tick would either be dropped by the
+ * coalescer or drag the entire state hundreds of times a track. So the shape is
+ * revived on its own message and the dead fields are retired here: `state.job`
+ * is now exactly the three `fail()` writes and `DIAG` reads, and nothing else.
  *
  * ---------------------------------------------------------------------------
  * MODE 3 (dual deck). Two decks live in THIS document, because Chrome allows
@@ -72,6 +78,15 @@ import { CachedDeck, resumeSeek } from './cacheddeck.js';
 import { StemCache, CacheWriter, cacheKey, videoIdFromUrl,
   primeRefusal, commitRefusal, CACHE_DIR_32F } from '../shared/stemcache.js';
 import { ExportRun, ExportError, checkExportCode } from '../engine/export.js';
+/**
+ * THE AHEAD-OF-TIME RUNNER, AND EVERYTHING PLATFORM-BOUND IT NEEDS IS SUPPLIED
+ * FROM HERE. `engine/offline.js` owns the symmetric geometry, the window loop
+ * and the order of the refusals; this file owns the AudioContext, the Host and
+ * the decks, and hands them over as ports. That split is what lets the whole run
+ * — the sequence, the wire and the cancellation — be driven under plain Node in
+ * `test.js` group('offline') with no browser, no Host, no worker and no model.
+ */
+import { runSeparation, separateError } from '../engine/offline.js';
 // The transpose's accepted range, imported for the REFUSAL MESSAGE and nothing
 // else. A hard-coded "[-6, +6]" in a log line is a second copy of a contract
 // that lives in engine/pitch.js, and the day the range moves it becomes a log
@@ -149,7 +164,12 @@ const state = {
    * `gpu.report()`.
    */
   gpu: { priority: 'A' },
-  job: { status: 'idle', chunk: 0, chunks: 0, pct: 0, elapsedMs: 0, etaMs: null, error: null, stage: null },
+  /**
+   * WHAT `fail()` RECORDS, and the whole of it. The five progress fields this
+   * object used to carry were never written by anything; they are the shape
+   * `SEPARATE_PROGRESS` revived — see the header.
+   */
+  job: { status: 'idle', error: null, stage: null },
   log: [],
 };
 
@@ -560,24 +580,27 @@ const deckLoaded = (d) => deckIsLive(d) ||
 const cache = new StemCache(STEM_CACHE_MAX_BYTES);
 
 /**
- * THE 32-BIT-FLOAT TIER — the DELIVERABLE's cache, and a different thing from
- * the one above with a different lifetime, its own directory and its own cap.
- * `shared/config.js` STEM_CACHE_32F_MAX_BYTES carries the arithmetic; the short
- * version is that a File source's working set is ALSO the export source, and
- * evicting it mid-export is catastrophic in a way evicting a prepared listen is
- * not, so the two must not compete for one budget.
+/**
+ * THE 32-BIT-FLOAT TIER — a File source's stems, and a SECOND `StemCache`.
  *
- * NOTHING IN THIS BUILD WRITES TO IT. The ahead-of-time separation runner is the
- * writer and it is a later slice; this engine only ever READS the tier, through
- * `EXPORT_START`. Constructing it here anyway is what makes the export path
- * complete for a second Host, which supplies `exportSink` and drives the same
- * message.
+ * ITS OWN DIRECTORY, ITS OWN CAP, ITS OWN KEY SPACE, and all three matter. The
+ * directory is what makes the two manifests independent (`CACHE_DIR_32F`); the
+ * cap is separate because two lifetimes must not compete for one budget — a File
+ * source's working set is ALSO the export source, and evicting it mid-export is
+ * catastrophic in a way evicting a prepared listen is not; and the key space is
+ * separate because `pipelineVersion` folds `depth` and `geometry` in, so a
+ * symmetric-window 32f entry can never be served where a causal 16-bit one was
+ * asked for. `shared/config.js` carries the arithmetic behind the 6 GiB.
  *
- * WHEN A WRITER ARRIVES IT MUST PIN THE EXPORT'S KEY. `put()` calls `evict()`
- * after writing, `planEviction` takes a pin SET, and the key of the run in
- * flight is `exportRun.entry.key` right here. There is deliberately no pin set
- * yet: nothing in this file calls `cache32.evict()`, and a pin nobody reads is a
- * variable that looks like a guarantee.
+ * IT IS WRITTEN BY THE SEPARATION RUNNER (`SEPARATE_START`) AND READ BY THE
+ * EXPORT PATH (`EXPORT_START`). The writer pins its run's key through
+ * `separatePins` below; the reader decodes one stem at a time via `stemFile`,
+ * never the whole entry.
+ *
+ * THIS INSTANCE IS THE REASON U0 EXISTED. `clear()` hard-coded `CACHE_DIR` and
+ * ignored `this`, so the moment a second instance existed, `CACHE_CLEAR` on
+ * either tier deleted the LIVE tier and reported success. It reads `this.dirName`
+ * now; the assertion that the two clear independently is in `test.js`.
  */
 const cache32 = new StemCache(STEM_CACHE_32F_MAX_BYTES, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
 
@@ -590,6 +613,130 @@ const cache32 = new StemCache(STEM_CACHE_32F_MAX_BYTES, CACHE_DIR_32F, { depth: 
  * @type {ExportRun|null}
  */
 let exportRun = null;
+
+/**
+ * KEYS NOTHING MAY EVICT, because something is reading them.
+ *
+ * IT IS EMPTY TODAY AND THAT IS SAID OUT LOUD RATHER THAN LEFT TO BE INFERRED.
+ * A key belongs in here while a deck has that entry LOADED, and nothing loads a
+ * 32f entry yet — the File source's deck is U6. What exists now is the set and
+ * its owner, so `separationRefusal` and `planEviction` are called with the real
+ * thing rather than with `null`, and the slice that starts loading these entries
+ * has somewhere to write instead of a signature to change.
+ *
+ * RUNTIME, NEVER PERSISTED. A pin that survived a crash would leave an entry
+ * nothing could ever evict.
+ *
+ * @type {Set<string>}
+ */
+const separatePins = new Set();
+
+/**
+ * THE ONE AHEAD-OF-TIME RUN THIS ENGINE WILL DO AT A TIME, or null.
+ *
+ * ONE, ENGINE-WIDE, NOT ONE PER DECK — and it is a refusal rather than a queue.
+ * Two decks have two backends and two ORT sessions, so the seam's
+ * one-call-per-backend rule would happily let both run: what stops it is that
+ * two concurrent runs double the ~1.7 GB peak, halve each run's throughput for
+ * no gain, and — the part that is not merely wasteful — make the capacity
+ * question unanswerable, because neither run's future entry is in the manifest
+ * the other one sizes itself against. A queue would hide that; a refusal that
+ * names the deck already running does not.
+ *
+ * `cancel` IS A FLAG THIS OBJECT CARRIES AND `runOffline` READS BETWEEN WINDOWS.
+ * It is never checked inside one: the seam serialises one call per backend and
+ * abandoning a `separate()` in flight is the wedge `workers/inference.worker.js`
+ * exists to prevent — a rejected concurrent call leaves the session permanently
+ * dead, with no error a user can act on and no recovery short of a reload.
+ *
+ * @type {{deck:'A'|'B', cancel:boolean}|null}
+ */
+let separating = null;
+
+/**
+ * DECODE A FILE AT THE MODEL'S CLOCK, on the one AudioContext this engine has.
+ *
+ * THE L-RULE, AND WHY THIS IS NOT A BREACH OF IT. `CONTRIBUTING.md` says "one
+ * AudioContext at 44 100 Hz and no JS resampling anywhere on the live path", and
+ * that "the absolute prohibition is on sample-rate conversion between the CAPTURE
+ * clock and the model clock". There is no capture here — a file is not a tab —
+ * and the conversion, if the file is not already at 44 100, is Blink's
+ * (`AudioBus::TryCreateBySampleRateConverting` -> `SincResampler`, 32 taps,
+ * Blackman), not ours. `docs/AUDIO.md` §1.3 evaluates exactly this call and rates
+ * it Good. It is a NEW clock conversion that the rule predates, so it is ratified
+ * in writing in `CONTRIBUTING.md` and in ADR 0001 rather than left as a decoder
+ * call in a codebase whose rules say "no resampling".
+ *
+ * IT TAKES OWNERSHIP OF `bytes` AND DETACHES THEM. That is why the caller hashes
+ * the file BEFORE calling this, and it is a useful accident: after this line no
+ * later reader can re-hash the source even by mistake, which is the other half of
+ * the one-shot `sourceBytes` obligation.
+ *
+ * A MONO FILE IS UP-MIXED RATHER THAN REFUSED. The model's input is stereo and
+ * both channels of a mono file are the same signal; refusing one would refuse a
+ * legitimate Source for a reason the user cannot act on.
+ */
+async function decodeAtModelClock(bytes) {
+  const c = await ensureContext();
+  const buf = await c.decodeAudioData(bytes);
+  const l = buf.getChannelData(0);
+  const r = buf.numberOfChannels > 1 ? buf.getChannelData(1) : l;
+  return { l, r, frames: buf.length, sampleRate: buf.sampleRate };
+}
+
+/**
+ * THE MODEL, AS THE CALLBACK `runOffline` TAKES: one window of mix in, twelve
+ * planes out, through this deck's Backend and the shared GPU scheduler.
+ *
+ * `budgetMs` IS `Infinity`, WHICH IS WHAT EXEMPTS AN AHEAD-OF-TIME WINDOW FROM
+ * L3. A live chunk can be "too late to publish" and the scheduler demotes it to
+ * protect the priority deck; an offline window has no deadline at all, so
+ * `demotionDecision`'s `waitMs + estMs <= budgetMs` is trivially true and it is
+ * never demoted. A demotion that arrived anyway is NOT silently treated as
+ * planes — it is a named throw, because `{demoted:true}` carries no audio and
+ * folding it in would write undefined into the track.
+ *
+ * THE PLANES ARE VIEWS OVER THE BUFFER THAT IS LENT BACK NEXT WINDOW, which is
+ * safe for exactly one reason: `OfflineAssembler.add` copies out of them
+ * immediately, and `runOffline` calls it before the next `separate`. That is the
+ * same borrow-and-return contract `LivePipeline.runChunk` runs on.
+ */
+function makeSeparator(d) {
+  let mix = new ArrayBuffer(2 * SEGMENT * 4);
+  let out = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
+  return async (mixL, mixR, k) => {
+    // Idempotent, and HERE rather than before the run: a 109 MB load and ~8 s of
+    // shader compile must sit BEHIND every refusal, or a track that cannot be
+    // stored still costs the user the model.
+    await d.ensureSession();
+    const view = new Float32Array(mix);
+    view.set(mixL, 0);
+    view.set(mixR, SEGMENT);
+    let res;
+    try {
+      res = await d.infer(mix, out, Infinity);
+    } catch (e) {
+      // The buffers went to the backend and are not coming back. Re-own a fresh
+      // pair before the throw propagates, exactly as LivePipeline does, so a
+      // caller that retried would not meet a detached ArrayBuffer.
+      mix = new ArrayBuffer(2 * SEGMENT * 4);
+      out = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
+      throw e;
+    }
+    if (res && res.demoted) {
+      throw new Error(`the GPU scheduler demoted window ${k} (${res.why}) — an ahead-of-time `
+        + 'window has no deadline, so it must never be demoted, and a demotion carries no audio');
+    }
+    mix = res.mix;
+    out = res.stems;
+    const stems = new Float32Array(out);
+    const planes = [];
+    for (let i = 0; i < STEMS.length * 2; i++) {
+      planes.push(stems.subarray(i * SEGMENT, (i + 1) * SEGMENT));
+    }
+    return planes;
+  };
+}
 
 /** 'A' | 'B'. An absent deck field means A, the single-deck engine's convention. */
 const normalizeDeckId = (id) => (DECKS.includes(id) ? id : DECK_DEFAULT);
@@ -1027,7 +1174,7 @@ async function captureStart(sourceToken, source, mode = 'export', id = DECK_DEFA
     throw e;
   }
   if (d.id === DECK_DEFAULT) {
-    state.job = { status: 'idle', chunk: 0, chunks: 0, pct: 0, elapsedMs: 0, etaMs: null, error: null, stage: null };
+    state.job = { status: 'idle', error: null, stage: null };
   }
   // Attaching a capture makes this deck LOADED, which changes the effective
   // crossfader position. `push(true)` reconciles via snapshot(), but say it here
@@ -1309,7 +1456,7 @@ async function handle(m) {
 
       case 'CAPTURE_START':
         if (!m.deck || m.deck === DECK_DEFAULT) {
-          state.job = { status: 'idle', chunk: 0, chunks: 0, pct: 0, elapsedMs: 0, etaMs: null, error: null, stage: null };
+          state.job = { status: 'idle', error: null, stage: null };
         }
         return void await captureStart(m.sourceToken, m.source, 'export', m.deck || DECK_DEFAULT)
           .catch((e) => fail('capture', e));
@@ -1448,9 +1595,114 @@ async function handle(m) {
         return void send({ type: 'CACHE_STATE', ...(await cache.report()) });
 
       case 'CACHE_CLEAR':
+        /**
+         * BOTH TIERS. `CACHE_CLEAR` is the user saying "give me my disk back",
+         * and a clear that left up to 6 GiB of 32-bit-float stems behind — with
+         * no other control anywhere that can reach them — would be a control
+         * that does not do what it says. U0 is what makes this safe to write:
+         * `clear()` reads `this.dirName`, so each instance destroys its own
+         * directory and only its own. Before that fix these two lines would
+         * have deleted the live tier twice and reported success.
+         */
         await cache.clear();
-        log('stem cache cleared');
+        await cache32.clear();
+        log('stem cache cleared — both tiers');
         return void send({ type: 'CACHE_STATE', ...(await cache.report()) });
+
+      /**
+       * AN AHEAD-OF-TIME SEPARATION of a File source (#41).
+       *
+       * `SEPARATE_START { deck?, sourceToken, source: {title, url?}, hopSeconds?,
+       * geometry? }`. Everything below this line is EFFECT: the order, the
+       * refusals, the wire and the cancellation live in `engine/offline.js`'s
+       * `runSeparation`, which is driven under Node in `test.js`. What this case
+       * owns is the ports — the Host's `sourceBytes`, the AudioContext's
+       * decoder, this deck's Backend, the 32f tier and the cancel flag.
+       *
+       * IT IS AWAITED INSIDE `handle()`, and that is deliberate: `handle`'s
+       * promise is not awaited by its caller (see `host.onMessage(handle)`), so
+       * a run of several minutes does not block the message bus — every other
+       * message continues to be delivered while this one is outstanding.
+       */
+      case 'SEPARATE_START': {
+        const id = normalizeDeckId(m.deck);
+        if (separating) {
+          return void send(separateError(id, 'BUSY',
+            `deck ${separating.deck} is already separating a file, and this engine runs one `
+            + 'ahead-of-time separation at a time: two would double the peak memory and neither '
+            + 'could size itself against the other, because a run in flight has no manifest entry'));
+        }
+        /**
+         * THE GEOMETRY IS THE TIER'S, NOT THE MESSAGE'S. `pipelineVersion` folds
+         * `geometry` into the key and `StemCache.keyFor` takes it off the
+         * instance, so honouring a per-message override would write causal stems
+         * into a directory whose keys say `offline` — the key-and-bytes
+         * disagreement U2 put the tier on the instance to make unreachable. The
+         * field stays on the wire as the fallback lever the contract designed;
+         * taking it would mean a SECOND tier instance, not an argument here.
+         */
+        if (m.geometry != null && m.geometry !== cache32.geometry) {
+          return void send(separateError(id, 'GEOMETRY_UNSUPPORTED',
+            `this engine separates a file with the ${cache32.geometry} window and was asked for `
+            + `${JSON.stringify(m.geometry)} — a second geometry is a second tier, not an argument`));
+        }
+        const job = { deck: id, cancel: false };
+        separating = job;
+        const d = deck(id);
+        log(`[${id}] separating a file with the symmetric window`);
+        try {
+          const r = await runSeparation({
+            deck: id,
+            token: m.sourceToken,
+            source: m.source || null,
+            // The deck's hop, passed through so the key's shape stays uniform.
+            // The symmetric window does not USE a hop — it advances by STRIDE —
+            // and `geometry` is what carries the real distinction; inventing a
+            // synthetic hop here would put a number in a key that names nothing.
+            hopSeconds: m.hopSeconds != null ? Number(m.hopSeconds) : d.live.hopSeconds,
+            cache: cache32,
+            pins: separatePins,
+            sourceBytes: host.sourceBytes,
+            decode: decodeAtModelClock,
+            separate: makeSeparator(d),
+            makeWriter: (key, meta) => new CacheWriter(key, meta),
+            emit: send,
+            cancelled: () => job.cancel,
+            now: () => performance.now(),
+          });
+          if (r.ok) log(`[${id}] separated ${r.seconds.toFixed(1)} s -> ${r.key}`);
+          else log(`[${id}] separation ${r.code} — ${r.message}`);
+        } finally {
+          // IN A `finally`, because every path out of a run — done, refused,
+          // cancelled, or a throw nothing anticipated — must leave the engine
+          // able to start the next one. A `separating` left set is an engine
+          // that answers BUSY for ever with nothing running.
+          separating = null;
+        }
+        return;
+      }
+
+      case 'SEPARATE_CANCEL': {
+        const id = normalizeDeckId(m.deck);
+        if (!separating || separating.deck !== id) {
+          /**
+           * NOT AN ERROR ON THE WIRE. There is no run to report on, and a
+           * `SEPARATE_ERROR` here would be a statement about a run that does not
+           * exist — which a receiver would paint beside the one that does.
+           */
+          log(`[${id}] SEPARATE_CANCEL with nothing separating on that deck`);
+          return;
+        }
+        /**
+         * A FLAG, READ BETWEEN WINDOWS. Never a rejection of the call in flight:
+         * the seam serialises one call per backend and abandoning a `separate()`
+         * mid-run is the wedge `workers/inference.worker.js` exists to prevent.
+         * The window that is running finishes; the next one never starts.
+         */
+        separating.cancel = true;
+        log(`[${id}] separation cancelled — stopping after the window in flight`);
+        return;
+      }
 
       /**
        * E1 — THE DELIVERABLE. The six untouched model outputs out of the 32f
