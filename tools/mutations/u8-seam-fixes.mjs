@@ -54,7 +54,7 @@
  * EVERY CONTROL IS A `green` AND EVERY `green` IS CHECKED AS A **PASS**, NOT AS
  * "absent from the reds". The distinction is the whole hazard of a mutation that
  * truncates its suite: `test.js` is one process, so a hole that throws at import
- * takes ninety-one later assertions out of the run entirely, and an assertion
+ * takes eighty-four later assertions out of the run entirely, and an assertion
  * that DID NOT RUN reads exactly like one that passed if you only look at the
  * red lines. Each run's assertion total is printed against the clean baseline
  * for the same reason — the count is what makes the truncation visible.

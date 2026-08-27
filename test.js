@@ -5986,9 +5986,11 @@ if (group('host')) {
    * invites is subtler than the one it fixes: the guard buys a named cause and a
    * summary, and it does NOT recover the assertions after the throw. Measured on
    * the mutation it was watched red against — a `ui/host.js` that reads its
-   * preload bridge at module scope — `node test.js` goes from 622 passed to
-   * 529 passed / 2 failed. NINETY-ONE ASSERTIONS DID NOT RUN. A guarded suite
-   * that went red must not be read as fully covered.
+   * preload bridge at module scope — `node test.js` goes from 766 passed to
+   * 680 passed / 2 failed. EIGHTY-FOUR ASSERTIONS DID NOT RUN. A guarded suite
+   * that went red must not be read as fully covered. (Re-measured at v0.3.0,
+   * `b9dc537`; it was 622 -> 529 with ninety-one not run when first written,
+   * and the truncation moved by a different amount than the totals did.)
    *
    * WHAT MAKES THAT TRUNCATION VISIBLE, rather than merely absent, is a gate
    * that already existed: `tools/verify.mjs`'s coverage diff prints

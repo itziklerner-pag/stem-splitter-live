@@ -224,8 +224,11 @@ rings, the mixer, the OLA planes, the scheduler — *and* it is this Host's
 conformance suite. Its `group('host')` installs a Chrome platform
 (`globalThis.chrome = { runtime: { … } }`) and asserts that
 `extension/offscreen/host.js` and `extension/ui/host.js` really behave the way
-`shared/host.js` declares: 132 of the file's assertions, 33 of them naming an
-`extension/{ui,offscreen}/host.js` entry point explicitly.
+`shared/host.js` declares. It spans `test.js:5957-9123` — **128 `ok()` sites of
+the file's 713**, which run **132 assertions**, 30 of those sites naming an
+`extension/{ui,offscreen}/host.js` entry point in the assertion text. (Sites
+and assertions differ because a few sites run inside a loop; both numbers are
+given so neither has to be guessed at.)
 
 Replace the two holes with your own — which you must; they are holes — and those
 132 assertions become claims about a platform that is no longer there. Measured
