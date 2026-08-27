@@ -80,6 +80,9 @@ and does not restate (`docs/agents/domain.md`).
   `extension/engine/` are its DSP modules — "engine modules", §6.
 - **Hop** (`H`), left/right context, crossfade, the live presets, **lane**,
   the latency budget: `docs/AUDIO.md` §2.2–§2.3, §1.6, §7.
+- **Export** and **Bounce** — two deliverables with two names, and the three
+  things a bounce bakes (which do NOT include speed): `docs/AUDIO.md` §4.6.
+  _Avoid_ for either of them: the mix.
 - **L1** (capture only what the user's own player renders), **P1** (no network
   after the model download), **M1** (no remote code): `CONTRIBUTING.md`, "The
   three rules that override everything".
