@@ -301,6 +301,53 @@ export const ARM_CODES = new Set([
 ]);
 
 /**
+ * IS THIS A CODE THE DECK KNOWS WHAT TO DO WITH? (#29)
+ *
+ * `ARM_ERROR { code, message }` is a message a HOST ORIGINATES — `docs/VENDORING.md`
+ * says so — and `code` is drawn from a CLOSED VOCABULARY the unit owns: the set
+ * above. Nothing said so anywhere until v0.3.0, and nothing checked it. Three
+ * separate deck behaviours are gated on membership:
+ *
+ *   1. whether the banner can be DISMISSED  (`ui/embed.js` paintBanner: the
+ *      dismiss control is shown only for this family, because these are
+ *      statements about a gesture already made);
+ *   2. whether RESTART is offered            (`errorAction()` below sends a
+ *      non-member to the `'restart'` family, and restarting a deck that has no
+ *      stream produces the same error again);
+ *   3. WHICH SENTENCE is printed             (`errorSummary()`).
+ *
+ * FIVE OF THE EIGHT MEMBERS ARE TAB NOUNS, and a second Host has no tabs. So the
+ * natural mistake is to invent a plausible-looking code — `NO_SOURCE`, say — and
+ * the result is a banner the user CANNOT DISMISS with a Restart button that
+ * cannot work, and nothing goes red: `assertHost` checks duties and cannot check
+ * a message nobody sent, the unit gate reads code and not traffic, and
+ * `group('host')` drives duties. The failure is silent, user-facing, and on the
+ * first screen a tester sees when arming fails.
+ *
+ * SO IT IS SAID OUT LOUD, ONCE, AT THE MOMENT IT IS WRONG. This function is the
+ * only thing in this file with a side effect, and that is deliberate: a pure
+ * predicate whose caller has to remember to log is a check a second Host loses
+ * the same way it lost the vocabulary. The loudness lives with the rule.
+ *
+ * IT DOES NOT THROW AND IT DOES NOT CHANGE THE BANNER. The deck is already
+ * reporting a failure to arm; replacing it with a second failure would take the
+ * user's actual problem off the screen. The Host developer is told; the user
+ * sees what they saw before.
+ *
+ * @param {string} code  the code as the banner will use it, i.e. after any default
+ * @param {string} [where] the entry point that received it, quoted in the error
+ * @returns {null|string} null when legal, otherwise the sentence that was logged
+ */
+export function checkArmCode(code, where = 'ARM_ERROR') {
+  if (ARM_CODES.has(code)) return null;
+  const msg = `${where}: code ${JSON.stringify(code)} is not one of the ${ARM_CODES.size} this deck knows what to do with `
+    + `— ${[...ARM_CODES].join(', ')}. An unknown code paints a banner the user CANNOT DISMISS, with a Restart `
+    + 'control that cannot fix it. Pick a member of that set, or add one upstream.';
+  console.error(msg);
+  return msg;
+}
+
+/**
  * ...but they must not borrow the arm family's TITLE.
  *
  * "The deck has no source" is the right sentence for TAB_GONE and a flat

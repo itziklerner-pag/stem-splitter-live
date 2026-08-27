@@ -83,7 +83,7 @@ import { effectiveXfPosition } from '../engine/mixer.js';
  * to be the same shape in both contexts (../shared/host.js).
  */
 import * as host from './host.js';
-import { assertHost, ENGINE_HOST_DUTIES } from '../shared/host.js';
+import { assertHost, ENGINE_HOST_DUTIES, modelSourceWord } from '../shared/host.js';
 
 /**
  * BEFORE ANYTHING ELSE IN THIS MODULE RUNS. `MasterBus`, `Deck` and the boot
@@ -113,7 +113,13 @@ const SAB_OK = typeof SharedArrayBuffer === 'function';
 
 const state = {
   boot: { sab: SAB_OK, coi: self.crossOriginIsolated === true, sampleRate: null, ep: null, adapter: null, threads: null },
-  model: { status: 'unknown', phase: null, got: 0, total: MODEL.bytes, ms: 0, error: null, fromCache: null },
+  /**
+   * `source` IS THE PROVENANCE AND `fromCache` IS THE RETRY DECISION — they are
+   * two fields because they are two questions (#28, `shared/host.js`
+   * `MODEL_SOURCES`). Wording the log line off the boolean told a Host that
+   * ships its weights that 109 MB had been downloaded.
+   */
+  model: { status: 'unknown', phase: null, got: 0, total: MODEL.bytes, ms: 0, error: null, fromCache: null, source: null },
   /** deck A's capture, mirrored. The side panel is single-deck and reads this. */
   capture: { status: 'idle', frames: 0, seconds: 0, peak: [0, 0], dropped: 0, source: null },
   /** per-deck capture + session, for the dual console */
@@ -233,15 +239,18 @@ async function loadOnce() {
   push(true);
   let last = 0;
   try {
-    const { buffer, fromCache, ms } = await loadModel(host, (phase, got, total) => {
+    const { buffer, fromCache, source, ms } = await loadModel(host, (phase, got, total) => {
       state.model.phase = phase; state.model.got = got; state.model.total = total;
       const now = performance.now();
       if (now - last > 120) { last = now; push(true); }
     });
     state.model.fromCache = fromCache;
+    state.model.source = source;
     state.model.ms = ms;
     state.model.phase = 'session';
-    log(`weights ${fromCache ? 'from cache' : 'downloaded'} + hash verified in ${ms.toFixed(0)}ms`);
+    // The words are the seam's, not this file's: `MODEL_SOURCES` is what a Host
+    // picks its phase out of, so the sentence and the vocabulary cannot drift.
+    log(`weights ${modelSourceWord(source)} + hash verified in ${ms.toFixed(0)}ms`);
     push(true);
     return buffer;
   } catch (e) {
@@ -1615,7 +1624,7 @@ async function handle(m) {
           when: new Date().toISOString(),
           doc: { id: DOC_ID, bootAt: new Date(BOOT_AT).toISOString(), upSec: +((Date.now() - BOOT_AT) / 1000).toFixed(1), url: location.href },
           boot: state.boot,
-          model: { status: state.model.status, phase: state.model.phase, fromCache: state.model.fromCache, error: state.model.error },
+          model: { status: state.model.status, phase: state.model.phase, fromCache: state.model.fromCache, source: state.model.source, error: state.model.error },
           ctx: c ? {
             state: c.state, sampleRate: c.sampleRate, currentTime: +c.currentTime.toFixed(2),
             baseLatency: c.baseLatency,

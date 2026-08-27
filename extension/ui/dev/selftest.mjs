@@ -10,11 +10,12 @@
  * teaches everyone to distrust reds.
  */
 
+import { readFileSync } from 'node:fs';
 import {
   UNITY_U, FLOOR_DB, MIN_DB, MAX_DB,
   faderDb, dbToFader, dbToGain, dbToMeterFrac, linToDb, linAmp,
   bufState, behindText, fmtDb, speakDb, onePole, fmtBytes,
-  errorSummary, errorAction, ARM_CODES, armErrorFresh, normalizeDeck,
+  errorSummary, errorAction, ARM_CODES, checkArmCode, armErrorFresh, normalizeDeck,
 } from '../audio-math.js';
 import * as mixer from '../../engine/mixer.js';
 import { MODEL } from '../../shared/config.js';
@@ -189,6 +190,83 @@ ok(ARM_CODES.has('NOT_CAPTURING') && ARM_CODES.has('TAB_GONE'),
  */
 for (const c of ['DECKS_FULL', 'DECK_BUSY', 'TAB_ON_OTHER_DECK']) {
   ok(!ARM_CODES.has(c), `${c} is not in ARM_CODES — no single-deck code path can raise it`);
+}
+
+// ============ ARM_ERROR.code is a CLOSED VOCABULARY, and it is checked (#29) ==
+/**
+ * `ARM_ERROR { code, message }` is a message a HOST ORIGINATES, and `code` is
+ * drawn from ARM_CODES. A Host that invents a plausible-looking code gets a
+ * banner the user cannot dismiss with a Restart control that cannot fix it, and
+ * before v0.3.0 NOTHING went red — not `assertHost`, which cannot check a
+ * message nobody sent; not the unit gate; not `group('host')`.
+ *
+ * THE LOUDNESS IS THE FEATURE, so it is what is asserted: `console.error` is
+ * captured rather than trusted, because a check that returns a sentence nobody
+ * prints is exactly the silent failure this replaces.
+ */
+{
+  /**
+   * `console.error` is swapped FOR THE ONE CALL and put back before the `ok()`
+   * that reads the result — never around the block. `ok()` reports a failure
+   * through `console.error` itself, so a capture that spanned the assertions
+   * would eat their own reds: every mutation below would look green and this
+   * block would be the silent suite `AGENTS.md` calls a hard failure. Watched:
+   * with the capture around the block, seven mutations produced zero red lines.
+   */
+  const say = (code, where) => {
+    const captured = [];
+    const realError = console.error;
+    console.error = (m) => captured.push(String(m));
+    let out;
+    try { out = checkArmCode(code, where); } finally { console.error = realError; }
+    return { out, captured };
+  };
+
+  let cried = 0;
+  for (const c of ARM_CODES) {
+    const r = say(c);
+    cried += r.captured.length;
+    ok(r.out === null, `${c} is a member of the vocabulary and passes SILENTLY`);
+  }
+  ok(cried === 0,
+    `a legal code says nothing — a check that cried wolf on every refusal would be turned off (got ${cried} line(s))`);
+
+  // The exact shape a second Host reaches for: five of the eight members are
+  // tab nouns, and a desktop Host has no tabs.
+  const bad = say('NO_SOURCE', 'ARM_ERROR from the Host');
+  ok(typeof bad.out === 'string' && bad.out.length > 0, 'an UNKNOWN code is refused rather than accepted in silence');
+  ok(bad.captured.length === 1, `...and it reaches console.error EXACTLY ONCE (got ${bad.captured.length})`);
+  const logged = bad.captured[0] || '';
+  ok(logged.includes('NO_SOURCE'), 'the error NAMES THE OFFENDING VALUE, so the Host developer does not have to guess which message it was');
+  ok(logged.includes('ARM_ERROR from the Host'), '...and names the entry point that received it');
+  const missing = [...ARM_CODES].filter((c) => !logged.includes(c));
+  ok(missing.length === 0,
+    `...and names THE WHOLE LEGAL SET, so the message is a repair instruction${missing.length ? ` — missing ${missing.join(', ')}` : ` (all ${ARM_CODES.size})`}`);
+  ok(/dismiss/i.test(logged) && /Restart/i.test(logged),
+    '...and says what goes wrong if it is ignored: an undismissable banner and a dead Restart');
+}
+
+/**
+ * ...AND THE DECK REALLY CALLS IT, ON BOTH WAYS IN.
+ *
+ * `checkArmCode` working proves nothing about `ui/embed.js` ever calling it —
+ * the same gap `test.js` records for `assertHost`, where review deleted the
+ * module-scope call and watched the whole tree stay green. There are exactly two
+ * entry points a Host's code can reach the banner through: the live `ARM_ERROR`
+ * message, and the refusal persisted at `ARM_ERROR_KEY` and read at boot. A
+ * check wired to one of them is a check a Host escapes by using the other.
+ *
+ * Comments are stripped first: a claim a doc comment can satisfy is not a claim.
+ */
+{
+  const embedSrc = readFileSync(new URL('../embed.js', import.meta.url), 'utf8')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+  const calls = (embedSrc.match(/\bcheckArmCode\s*\(/g) || []).length;
+  ok(embedSrc.includes("case 'ARM_ERROR':") && calls === 2,
+    `ui/embed.js calls checkArmCode() on BOTH entry points — the live ARM_ERROR and the persisted refusal `
+    + `(found ${calls}, wanted 2)`);
+  ok(/import\s*\{[^}]*\bcheckArmCode\b[^}]*\}\s*from\s*'\.\/audio-math\.js'/.test(embedSrc),
+    '...and takes it from the unit\'s own audio-math.js rather than keeping a second copy of the vocabulary');
 }
 {
   const s1 = errorSummary([{ id: 'A', code: 'HALTED', message: 'x', fatal: true, action: 'restart' }]);

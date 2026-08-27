@@ -11,6 +11,49 @@ release, whether or not it is otherwise notable.
 
 ## [Unreleased]
 
+### Security and privacy
+
+- **The engine no longer says "downloaded" about weights it did not download.**
+  The `weights … + hash verified` line was worded off a boolean that meant "not
+  served from a cache", so a host that ships the model beside its binary — which
+  reports that boolean honestly as `false` — had the engine tell the user 109 MB
+  had been fetched over the network about a file that had been on disk since
+  install. The provenance now travels across the seam with three values, not
+  two: a host cache, the network, or shipped-with-the-host. Nothing about what
+  this extension does changes — it still has exactly one network request in its
+  lifetime and still reports it as a download when it is one — but the one line
+  a user would read to check that claim can no longer contradict it
+  (upstream [#28](https://github.com/itziklerner-pag/stem-splitter-live/issues/28)).
+
+### Added — for anyone building on this
+
+None of this is visible in the browser. It is here because the tag is what a
+second product pins.
+
+- **`MODEL_SOURCES`, and a three-valued `modelBytes` phase.** `shared/host.js`
+  now declares the vocabulary a host announces its model phase from — `cache`,
+  `download`, `bundled` — and `modelSourceWord()` is where the words for each
+  live, so the engine's line and the vocabulary cannot drift. `loadModel()`
+  returns `source` beside `fromCache`; `fromCache` is unchanged and is still the
+  retry decision, which is why the two are two fields.
+- **`ARM_ERROR.code` is checked, and says so when it is wrong.** It was always a
+  closed vocabulary the unit owns (`ARM_CODES`, eight members, five of them tab
+  nouns) and nothing anywhere checked it: a host that invented a plausible code
+  got a banner the user could not dismiss with a Restart control that could not
+  fix it, and nothing went red. `checkArmCode()` now writes one `console.error`
+  naming the offending value and the whole legal set, on both ways into the
+  banner. It does not throw and does not change what is painted
+  ([#29](https://github.com/itziklerner-pag/stem-splitter-live/issues/29)).
+- **A hole that throws while being imported is a named red, not a crash.**
+  `test.js`'s `group('host')` — the conformance report `docs/VENDORING.md` sends
+  a second host to — used to die at the import line, replacing ~120 assertions
+  and the summary with a stack trace, which `verify.mjs` then reported as *RED —
+  0 failing assertions*. Each hole is now imported defensively and the group
+  runs to its end or names what stopped it. `docs/VENDORING.md` carries the rule
+  the fix is a safety net for: **a hole must import inertly**, touching its
+  platform on the first duty call
+  ([#30](https://github.com/itziklerner-pag/stem-splitter-live/issues/30)).
+
 ## [0.2.0] — 2026-08-26
 
 The Host seam. Nothing about what the extension does changes; what changes is
