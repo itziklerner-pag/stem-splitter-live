@@ -47,6 +47,15 @@ import { SR, SEGMENT, STEMS, MODEL, SEAM_XFADE_LAW, SEAM_XFADE_MS } from './conf
 import { encodeWav, decodeWav } from './wav.js';
 
 export const CACHE_DIR = 'stemcache';
+/**
+ * The 32-bit-float tier's directory — the desktop's, and a SEPARATE one.
+ *
+ * Separate storage is belt to the key's braces below. The key stops a 32f entry
+ * being mistaken for a 16-bit one; the directory stops the two tiers sharing a
+ * manifest, a cap and an eviction order, which is what makes one tier able to
+ * evict the other's working set.
+ */
+export const CACHE_DIR_32F = 'stemcache-f32';
 const MANIFEST = 'manifest.json';
 
 /**
@@ -61,7 +70,8 @@ const CACHE_FORMAT = 1;
  * cache entry waiting to happen, so err on the side of including it: a spurious
  * miss costs one real-time re-prime, a spurious HIT costs the user's trust.
  */
-export function pipelineVersion(hopSeconds) {
+export function pipelineVersion(hopSeconds, tier = {}) {
+  const { depth = 16, geometry = 'causal' } = tier;
   const parts = [
     `f${CACHE_FORMAT}`,
     MODEL.sha256.slice(0, 12),
@@ -69,6 +79,29 @@ export function pipelineVersion(hopSeconds) {
     `hop${Math.round(hopSeconds * 1000)}`,
     `x${SEAM_XFADE_MS}${SEAM_XFADE_LAW === 'linear' ? 'L' : 'P'}`,
   ];
+  /**
+   * THE TIER COMPONENT IS CONDITIONAL, AND THAT IS THE WHOLE POINT OF IT.
+   *
+   * Appending `-d16i-gc` unconditionally would change every key every existing
+   * user already has, and this file's own eviction note calls a cache that
+   * silently drops a set prepared the night before a gig a bug even when every
+   * line of it is correct. A legacy 16-bit causal entry therefore keeps a
+   * byte-identical key, and only a tier that is genuinely NEW is spelled out.
+   *
+   * A conditional component is somewhere a bug can hide; discarding every
+   * prepared set on upgrade is a bug that is certain. That is the trade, made
+   * deliberately.
+   *
+   * BOTH HALVES CHANGE THE SAMPLES, which is the bar this function's header
+   * sets for inclusion. `depth` is what the bytes on disk are. `geometry` is
+   * whether the stems came from the live path's CAUSAL window — past audio only,
+   * because at capture time there is no future — or from an ahead-of-time run
+   * that could see the whole file and used a symmetric window. Same weights,
+   * same seam law, measurably different stems.
+   */
+  if (!(depth === 16 && geometry === 'causal')) {
+    parts.push(`d${depth}${depth === 32 ? 'f' : 'i'}`, geometry === 'causal' ? 'gc' : 'go');
+  }
   return parts.join('-');
 }
 
@@ -107,10 +140,13 @@ export function videoIdFromUrl(url) {
   return m ? id(m[1]) : null;
 }
 
-/** Cache key. `videoId` is opaque to us — the caller supplies it. */
-export function cacheKey(videoId, hopSeconds) {
+/**
+ * Cache key. `videoId` is opaque to us — the caller supplies it.
+ * @param {{depth?:16|32, geometry?:'causal'|'offline'}} [tier] omit for the live tier
+ */
+export function cacheKey(videoId, hopSeconds, tier) {
   const id = String(videoId).replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 64);
-  return `${id}--${pipelineVersion(hopSeconds)}`;
+  return `${id}--${pipelineVersion(hopSeconds, tier)}`;
 }
 
 /**
@@ -123,8 +159,62 @@ export function cacheKey(videoId, hopSeconds) {
  * moment the model widens. (It is 88 bytes against ~254 MB, so it never showed
  * up as a defect — which is exactly why it had to be read rather than measured.)
  */
-export const bytesForSeconds = (seconds) =>
-  Math.round(seconds * SR) * 4 * STEMS.length + STEMS.length * 44;
+export const bytesForSeconds = (seconds, depth = 16) =>
+  Math.round(seconds * SR) * ((depth >> 3) * 2) * STEMS.length + STEMS.length * 44;
+
+const EMPTY_PINS = new Set();
+/**
+ * Pins, however the caller spelled them. ONE implementation, because the two
+ * callers below must agree about what is pinned: `separationRefusal` decides
+ * whether a run may start from the same set `planEviction` would refuse to
+ * delete, and two copies of this could drift into answering differently for the
+ * same argument.
+ *
+ * A BARE STRING IS ONE KEY, NOT AN ITERABLE OF CHARACTERS. `new Set('abc')` is
+ * three single-character keys and matches nothing, so the string branch is not a
+ * convenience — without it the live path's single-pin call silently pins nothing.
+ */
+const pinSet = (pins) => (pins == null ? EMPTY_PINS
+  : typeof pins === 'string' ? new Set([pins]) : new Set(pins));
+
+/**
+ * MAY THIS SOURCE START AN AHEAD-OF-TIME SEPARATION? Pure, and it answers BEFORE
+ * the decode and before the model, for the same reason `primeRefusal` answers
+ * before a capture: the alternative is a four-minute run that succeeds and then
+ * cannot be stored.
+ *
+ * WITHOUT THIS, "PINNED WHILE OPEN" IS A SLOW LEAK. Two long sources open and
+ * pinned, a third separation completes, `evict()` can remove nothing because
+ * everything left is pinned, and the tier sits over its cap with no recovery
+ * until a deck closes. `planEviction` reports that honestly as `wouldExceed` and
+ * nothing acts on it, because `put()` evicts AFTER it has written.
+ *
+ * Returns `null` for "go ahead" and a human-readable reason otherwise, the same
+ * contract the two prime refusals above use, so the caller can log WHY nothing
+ * was separated — a run that silently does not happen is indistinguishable from
+ * one that failed.
+ *
+ * @param {number} seconds  the decoded source's duration
+ * @param {{key:string, bytes:number}[]} entries  the tier's manifest
+ * @param {number} maxBytes
+ * @param {string|Iterable<string>|null} pins  keys pinned because their source is open
+ * @param {16|32} depth
+ */
+export function separationRefusal(seconds, entries, maxBytes, pins = null, depth = 32) {
+  if (!(seconds > 0)) return 'the source decoded to nothing';
+  const gib = (b) => `${(b / 1024 ** 3).toFixed(2)} GiB`;
+  const need = bytesForSeconds(seconds, depth);
+  if (need > maxBytes) {
+    return `this track needs ${gib(need)} and the whole cache is ${gib(maxBytes)}`;
+  }
+  const pinned = pinSet(pins);
+  const pinnedBytes = (entries || []).reduce((a, e) => a + (pinned.has(e.key) ? e.bytes : 0), 0);
+  if (pinnedBytes + need > maxBytes) {
+    return `${gib(pinnedBytes)} is pinned by the tracks that are open, which leaves less than `
+      + `the ${gib(need)} this one needs`;
+  }
+  return null;
+}
 
 // ------------------------------------------------------------- prime policy
 /**
@@ -246,11 +336,21 @@ async function loadManifest(d) {
  * evict the track that is currently playing, which is otherwise exactly what
  * would happen when the other deck primes something large.
  *
+ * PINS ARE A SET, NOT A KEY, AND THEY ARE RUNTIME STATE. A second tier can have
+ * several entries open at once — two decks playing plus an export reading — and
+ * every one of them is un-evictable while it is open. A single string cannot say
+ * that. It stays accepted so the live path's one call site is unchanged.
+ *
+ * NOT PERSISTED, and that is deliberate: a pin written into the manifest would
+ * survive a crash and leave an entry nothing could ever evict, which is a leak
+ * that looks exactly like a cache doing its job.
+ *
  * @param {{key:string, bytes:number, usedAt:number, title?:string}[]} entries
  * @param {number} maxBytes
- * @param {string|null} pin
+ * @param {string|Iterable<string>|null} pins
  */
-export function planEviction(entries, maxBytes, pin = null) {
+export function planEviction(entries, maxBytes, pins = null) {
+  const pinned = pinSet(pins);
   let total = entries.reduce((a, e) => a + e.bytes, 0);
   const removed = [];
   // Ties broken by key so the order is deterministic rather than
@@ -259,7 +359,7 @@ export function planEviction(entries, maxBytes, pin = null) {
   const order = entries.slice().sort((a, b) => (a.usedAt - b.usedAt) || (a.key < b.key ? -1 : 1));
   for (const e of order) {
     if (total <= maxBytes) break;
-    if (e.key === pin) continue;
+    if (pinned.has(e.key)) continue;
     total -= e.bytes;
     removed.push({ key: e.key, bytes: e.bytes, title: e.title || null });
   }
@@ -280,9 +380,27 @@ export class StemCache {
    * against the wrong cap, and `clear()` destroys a cache the caller never
    * named. The name travels with the instance so none of those can be reached.
    */
-  constructor(maxBytes, dirName = CACHE_DIR) {
+  constructor(maxBytes, dirName = CACHE_DIR, tier = {}) {
     this.maxBytes = maxBytes;
     this.dirName = dirName;
+    /**
+     * WHAT THE BYTES ON DISK ARE, and it lives on the instance because `put()`
+     * has to encode at it and the manifest has to record it. 16 is the shipping
+     * live tier and stays the default, so `new StemCache(cap)` is unchanged.
+     */
+    this.depth = tier.depth ?? 16;
+    /** Which window produced the stems. See `pipelineVersion`. */
+    this.geometry = tier.geometry ?? 'causal';
+  }
+
+  /**
+   * The key for a track IN THIS TIER. Here rather than left to the caller
+   * because the instance already knows its depth and geometry, and a caller
+   * that computed the key with one tier and wrote it with another would produce
+   * an entry whose name disagrees with its bytes — readable, plausible, wrong.
+   */
+  keyFor(id, hopSeconds) {
+    return cacheKey(id, hopSeconds, { depth: this.depth, geometry: this.geometry });
   }
 
   async list() {
@@ -341,7 +459,15 @@ export class StemCache {
       if (!ch || ch.length !== 2) throw new Error(`stem cache: ${s} must be [L, R]`);
       // 16-bit, NO dither — see the header. Six dithered stems summed would
       // stack six independent noise floors on a signal that gets re-mixed.
-      const wav = encodeWav(ch, { sampleRate: SR, bitDepth: 16, float: false, dither: false });
+      // The DEPTH IS THE INSTANCE'S. `float` is derived rather than passed so a
+      // 32-bit tier cannot be written as 32-bit fixed point, which `encodeWav`
+      // would accept and which no reader would flag.
+      // NO DITHER at either depth — see the header. At 32f it would be noise
+      // added to an exact representation; at 16 it is six independent noise
+      // floors summed at playback.
+      const wav = encodeWav(ch, {
+        sampleRate: SR, bitDepth: this.depth, float: this.depth === 32, dither: false,
+      });
       await writeFile(d, `${key}.${s}.wav`, wav);
       bytes += wav.byteLength;
     }
@@ -350,7 +476,21 @@ export class StemCache {
     m.entries = m.entries.filter((x) => x.key !== key);
     // Written LAST: until this line the entry does not exist, so an interrupted
     // prime cannot leave a readable-but-incomplete track in the cache.
-    m.entries.push({ key, bytes, madeAt: now, usedAt: now, frames: stems[STEMS[0]][0].length, ...meta });
+    /**
+     * `depth` and `geometry` are recorded as well as keyed. The key is what
+     * stops a lookup crossing tiers; these are what let a reader, a UI or a
+     * later migration ask what an entry IS without parsing its name.
+     *
+     * `drops` DEFAULTS TO 0 AND IS SPREAD OVER BY `meta`. An ahead-of-time run
+     * cannot drop a chunk — there is no deadline to miss — so 0 is the truth for
+     * it by construction, and `CacheWriter.commit()` passes the real count for a
+     * live prime. Until now nothing recorded that a cached entry contains
+     * passthrough spans, so no surface could warn about one.
+     */
+    m.entries.push({
+      key, bytes, madeAt: now, usedAt: now, frames: stems[STEMS[0]][0].length,
+      depth: this.depth, geometry: this.geometry, drops: 0, ...meta,
+    });
     await writeFile(d, MANIFEST, JSON.stringify(m));
     return this.evict();
   }
@@ -370,10 +510,10 @@ export class StemCache {
    * silently deletes a prepared set the night before a gig is a bug even though
    * every line of it is correct.
    */
-  async evict(pin = null) {
+  async evict(pins = null) {
     const d = await dir(this.dirName);
     const m = await loadManifest(d);
-    const plan = planEviction(m.entries, this.maxBytes, pin);
+    const plan = planEviction(m.entries, this.maxBytes, pins);
     for (const e of plan.removed) {
       for (const s of STEMS) await d.removeEntry(`${e.key}.${s}.wav`).catch(() => {});
     }
@@ -431,7 +571,27 @@ export class CacheWriter {
     this.chunks = STEMS.map(() => [[], []]);
     this.frames = 0;
     this.aborted = false;
+    /**
+     * Chunks the pipeline could not separate in time and published as
+     * passthrough. They are real audio and the entry is still worth keeping —
+     * but it is NOT six separated stems for that span, and until this counter
+     * existed nothing on the entry said so. `commit()` carries it to the
+     * manifest.
+     *
+     * NOTHING IN THE SHIPPING TREE CALLS `noteDrop()` YET, and that is said out
+     * loud rather than left for a reader to discover: `offscreen/live.js` knows
+     * when it published a passthrough span and is where the call belongs, and
+     * wiring it is the live-recording slice's, not this one's. What lands here
+     * is the field, the accessor and the round trip through the manifest, so the
+     * slice that wires it has somewhere to write and something that already goes
+     * red if the value stops arriving. An ahead-of-time run has no deadline to
+     * miss and leaves this 0 by construction.
+     */
+    this.drops = 0;
   }
+
+  /** One chunk went out unseparated. See `drops`. */
+  noteDrop(n = 1) { this.drops += n; }
 
   /** @param {Float32Array[]} planes STEMS.length*2 planes, stem-major [L,R] per stem */
   append(planes, len) {
@@ -444,6 +604,33 @@ export class CacheWriter {
     if (!Array.isArray(planes) || planes.length < STEMS.length * 2) {
       throw new Error(`stem cache: append needs ${STEMS.length * 2} planes for ${STEMS.length} stems, got ${Array.isArray(planes) ? planes.length : typeof planes}`);
     }
+    /**
+     * AND THE LENGTH HAS TO BE ONE THE PLANES CAN HONOUR.
+     *
+     * `slice(0, len)` CLAMPS: ask for more frames than a plane holds and it
+     * hands back a shorter array without complaint, while `this.frames` advances
+     * by the full `len`. The two then disagree, and `stems()` below builds a
+     * buffer of `frames` and fills only part of it — so the entry commits with
+     * DIGITAL SILENCE where the tail should be, reads back as the right length,
+     * and sounds like a track that fades to nothing. That is the silently-stale
+     * entry this whole file is written against, arriving through an argument
+     * rather than through a stale key.
+     *
+     * A non-integer `len` is the other half: `frames += undefined` is NaN, and
+     * `new Float32Array(NaN)` is empty, which turns the next `stems()` into a
+     * `RangeError: offset is out of bounds` thrown from inside `set` — a crash
+     * three layers from the mistake, with nothing naming the caller.
+     */
+    if (!Number.isInteger(len) || len < 0) {
+      throw new Error(`stem cache: append needs an integer frame count, got ${typeof len} ${len}`);
+    }
+    for (let i = 0; i < STEMS.length * 2; i++) {
+      if (planes[i].length < len) {
+        throw new Error(`stem cache: append was asked for ${len} frames but plane ${i} holds `
+          + `${planes[i].length} — slice() would shorten it silently while the frame counter took `
+          + 'the full length, and the entry would commit with silence where the audio should be');
+      }
+    }
     for (let k = 0; k < STEMS.length; k++) {
       for (let c = 0; c < 2; c++) {
         this.chunks[k][c].push(planes[k * 2 + c].slice(0, len));
@@ -453,15 +640,33 @@ export class CacheWriter {
   }
 
   /** A prime that was interrupted must not become a cache entry. */
-  abort() { this.aborted = true; this.chunks = STEMS.map(() => [[], []]); this.frames = 0; }
+  abort() { this.aborted = true; this.chunks = STEMS.map(() => [[], []]); this.frames = 0; this.drops = 0; }
 
   stems() {
     const out = {};
     STEMS.forEach((s, k) => {
       out[s] = [0, 1].map((c) => {
+        const parts = this.chunks[k][c];
+        /**
+         * REPORTS RATHER THAN CRASHING. This used to assume the appended
+         * lengths summed to `this.frames`, and when they did not it threw
+         * `RangeError: offset is out of bounds` from inside `Float32Array.set`
+         * — a stack trace with no caller in it, and, inside a suite, a crash
+         * that takes the whole file's verdict down instead of failing one
+         * assertion. `append()` above now refuses the inputs that cause it; this
+         * is the second line, because the two counters are what the entry's
+         * correctness rests on and a guard that names them is cheap.
+         */
+        let have = 0;
+        for (const part of parts) have += part.length;
+        if (have !== this.frames) {
+          throw new Error(`stem cache: ${s} ${c ? 'R' : 'L'} holds ${have} frames but the writer `
+            + `counted ${this.frames} — the appended lengths and the frame counter disagree, so this `
+            + `entry would be ${have < this.frames ? 'padded with silence' : 'truncated'} rather than the track`);
+        }
         const a = new Float32Array(this.frames);
         let o = 0;
-        for (const part of this.chunks[k][c]) { a.set(part, o); o += part.length; }
+        for (const part of parts) { a.set(part, o); o += part.length; }
         return a;
       });
     });
@@ -470,7 +675,7 @@ export class CacheWriter {
 
   async commit(cache) {
     if (this.aborted || this.frames === 0) return null;
-    const meta = { ...this.meta, seconds: +(this.frames / SR).toFixed(2) };
+    const meta = { ...this.meta, seconds: +(this.frames / SR).toFixed(2), drops: this.drops };
     const r = await cache.put(this.key, meta, this.stems());
     return { key: this.key, frames: this.frames, ...r };
   }

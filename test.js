@@ -77,7 +77,8 @@
 
 import { encodeWav, decodeWav } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
-  videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR } from './extension/shared/stemcache.js';
+  videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR,
+  CACHE_DIR_32F, separationRefusal } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 // The transpose lanes' group delay, IMPORTED and never re-typed. It is a term in
 // the latency assertion below, and a second copy of 3072 in this file is a second
@@ -103,7 +104,7 @@ import {
   LIVE_HOPS, SEAM_XFADE_LAW, STEM_RING_HEADER_BYTES, RING_PLANES, TAU,
   LIVE_CUSHION_SEC, LIVE_LOW_WATER_SEC, MARGINAL_P95_FRACTION, MARGINAL_DROP_RATE, LIVE_HOP_DEFAULT,
   HEALTH_HZ, XF_CURVES, XF_CURVE_DEFAULT, XF_CUT_EDGE, XF_TARGETS, XF_ASSIGN_DEFAULT,
-  XF_POSITION_DEFAULT, DECKS, MODEL, STEM_CACHE_MAX_BYTES,
+  XF_POSITION_DEFAULT, DECKS, MODEL, STEM_CACHE_MAX_BYTES, STEM_CACHE_32F_MAX_BYTES,
 } from './extension/shared/config.js';
 
 let pass = 0, fail = 0;
@@ -4038,6 +4039,213 @@ if (group('cache')) {
       ok('...so a cap of 1 byte on one tier does not empty the other',
         (await live.has('k-live')) && STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
     } finally { o.restore(); }
+  }
+  // ======================================================== U2: the 32f tier
+  head('cache — the 32f tier keys apart from the live one, and the LIVE KEY DOES NOT MOVE');
+  {
+    /**
+     * THE FIRST ASSERTION IS THE ONE THAT PROTECTS EVERY EXISTING USER, and it is
+     * written as a SHAPE rather than as a comparison against a stored string,
+     * because there is nothing to compare against: the old function is gone. A
+     * shape anchored at both ends goes red the moment anything is appended,
+     * which is the only way the tier component could have moved a legacy key.
+     */
+    const legacy = pipelineVersion(1.95);
+    ok('a legacy call carries NO tier component — the live cache\u2019s keys are byte-identical  '
+      + '[entry point: pipelineVersion(hop) with no tier, the call offscreen/engine.js makes]',
+      /^f1-[0-9a-f]{12}-sr44100-seg343980-hop1950-x50[LP]$/.test(legacy), legacy);
+    ok('...and spelling the legacy tier out loud is the same string, so the default is not a second format  '
+      + '[entry point: pipelineVersion(hop, {depth:16, geometry:\u2019causal\u2019})]',
+      pipelineVersion(1.95, { depth: 16, geometry: 'causal' }) === legacy, legacy);
+
+    const f32 = pipelineVersion(1.95, { depth: 32 });
+    ok('a 32f entry keys DIFFERENTLY from a 16-bit one for the same track and hop',
+      f32 !== legacy && /-d32f-gc$/.test(f32), f32);
+    const off = pipelineVersion(1.95, { depth: 32, geometry: 'offline' });
+    ok('...and a symmetric-window entry keys differently again — geometry changes the samples',
+      off !== f32 && /-d32f-go$/.test(off), off);
+    ok('the tier reaches the KEY, not just the version  '
+      + '[entry point: cacheKey(id, hop, tier)]',
+      cacheKey('abc', 1.95, { depth: 32 }) !== cacheKey('abc', 1.95)
+      && cacheKey('abc', 1.95, { depth: 32 }).startsWith('abc--'),
+      cacheKey('abc', 1.95, { depth: 32 }));
+  }
+
+  head('cache — storage arithmetic at both depths');
+  {
+    // 240 s x 44 100 = 10 584 000 frames. 16-bit stereo is 4 B/frame/stem,
+    // 32f is 8; six stems either way, plus one 44-byte header per stem file.
+    ok('bytesForSeconds is UNCHANGED at the live depth — 254.0 MB for four minutes',
+      bytesForSeconds(240) === 254016264 && bytesForSeconds(240, 16) === 254016264,
+      String(bytesForSeconds(240)));
+    ok('...and exactly doubles at 32f — 508.0 MB, the number the cap is sized from',
+      bytesForSeconds(240, 32) === 508032264
+      && bytesForSeconds(240, 32) - STEMS.length * 44 === 2 * (bytesForSeconds(240) - STEMS.length * 44),
+      String(bytesForSeconds(240, 32)));
+    ok('the 32f cap clears the pinned floor its own comment claims: two 10-minute entries',
+      STEM_CACHE_32F_MAX_BYTES > 2 * bytesForSeconds(600, 32),
+      `${(STEM_CACHE_32F_MAX_BYTES / 1024 ** 3).toFixed(2)} GiB cap vs `
+      + `${(2 * bytesForSeconds(600, 32) / 1024 ** 3).toFixed(2)} GiB pinned floor`);
+  }
+
+  head('cache — a 32f tier writes 32-bit float, into its own directory, and leaves the live tier alone');
+  {
+    const o = installOpfs();
+    try {
+      const live = new StemCache(50 * 1024 * 1024);
+      const f32 = new StemCache(50 * 1024 * 1024, CACHE_DIR_32F, { depth: 32, geometry: 'offline' });
+      const stems = makeStems(256, 5);
+      // Out of range on purpose: 32f is the export source and must not clip.
+      stems[STEMS[0]][0][7] = 1.7;
+
+      await live.put(live.keyFor('t', 1.95), { videoId: 't' }, makeStems(256, 9));
+      const k32 = f32.keyFor('t', 1.95);
+      await f32.put(k32, { videoId: 't' }, stems);
+
+      ok('keyFor() stamps the instance\u2019s own tier, so a key cannot disagree with its bytes  '
+        + '[entry point: StemCache.keyFor()]',
+        k32 === cacheKey('t', 1.95, { depth: 32, geometry: 'offline' }) && /-d32f-go$/.test(k32), k32);
+
+      const back = await f32.get(k32);
+      ok('the 32f entry records what it IS, not just what it is called',
+        back !== null && back.meta.depth === 32 && back.meta.geometry === 'offline',
+        back ? `depth ${back.meta.depth}, geometry ${back.meta.geometry}` : 'no entry');
+      ok('...and the file on disk really is IEEE float, not 32-bit fixed point',
+        (await (async () => {
+          const d = await o.root.getDirectoryHandle(CACHE_DIR_32F, { create: true });
+          const f = await (await d.getFileHandle(`${k32}.${STEMS[0]}.wav`)).getFile();
+          const w = decodeWav(await f.arrayBuffer());
+          return w.float === true && w.bitDepth === 32;
+        })()));
+      ok('...and it did not clip the out-of-range sample the export depends on',
+        back !== null && back.stems[STEMS[0]][0][7] === Math.fround(1.7),
+        back ? String(back.stems[STEMS[0]][0][7]) : 'no entry');
+      ok('a 32f entry is bigger than a 16-bit one of the same length, which is what the cap pays for',
+        back !== null && (await live.size()) > 0 && (await f32.size()) > (await live.size()),
+        `${await f32.size()} vs ${await live.size()}`);
+
+      ok('the live tier still holds exactly its own one track  '
+        + '[entry point: two StemCache instances, different directories]',
+        (await live.list()).length === 1 && (await f32.list()).length === 1);
+      const names32 = o.names(CACHE_DIR_32F);
+      const namesLive = o.names(CACHE_DIR);
+      ok('...and the stem files are in two directories on disk',
+        names32.some((n) => n.startsWith(k32)) && !namesLive.some((n) => n.startsWith(k32)),
+        `${CACHE_DIR_32F}: ${names32.length} files, ${CACHE_DIR}: ${namesLive.length}`);
+    } finally { o.restore(); }
+  }
+
+  head('cache — eviction takes a SET of pins, and refuses before the model rather than after');
+  {
+    const e = (key, bytes, usedAt) => ({ key, bytes, usedAt });
+    /**
+     * MULTI-CHARACTER KEYS ON PURPOSE. `new Set('a')` and `new Set(['a'])` are the
+     * same set, so single-character keys would make the string branch of the pin
+     * normaliser indistinguishable from the iterable one — the single-pin
+     * assertion below would pass whether or not that branch existed.
+     */
+    const entries = [e('aa', 100, 1), e('bb', 100, 2), e('cc', 100, 3)];
+    // 300 B held against a 150 B cap: two entries have to go, and the pinned one
+    // is never a candidate however old it is.
+    const one = planEviction(entries, 150, 'aa');
+    ok('a single pin still works, so the live path\u2019s one call site is unchanged  '
+      + '[entry point: planEviction(entries, cap, "a")]',
+      one.removed.map((x) => x.key).join() === 'bb,cc' && one.bytes === 100 && one.wouldExceed === false,
+      one.removed.map((x) => x.key).join());
+    const many = planEviction(entries, 150, ['aa', 'bb']);
+    ok('...and a SET of pins keeps every one of them — two decks and an export can be open at once',
+      many.removed.map((x) => x.key).join() === 'cc',
+      many.removed.map((x) => x.key).join() || 'nothing removed');
+    const all = planEviction(entries, 150, ['aa', 'bb', 'cc']);
+    ok('with everything pinned it removes NOTHING and says wouldExceed rather than deleting a track in use',
+      all.removed.length === 0 && all.wouldExceed === true && all.bytes === 300,
+      `${all.removed.length} removed, wouldExceed ${all.wouldExceed}`);
+
+    /**
+     * `separationRefusal` is the thing that makes the cap honest. Pure, and it
+     * takes the manifest rather than the cache, so it can answer before the
+     * decode and before the model — the same shape `primeRefusal` has.
+     */
+    const big = [e('open', bytesForSeconds(600, 32), 1)];
+    ok('a separation that fits is allowed, so the refusals below are not vacuous  '
+      + '[entry point: separationRefusal(seconds, entries, cap, pins)]',
+      separationRefusal(240, [], STEM_CACHE_32F_MAX_BYTES, null, 32) === null);
+    const tooBig = separationRefusal(60 * 60 * 4, [], STEM_CACHE_32F_MAX_BYTES, null, 32);
+    ok('a track too big for the WHOLE cache is refused naming both sizes',
+      typeof tooBig === 'string' && /GiB/.test(tooBig), tooBig || 'ALLOWED');
+    const pinnedOut = separationRefusal(600, big, bytesForSeconds(600, 32) + 1000, ['open'], 32);
+    ok('...and so is one that cannot fit BESIDE the tracks that are open — the slow leak, refused early',
+      typeof pinnedOut === 'string' && /pinned/.test(pinnedOut), pinnedOut || 'ALLOWED');
+    ok('...while the same track fits once that pin is released, so the refusal is about the pin and not the size',
+      separationRefusal(600, big, bytesForSeconds(600, 32) + 1000, null, 32) === null);
+    ok('a source that decoded to nothing is refused rather than cached as an empty track',
+      typeof separationRefusal(0, [], STEM_CACHE_32F_MAX_BYTES, null, 32) === 'string');
+  }
+
+  head('cache — a cached entry records the chunks that went out UNSEPARATED');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      const w = new CacheWriter(cacheKey('dr', 1.95), { videoId: 'dr' });
+      w.append(makePlanes(128, 11), 128);
+      w.noteDrop();
+      w.append(makePlanes(128, 13), 128);
+      w.noteDrop(2);
+      await w.commit(c);
+      const back = await c.get(w.key);
+      ok('drops survive the commit, so a surface can warn that part of a track is not separated  '
+        + '[entry point: CacheWriter.noteDrop() -> commit() -> the manifest]',
+        back !== null && back.meta.drops === 3, back ? String(back.meta.drops) : 'no entry');
+
+      const clean = new StemCache(50 * 1024 * 1024);
+      await clean.put('k-clean', { videoId: 'x' }, makeStems(64, 3));
+      const cb = await clean.get('k-clean');
+      ok('...and an entry nobody dropped a chunk into records 0 by construction, not by absence',
+        cb !== null && cb.meta.drops === 0, cb ? String(cb.meta.drops) : 'no entry');
+
+      const ab = new CacheWriter(cacheKey('dr2', 1.95), { videoId: 'dr2' });
+      ab.append(makePlanes(64, 15), 64);
+      ab.noteDrop();
+      ab.abort();
+      ok('abort() drops the drop count with the audio — a dead prime carries nothing forward',
+        ab.drops === 0);
+    } finally { o.restore(); }
+  }
+
+  head('cache — the writer REPORTS a length it cannot honour instead of crashing three layers away');
+  {
+    const threw = (f) => { try { f(); return null; } catch (e) { return e.message; } };
+    const w = new CacheWriter('k', {});
+    const short = threw(() => w.append(makePlanes(64, 21), 128));
+    ok('a length longer than the planes is refused, naming both counts  '
+      + '[entry point: CacheWriter.append()] — slice() would shorten it silently while '
+      + 'frames took the full length, and the entry would commit with silence in the tail',
+      short !== null && /128/.test(short) && /64/.test(short), short || 'ACCEPTED 128 frames from a 64-frame plane');
+    ok('...and it took no frames with it, so a refused append cannot half-land', w.frames === 0);
+    const bad = threw(() => w.append(makePlanes(64, 23), undefined));
+    ok('a non-integer length is refused too — `frames += undefined` is NaN, and a NaN-sized '
+      + 'Float32Array is what turned the next stems() into a RangeError from inside set()',
+      bad !== null && /integer/.test(bad), bad || 'ACCEPTED undefined as a frame count');
+
+    /**
+     * The SECOND line of defence, reached by corrupting the counter directly.
+     * `append()` above now refuses every input that produces this state, so the
+     * only way to it is by hand — which is the point: `stems()` is what the
+     * entry's correctness rests on, and it used to answer a disagreement with
+     * `RangeError: offset is out of bounds` thrown from inside `Float32Array.set`,
+     * a stack trace with no caller in it that takes a whole suite down with it.
+     */
+    const w2 = new CacheWriter('k2', {});
+    w2.append(makePlanes(64, 25), 64);
+    w2.frames = 999;                       // the disagreement, forced
+    const msg = threw(() => w2.stems());
+    ok('a frame counter that disagrees with the audio is NAMED, not thrown from inside Float32Array.set  '
+      + '[entry point: CacheWriter.stems()]',
+      msg !== null && /999/.test(msg) && /64/.test(msg) && !/offset is out of bounds/.test(msg),
+      msg || 'RETURNED A SILENTLY PADDED TRACK');
+    ok('...and it says which way the entry would have been wrong',
+      msg !== null && /padded with silence/.test(msg), msg);
   }
 }
 
