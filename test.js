@@ -151,6 +151,12 @@ const head = (s) => console.log(`\n\x1b[1m${s}\x1b[0m`);
  * a `RangeError` escape from inside `Float32Array.set`. This is LAYER 2, and it
  * belongs at the CALLER, because only the caller knows which block died.
  *
+ * LAYER 1 SAYS WHAT WENT WRONG; LAYER 2 SAYS WHAT IT COST. Neither is the other's
+ * substitute. A named throw with no guard is a good message on a dead file; a
+ * guard with no naming is a live file reporting that something unspecified
+ * happened. Read together they give the whole account in one red line — the
+ * thrown sentence, the block it killed, and the assertions that never ran.
+ *
  * ITS BOUND, MEASURED AND STATED: it converts a crash into a report. It does
  * NOT recover the assertions after the throw — those did not run, are not
  * counted, and the red says so in those words. A block that throws is still a
