@@ -77,7 +77,7 @@
 
 import { encodeWav, decodeWav } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
-  videoIdFromUrl, primeRefusal, commitRefusal } from './extension/shared/stemcache.js';
+  videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 // The transpose lanes' group delay, IMPORTED and never re-typed. It is a term in
 // the latency assertion below, and a second copy of 3072 in this file is a second
@@ -141,6 +141,116 @@ function noise(n, seed = 1) {
   const x = new Float32Array(n);
   for (let i = 0; i < n; i++) { s = (s * 1664525 + 1013904223) >>> 0; x[i] = (s / 4294967296) * 2 - 1; }
   return x;
+}
+
+/**
+ * A MINIMAL IN-MEMORY OPFS, AND THE ONLY ONE IN THIS FILE. Seeded by U0 (#33)
+ * for the two-instance isolation gate and extended by U10 (#34) for the rest of
+ * `StemCache`. One implementation, because two would be two chances to be
+ * wrong about the same platform.
+ *
+ * Only the calls `shared/stemcache.js` actually makes are implemented, and the
+ * TWO REJECTIONS ARE LOAD-BEARING: `getFileHandle` on a missing file and
+ * `removeEntry` on a missing entry must THROW, because those are exactly what
+ * `readJson()`, `get()`, `clear()` and `delete()` catch. A shim that resolved
+ * them would let a whole block pass against a cache that never stored anything
+ * — the VOID failure one level down.
+ *
+ * `navigator` IS A CONFIGURABLE GETTER WITH NO SETTER in Node 22, so a plain
+ * `globalThis.navigator = {...}` silently does nothing and leaves
+ * `navigator.storage` undefined. Measured, not assumed. `defineProperty` is the
+ * only thing that takes, and `restore()` puts the original descriptor back.
+ *
+ * WHY THIS IS A SHIM AT `navigator.storage` AND NOT A `dir()` SEAM — read this
+ * before "simplifying" it into one, because a seam is smaller and worse:
+ *
+ *  1. IT RUNS THE SHIPPED PATH. `dir()`, `readJson()`, `writeFile()`,
+ *     `loadManifest()` and the order `put()` writes in are all production code
+ *     under every assertion above. A `dir()` seam lets the tests agree with the
+ *     seam while the real `dir()` drifts — which is the exact failure these
+ *     suites exist to catch, so building the instrument out of it would be
+ *     circular.
+ *  2. THE SEAM WOULD SIT ON MOVING LINES. `dir()` had just become
+ *     instance-scoped for the 32f tier (U0, #33) — a seam threaded through it
+ *     would have had to be re-cut by that change, and an instrument that is
+ *     re-cut every time its anchor moves is one that will eventually be cut
+ *     wrong and go on passing.
+ *
+ * The apparatus beyond a plain filesystem is deliberate and named:
+ *   `written`  every file name in the order its bytes LANDED, which is how the
+ *              "manifest is written last" claim is checked rather than believed.
+ *   `failOn`   file names whose next close() throws, to interrupt a put mid-way
+ *              and see what a crash leaves behind.
+ */
+function installOpfs() {
+  const written = [];
+  const failOn = new Set();
+  const toBytes = (d) => {
+    if (d instanceof Uint8Array) return new Uint8Array(d);
+    if (d instanceof ArrayBuffer) return new Uint8Array(d.slice(0));
+    if (ArrayBuffer.isView(d)) return new Uint8Array(d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength));
+    return new Uint8Array(Buffer.from(String(d), 'utf8'));
+  };
+  const mkDir = (name) => {
+    const files = new Map();
+    return {
+      name, files,
+      async getFileHandle(n, opts) {
+        if (!files.has(n)) {
+          if (!(opts && opts.create)) throw new Error(`NotFoundError: ${n}`);
+          files.set(n, new Uint8Array(0));
+        }
+        return {
+          async getFile() {
+            const b = files.get(n);
+            if (!b) throw new Error(`NotFoundError: ${n}`);
+            return {
+              size: b.byteLength,
+              async text() { return Buffer.from(b).toString('utf8'); },
+              async arrayBuffer() { return b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength); },
+            };
+          },
+          async createWritable() {
+            const parts = [];
+            return {
+              async write(data) { parts.push(toBytes(data)); },
+              async close() {
+                if (failOn.has(n)) { failOn.delete(n); throw new Error(`simulated write failure: ${n}`); }
+                let t = 0; for (const q of parts) t += q.byteLength;
+                const all = new Uint8Array(t);
+                let o = 0; for (const q of parts) { all.set(q, o); o += q.byteLength; }
+                files.set(n, all);
+                written.push(n);
+              },
+            };
+          },
+        };
+      },
+      async removeEntry(n) { if (!files.delete(n)) throw new Error(`NotFoundError: ${n}`); },
+    };
+  };
+  const dirs = new Map();
+  const root = {
+    async getDirectoryHandle(n, opts) {
+      if (!dirs.has(n)) {
+        if (!(opts && opts.create)) throw new Error(`NotFoundError: ${n}`);
+        dirs.set(n, mkDir(n));
+      }
+      return dirs.get(n);
+    },
+    async removeEntry(n) { if (!dirs.delete(n)) throw new Error(`NotFoundError: ${n}`); },
+  };
+  const saved = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+  Object.defineProperty(globalThis, 'navigator', {
+    value: { storage: { getDirectory: async () => root } }, configurable: true, writable: true,
+  });
+  return {
+    root, dirs, written, failOn,
+    cacheDir: () => root.getDirectoryHandle(CACHE_DIR, { create: true }),
+    /** What is actually on disk in one directory, sorted. */
+    names: (d = CACHE_DIR) => (dirs.has(d) ? [...dirs.get(d).files.keys()].sort() : []),
+    restore: () => { if (saved) Object.defineProperty(globalThis, 'navigator', saved); else delete globalThis.navigator; },
+  };
 }
 
 /**
@@ -3572,6 +3682,362 @@ if (group('cache')) {
     ok('and a second round trip is BIT IDENTICAL — undithered means idempotent, ' +
        'so re-caching cannot accumulate noise',
       again.every((v, i) => v === back[i]));
+  }
+
+  head('cache — one cache owns one directory (a second tier cannot reach the first)');
+  /**
+   * REACHABLE: drives the real `StemCache` over a real OPFS surface, not a
+   * reimplementation of it. Every method below is the shipped one.
+   *
+   * WHY THIS EXISTS. The directory used to be a module constant that every
+   * instance shared — `dir()` read `CACHE_DIR` and ignored `this` — so a second
+   * cache constructed for a second tier silently operated on the FIRST tier's
+   * directory. `clear()` is the worst of it, because it removes the directory
+   * whole and its `.catch(() => {})` swallows the evidence: a 32f clear would
+   * delete the live 16-bit cache and report success. `list()`, `put()`,
+   * `delete()` and `evict()` had the same blindness one step less loudly.
+   *
+   * The two mutations that were watched red are named in the assertions.
+   */
+  {
+    /**
+     * A minimal in-memory OPFS. Only the six calls `shared/stemcache.js` makes
+     * are implemented, and the two that must REJECT do reject — `getFileHandle`
+     * on a missing file is what `readJson()` and `get()` catch, and
+     * `removeEntry` on a missing entry is what `clear()` and `delete()` catch.
+     * A shim that resolved those instead would make this whole block pass
+     * against a cache that never stored anything.
+     *
+     * `navigator` IS A CONFIGURABLE GETTER WITH NO SETTER in Node 22, so a plain
+     * `globalThis.navigator = {...}` silently does nothing and leaves
+     * `navigator.storage` undefined. Measured, not assumed. defineProperty is
+     * the only thing that takes.
+     */
+    const o0 = installOpfs();
+    const dirs = o0.dirs;
+
+    try {
+      // Eight frames per plane: this block is about WHICH DIRECTORY the bytes
+      // land in, and a longer fixture would only make it slower to be wrong.
+      const stems = {};
+      for (const s2 of STEMS) stems[s2] = [0, 1].map(() => new Float32Array(8).fill(0.25));
+
+      const live = new StemCache(1 << 30);                       // the shipping default
+      const f32 = new StemCache(1 << 30, 'stemcache-f32');       // the desktop tier
+
+      ok('a cache constructed with no directory still owns the shipping one  '
+         + '[entry point: new StemCache(maxBytes)]',
+        live.dirName === CACHE_DIR, `${live.dirName} vs ${CACHE_DIR}`);
+
+      await live.put('k-live', { title: 'live' }, stems);
+      await f32.put('k-32f', { title: 'f32' }, stems);
+
+      // MUTATION 1 (watched red): revert `dir(name)` to `getDirectoryHandle(CACHE_DIR)`.
+      // Both caches then write into 'stemcache', and each list() returns 2.
+      const liveKeys = (await live.list()).map((e) => e.key);
+      const f32Keys = (await f32.list()).map((e) => e.key);
+      ok('each cache lists ONLY its own entries  '
+         + '[entry point: StemCache.list() over two instances on different directories]',
+        liveKeys.length === 1 && liveKeys[0] === 'k-live'
+        && f32Keys.length === 1 && f32Keys[0] === 'k-32f',
+        `live=[${liveKeys}] f32=[${f32Keys}]`);
+
+      ok('...and the bytes really are in two directories on disk, not one manifest '
+         + 'filtered two ways',
+        dirs.has(CACHE_DIR) && dirs.has('stemcache-f32')
+        && [...dirs.get(CACHE_DIR).files.keys()].some((f) => f.startsWith('k-live.'))
+        && [...dirs.get('stemcache-f32').files.keys()].some((f) => f.startsWith('k-32f.')),
+        `${[...dirs.keys()]}`);
+
+      // MUTATION 2 (watched red): revert `clear()` to
+      // `root.removeEntry(CACHE_DIR, ...)`. The 32f clear then deletes the LIVE
+      // directory, live.list() returns 0, and this goes red — which is the
+      // failure in its real shape, a destroyed live tier, not a name mismatch.
+      await f32.clear();
+      const survived = (await live.list()).map((e) => e.key);
+      ok('clearing the 32f tier LEAVES THE LIVE TIER INTACT  '
+         + '[entry point: StemCache.clear() on the non-default directory]',
+        survived.length === 1 && survived[0] === 'k-live',
+        survived.length ? `live still holds [${survived}]` : 'THE LIVE CACHE WAS DESTROYED BY A 32f CLEAR');
+
+      ok('...and the tier that was cleared really is empty, so the clear was not a no-op '
+         + '(which would pass the assertion above for the wrong reason)',
+        (await f32.list()).length === 0);
+    } finally {
+      o0.restore();
+    }
+  }
+}
+
+// ===========================================================================
+/**
+ * cache — THE OPFS HALF: every `StemCache` method that touches storage, and
+ * `CacheWriter.commit()`. Before this block they had no coverage at all: the
+ * imports above reached only the pure functions, so `get`/`put`/`delete`/
+ * `evict`/`report`/`commit` could be changed freely and nothing went red.
+ *
+ * REACHABLE: drives the real `StemCache` and `CacheWriter`. Everything below
+ * `dir()` — `readJson`, `writeFile`, `loadManifest`, the manifest write
+ * ordering — is the shipped code, unmodified.
+ *
+ * The OPFS underneath is `installOpfs()`, at the top of this file — ONE shim,
+ * shared with U0's isolation block. Why it is a shim at `navigator.storage`
+ * rather than a `dir()` seam is argued there, next to the code it justifies.
+ */
+if (group('cache')) {
+  /** Six stems of deterministic noise, [L,R] each. */
+  const makeStems = (frames, seed = 1) => {
+    const out = {};
+    STEMS.forEach((s, k) => { out[s] = [noise(frames, seed + k * 2), noise(frames, seed + k * 2 + 1)]; });
+    return out;
+  };
+  /** STEMS.length*2 planes, stem-major [L,R], as the live pipeline emits them. */
+  const makePlanes = (frames, seed = 1) => {
+    const p = [];
+    for (let k = 0; k < STEMS.length; k++) { p.push(noise(frames, seed + k * 2), noise(frames, seed + k * 2 + 1)); }
+    return p;
+  };
+
+  head('cache — put/get round trip through OPFS');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      const key = cacheKey('vid1', 1.95);
+      const stems = makeStems(512, 7);
+      await c.put(key, { videoId: 'vid1', title: 'T', hopSeconds: 1.95 }, stems);
+
+      ok('put then has() finds the key', await c.has(key));
+      const got = await c.get(key);
+      ok('get() returns an entry rather than null', got !== null);
+      ok(`get() returns all ${STEMS.length} stems`,
+        got !== null && STEMS.every((s) => Array.isArray(got.stems[s]) && got.stems[s].length === 2),
+        got ? Object.keys(got.stems).join(',') : 'null');
+      ok('every stem comes back at the frame count that went in',
+        got !== null && STEMS.every((s) => got.stems[s][0].length === 512 && got.stems[s][1].length === 512));
+      // 16-bit undithered: the floor is quantisation, and `cache` already pins it at < -85 dB.
+      const db = got === null ? Infinity
+        : Math.max(...STEMS.map((s) => Math.max(residualDb(got.stems[s][0], stems[s][0]),
+                                                residualDb(got.stems[s][1], stems[s][1]))));
+      ok(`samples survive the round trip at the 16-bit floor (worst ${db.toFixed(1)} dB, gate < -85)`, db < -85);
+      ok('L and R are not swapped or shared on the way back',
+        got !== null && residualDb(got.stems[STEMS[0]][1], stems[STEMS[0]][0]) > -85,
+        'R must NOT match the L that went in');
+      ok('the meta the caller passed comes back on the entry',
+        got !== null && got.meta.videoId === 'vid1' && got.meta.title === 'T');
+      ok('frames is recorded on the entry, derived not passed', got !== null && got.meta.frames === 512);
+      ok('size() is the sum of the manifest bytes and is non-zero',
+        (await c.size()) === (await c.list()).reduce((a, e) => a + e.bytes, 0) && (await c.size()) > 0,
+        String(await c.size()));
+
+      const rep = await c.report();
+      ok('report() carries cap, use and track count', rep.tracks === 1 && rep.maxBytes === 50 * 1024 * 1024 && rep.bytes > 0);
+      ok('report() pct is bytes over cap', rep.pct === +(rep.bytes / rep.maxBytes).toFixed(4), String(rep.pct));
+
+      await c.delete(key);
+      ok('delete() drops the manifest entry', !(await c.has(key)));
+      const left = o.names().filter((n) => n.startsWith(key));
+      ok('delete() removes the stem files too, not just the entry', left.length === 0, left.join(',') || 'none');
+    } finally { o.restore(); }
+  }
+
+  head('cache — the manifest is written LAST, so a crash leaves an INVISIBLE entry, not a half-readable one');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      const key = cacheKey('vid2', 1.95);
+      await c.put(key, { videoId: 'vid2' }, makeStems(256, 3));
+      const order = o.written;
+      const mi = order.indexOf('manifest.json');
+      ok('the manifest is the LAST thing a put writes', mi === order.length - 1, order.join(' -> '));
+      ok(`all ${STEMS.length} stem files land BEFORE the manifest`,
+        STEMS.every((s) => { const i = order.indexOf(`${key}.${s}.wav`); return i >= 0 && i < mi; }),
+        `${mi} writes before the manifest`);
+    } finally { o.restore(); }
+  }
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      const key = cacheKey('vid3', 1.95);
+      // Crash the write of the FOURTH stem: past the first file, short of the manifest.
+      o.failOn.add(`${key}.${STEMS[3]}.wav`);
+      let threw = false;
+      try { await c.put(key, { videoId: 'vid3' }, makeStems(256, 5)); } catch { threw = true; }
+      ok('a stem write that fails makes put() throw rather than return quietly', threw);
+      // The instrument must be looking at a real half-write, or the rest is vacuous.
+      const cd = await o.cacheDir();
+      const partial = o.names().filter((n) => n.startsWith(key)).length;
+      const complete = o.names().filter((n) => n.startsWith(key) && cd.files.get(n).byteLength > 0).length;
+      // SOME BUT NOT ALL, rather than a pinned count: `getFileHandle(create)`
+      // makes the file before anything is written to it — real OPFS does that
+      // too — so the interrupted stem leaves an EMPTY file behind, and the
+      // number of those is the shim's business, not stemcache.js's. What this
+      // has to establish is only that a genuine half-written state exists for
+      // the assertions below to be about.
+      ok('the crash really did leave stem files behind — the precondition this asserts on',
+        partial > 0 && partial < STEMS.length && complete > 0 && complete < partial,
+        `${partial} of ${STEMS.length} stem files on disk, ${complete} of them with bytes in them`);
+      ok('...and the manifest never got the entry, so the track is INVISIBLE',
+        !(await c.has(key)));
+      ok('...so get() reports a miss rather than a track with holes in it',
+        (await c.get(key)) === null);
+    } finally { o.restore(); }
+  }
+
+  head('cache — get() self-heals an entry that lies about its files');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      const key = cacheKey('vid4', 1.95);
+      await c.put(key, { videoId: 'vid4' }, makeStems(256, 11));
+      ok('the entry is readable before the file is taken away', (await c.get(key)) !== null);
+      // Take ONE stem file out from under it: the shape of an interrupted evict
+      // or a storage eviction by the browser. The precondition is asserted and
+      // the removal is tolerant, so a put() that never wrote the file reports a
+      // RED here rather than throwing and taking this file's verdict with it.
+      const d0 = await o.cacheDir();
+      const victim = `${key}.${STEMS[2]}.wav`;
+      ok('the stem file about to be removed is really there — the precondition',
+        o.names().includes(victim), victim);
+      await d0.removeEntry(victim).catch(() => {});
+      ok('get() returns null rather than a track missing one stem', (await c.get(key)) === null);
+      ok('...and the lying entry is dropped from the manifest, not left to fail again',
+        !(await c.has(key)));
+      const left = o.names().filter((n) => n.startsWith(key));
+      ok('...and the surviving stem files are swept with it', left.length === 0, left.join(',') || 'none');
+    } finally { o.restore(); }
+  }
+
+  head('cache — evict() is LRU and the pin is never a candidate');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);           // room for all three first
+      const keys = ['a1', 'b2', 'c3'].map((v) => cacheKey(v, 1.95));
+      for (let i = 0; i < keys.length; i++) await c.put(keys[i], { videoId: keys[i] }, makeStems(256, 20 + i * 20));
+      ok('three entries are in the cache before any eviction', (await c.list()).length === 3);
+
+      // Explicit usedAt, so the order under test is stated rather than raced:
+      // keys[0] is the OLDEST and is also the one we pin.
+      const d = await o.cacheDir();
+      const m = JSON.parse(await (await (await d.getFileHandle('manifest.json')).getFile()).text());
+      m.entries.forEach((e) => { e.usedAt = 1000 + keys.indexOf(e.key); });
+      const w = await (await d.getFileHandle('manifest.json', { create: true })).createWritable();
+      await w.write(new TextEncoder().encode(JSON.stringify(m))); await w.close();
+
+      // Read the size off the manifest rather than assuming one — and say so, so
+      // a StemCache that records nothing produces a RED here instead of a
+      // TypeError that takes this whole file's verdict down with it.
+      const rows = await c.list();
+      ok('the entries carry the byte counts eviction works from',
+        rows.length === 3 && rows.every((e) => e.bytes > 0), rows.map((e) => e.bytes).join(',') || 'no rows');
+      const one = rows.length ? rows[0].bytes : 1;
+      c.maxBytes = one;                       // room for exactly one entry
+      const plan = await c.evict(keys[0]);    // pin the OLDEST — LRU would take it first
+
+      ok('evict() removed something, so the pin below is not vacuous', plan.removed.length > 0, `${plan.removed.length} removed`);
+      ok('the PINNED entry survives even though it is the oldest',
+        (await c.has(keys[0])), 'pin = the LRU victim');
+      ok('the two unpinned entries are the ones that went',
+        !(await c.has(keys[1])) && !(await c.has(keys[2])),
+        plan.removed.map((e) => e.key).join(','));
+      const names = o.names();
+      ok('eviction deletes the stem FILES, not just the manifest rows',
+        STEMS.every((s) => !names.includes(`${keys[1]}.${s}.wav`) && !names.includes(`${keys[2]}.${s}.wav`)));
+      ok('...and leaves the pinned track\'s files alone',
+        STEMS.every((s) => names.includes(`${keys[0]}.${s}.wav`)));
+      ok('the report says what it removed, so a UI can tell the user',
+        plan.removed.length === 2 && plan.removed.every((e) => typeof e.bytes === 'number'));
+      ok('wouldExceed is true when the pin alone is over the cap — the cache says so rather than deleting it',
+        (await (async () => { c.maxBytes = 1; return (await c.evict(keys[0])).wouldExceed; })()) === true);
+    } finally { o.restore(); }
+  }
+
+  head('cache — CacheWriter.commit(): an interrupted prime never becomes an entry');
+  {
+    const o = installOpfs();
+    try {
+      const c = new StemCache(50 * 1024 * 1024);
+      // The positive control FIRST: commit() must be able to return an entry,
+      // or the null below proves nothing.
+      const good = new CacheWriter(cacheKey('ok1', 1.95), { videoId: 'ok1' });
+      good.append(makePlanes(128, 2), 128);
+      good.append(makePlanes(128, 40), 128);
+      const r = await good.commit(c);
+      ok('a writer that ran to the end commits an entry', r !== null && r.frames === 256, r ? String(r.frames) : 'null');
+      const back = await c.get(good.key);
+      ok('...and that entry is readable back', back !== null);
+      ok('...and commit() reports the seconds it derived from the frames',
+        back !== null && back.meta.seconds === +(256 / SR).toFixed(2),
+        back ? String(back.meta.seconds) : 'no entry');
+
+      const w = new CacheWriter(cacheKey('bad1', 1.95), { videoId: 'bad1' });
+      w.append(makePlanes(128, 60), 128);
+      ok('the aborted writer really had frames to lose — the precondition', w.frames === 128);
+      w.abort();
+      ok('abort() drops the frames it was holding', w.frames === 0);
+      ok('commit() after abort() returns null', (await w.commit(c)) === null);
+      ok('...and writes NOTHING to the cache', !(await c.has(w.key)));
+
+      const empty = new CacheWriter(cacheKey('bad2', 1.95), { videoId: 'bad2' });
+      ok('commit() with nothing appended also returns null', (await empty.commit(c)) === null);
+      ok('...and leaves no entry behind', !(await c.has(empty.key)));
+
+      const late = new CacheWriter(cacheKey('bad3', 1.95), { videoId: 'bad3' });
+      late.abort();
+      late.append(makePlanes(128, 80), 128);
+      ok('append() after abort() is ignored, so a late hop cannot revive a dead prime', late.frames === 0);
+      ok('...and it still commits to null', (await late.commit(c)) === null);
+    } finally { o.restore(); }
+  }
+
+  head('cache — the tier boundary holds through get, put, delete and evict too');
+  /**
+   * U0 (#33) proved the boundary for `list()` and `clear()`. It was never only
+   * those two: `dir()` was module-level and ignored `this`, so ALL SIX methods
+   * read and wrote the first tier's directory — a second cache would have
+   * RETURNED another tier's tracks and WRITTEN its stems where that tier would
+   * find them, not merely cleared it. These are the other four, so the fix is
+   * pinned everywhere it was broken rather than everywhere it was loudest.
+   *
+   * Watched red by U0's mutation 1: revert `dir(name)` to
+   * `getDirectoryHandle(CACHE_DIR)` and every assertion here goes red.
+   */
+  {
+    const o = installOpfs();
+    try {
+      const live = new StemCache(1 << 30);
+      const f32 = new StemCache(1 << 30, 'stemcache-f32');
+      const stems = makeStems(64, 5);
+      await live.put('k-live', { title: 'live' }, stems);
+      await f32.put('k-32f', { title: 'f32' }, stems);
+
+      const inLive = (p) => o.names(CACHE_DIR).some((n) => n.startsWith(p));
+      const in32 = (p) => o.names('stemcache-f32').some((n) => n.startsWith(p));
+      ok('put() writes into the caller\'s own directory and only there',
+        inLive('k-live.') && !inLive('k-32f.') && in32('k-32f.') && !in32('k-live.'),
+        `${CACHE_DIR}=[${o.names(CACHE_DIR).length} files] stemcache-f32=[${o.names('stemcache-f32').length} files]`);
+
+      ok('get() cannot reach across the boundary — each tier misses the other\'s key',
+        (await f32.get('k-live')) === null && (await live.get('k-32f')) === null);
+      ok('...and this is not a cache that simply reads nothing: each tier still gets its own back',
+        (await live.get('k-live')) !== null && (await f32.get('k-32f')) !== null);
+
+      await f32.delete('k-live');          // a key that is not f32's to delete
+      ok('delete() on one tier cannot remove the other tier\'s entry', await live.has('k-live'));
+      ok('...nor the other tier\'s files', STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
+
+      f32.maxBytes = 1;                    // force it to evict everything it owns
+      const plan = await f32.evict();
+      ok('evict() only ever considers its own tier\'s entries',
+        plan.removed.length === 1 && plan.removed[0].key === 'k-32f',
+        plan.removed.map((e) => e.key).join(',') || 'nothing removed');
+      ok('...so a cap of 1 byte on one tier does not empty the other',
+        (await live.has('k-live')) && STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
+    } finally { o.restore(); }
   }
 }
 
