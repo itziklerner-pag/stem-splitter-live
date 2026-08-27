@@ -3263,6 +3263,130 @@ if (group('live')) {
       lp.dispose();
     }
 
+    head('live — RAM does not grow with duration: the RETAINED BUFFER COUNT is constant (U7, stem-workbench #7)');
+    /**
+     * A COUNT, NEVER A MEMORY READING, and the difference is the whole point.
+     *
+     * `process.memoryUsage()` measures the MACHINE — GC timing, the heap the
+     * suite before this one left behind, whatever V8 felt like doing. It would
+     * be a number that moves for reasons that have nothing to do with this code,
+     * which is `AGENTS.md`'s "if a count can carry the claim, do not carry it
+     * with a stopwatch" in its purest form. **How many buffers the pipeline is
+     * holding is a fact about the code.** It can only change if someone makes
+     * the pipeline retain something per hop.
+     *
+     * WHAT "RETAINED" MEANS HERE, stated so the number is checkable rather than
+     * impressive: every ArrayBuffer/TypedArray the LivePipeline instance still
+     * has a reference to through its own fields, counted structurally. A
+     * recording streams into the writer and is never accumulated in RAM, so the
+     * count at 60 s must equal the count at 10 s exactly — not "grow slowly",
+     * not "stay within a factor".
+     *
+     * WHICH KIND — reachable by construction on the pipeline's own state. It
+     * drives the real `LivePipeline` through real chunks and real passthrough
+     * spans; nothing is simulated except the inference and the clock.
+     */
+    {
+      const lp = mount();
+      const hdr = new Int32Array(capSab, 0, 16);
+      const pl = new Float32Array(capSab, 64, CAP), pr = new Float32Array(capSab, 64 + CAP * 4, CAP);
+      for (let i = 0; i < CAP; i++) { pl[i] = 0.5; pr[i] = -0.5; }
+      Atomics.store(hdr, 0, CAP);
+      const rec = {
+        frames: 0, drops: 0, aborted: false, appends: 0,
+        append(planes, len) { this.appends++; this.frames += len; },
+        noteDrop(n = 1) { this.drops += n; },
+        abort() { this.aborted = true; },
+      };
+      lp.attachRecWriter(rec);
+
+      /**
+       * Every buffer the instance still holds, found by walking its own fields
+       * rather than by listing the ones we remember. A list would be a second
+       * place to forget the field somebody adds; the walk cannot miss it.
+       * One level into plain arrays and objects, which is where this class keeps
+       * its scratch (`tail`, `planes`, the pass buffers).
+       */
+      const heldBuffers = (o, seen = new Set(), depth = 0) => {
+        let n = 0;
+        if (!o || typeof o !== 'object' || seen.has(o) || depth > 3) return n;
+        seen.add(o);
+        for (const v of Object.values(o)) {
+          if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) n++;
+          else if (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object)) {
+            n += heldBuffers(v, seen, depth + 1);
+          }
+        }
+        return n;
+      };
+
+      /**
+       * Run the pipeline forward by `seconds` of capture, one chunk per hop.
+       *
+       * THE LADDER IS STUBBED OUT FOR THIS BLOCK, and that is a deliberate
+       * narrowing rather than a convenience. `pump()` decides between running a
+       * chunk and publishing passthrough based on the capture clock, and with a
+       * 131072-frame ring — under one SEGMENT — it interleaves skips into the
+       * sequence and the chunk indices stop being contiguous. Watched: the first
+       * version of this block threw `non-contiguous write at 599760, expected
+       * 513765`, exactly one hop's worth. The ladder's behaviour is asserted at
+       * length elsewhere in this group; the subject HERE is what the pipeline
+       * RETAINS while doing the work, and that is independent of which rung it
+       * is on.
+       *
+       * THE PLAYHEAD IS ADVANCED TOO, and leaving it out is what made the first
+       * two attempts fail. The stem ring is 524288 frames — 11.9 s — and
+       * `StemRingWriter.write()` returns FALSE rather than lapping a consumer
+       * that has not read yet. With nothing consuming, every write past 11.9 s
+       * was refused, the writer's cursor stopped advancing, and the NEXT chunk
+       * then threw `non-contiguous write at 599760, expected 513765` — which
+       * reads like a dropped chunk and is really a full ring. A recording that
+       * runs for 60 s has a playhead consuming behind it; a fixture that wants
+       * to run for 60 s needs one too.
+       *
+       * The capture clock is advanced with it, or every chunk after the first
+       * reads a span the ring says has not been captured.
+       */
+      const realPump = lp.pump.bind(lp);
+      lp.pump = () => {};
+      const runFor = async (seconds) => {
+        const hops = Math.max(1, Math.round(seconds / lp.plan.hopSeconds));
+        for (let i = 0; i < hops; i++) {
+          const c = chunkPlan(lp.k, lp.plan);
+          Atomics.store(hdr, 0, lp.baseFrame + c.inputEnd);
+          await lp.runChunk(c);
+          quiesce(lp);
+          // The playhead, consuming what was just published.
+          Atomics.store(lp.out.hdr, 1, lp.emitter.commit);
+        }
+      };
+      void realPump;
+
+      await runFor(10);
+      const at10 = heldBuffers(lp);
+      const appends10 = rec.appends;
+      await runFor(50);
+      const at60 = heldBuffers(lp);
+
+      ok('the pipeline holds THE SAME NUMBER OF BUFFERS after 60 s of recording as after 10 s  '
+        + '[entry point: extension/offscreen/live.js, its own fields walked structurally; never a memory reading]',
+        at10 > 0 && at60 === at10,
+        at10 === 0
+          ? 'the walk found no buffers at all, so it is not looking at the pipeline it thinks it is'
+          : at60 === at10
+            ? `${at10} buffers at 10 s, ${at60} at 60 s — ${rec.appends} appends streamed to the writer, none retained`
+            : `${at10} -> ${at60}: the pipeline retained ${at60 - at10} more buffer(s) over 50 s of recording, `
+              + 'so RAM grows with duration and a long export ends in an OOM');
+
+      ok('...and the CONTROL: the recording really advanced over that span, so the count above was measured across work and not across nothing',
+        rec.appends > appends10 && appends10 > 0,
+        `${appends10} appends by 10 s, ${rec.appends} by 60 s, ${rec.frames} frames streamed`);
+
+      lp.pump = realPump;
+      lp.detachRecWriter();
+      lp.dispose();
+    }
+
     head('live — the output watchdog: "green and silent" has to be self-reporting');
     {
       /**
