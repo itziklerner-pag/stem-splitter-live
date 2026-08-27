@@ -136,6 +136,32 @@ function ok(name, cond, detail = '') {
 }
 const head = (s) => console.log(`\n\x1b[1m${s}\x1b[0m`);
 
+/**
+ * A THROW INSIDE A BLOCK IS A DEAD FILE, AND A DEAD FILE IS WORSE THAN A RED.
+ *
+ * This file is ONE process: a block that throws ends the run, so every later
+ * block's verdict is lost and the summary line never prints. That is the exact
+ * shape of upstream #30 — a suite whose ability to REPORT a defect was itself
+ * destroyed by the defect — and it has now appeared three times in the cache
+ * group alone: `CacheWriter.stems()` throwing on a frames/audio disagreement,
+ * a block reaching for a file a broken `put()` never wrote, and this suite's
+ * own apparatus doing the same.
+ *
+ * `stemcache.js` already does LAYER 1: it NAMES the failure instead of letting
+ * a `RangeError` escape from inside `Float32Array.set`. This is LAYER 2, and it
+ * belongs at the CALLER, because only the caller knows which block died.
+ *
+ * ITS BOUND, MEASURED AND STATED: it converts a crash into a report. It does
+ * NOT recover the assertions after the throw — those did not run, are not
+ * counted, and the red says so in those words. A block that throws is still a
+ * failure; it is now a failure you can read the rest of the file around.
+ */
+function blockThrew(what, e) {
+  ok(`${what} — the block ran to its end without throwing`, false,
+    `THREW: ${(e && e.message) || e}  ...the assertions after that point DID NOT RUN and are not `
+    + 'counted. This names the death; it does not undo it.');
+}
+
 /** 20*log10(||a-b|| / ||b||) */
 function residualDb(a, b) {
   let num = 0, den = 0;
@@ -2981,47 +3007,51 @@ if (group('cache')) {
 
   head('cache — the writer accumulates hops and refuses to commit a broken prime');
   {
-    const w = new CacheWriter('k', { videoId: 'v' });
-    // TWELVE planes, one per stem channel. Each carries its own value so a
-    // plane-to-stem mapping error is a wrong number rather than a wrong length.
-    const planes = Array.from({ length: STEMS.length * 2 }, (_, q) => new Float32Array(100).fill((q + 1) / 10));
-    w.append(planes, 100);
-    w.append(planes, 60);                       // a short final hop
-    ok('frames accumulate across hops', w.frames === 160, `${w.frames}`);
-    const st = w.stems();
-    ok(`all ${STEMS.length} stems come back with both channels at the right length`,
-      Object.keys(st).length === STEMS.length &&
-      STEMS.every((s) => st[s].length === 2 && st[s][0].length === 160),
-      Object.keys(st).join(','));
-    /**
-     * WIDENED, NOT SPOT-CHECKED. The four-stem form asserted drums (planes 0/1)
-     * and vocals (6/7) and inferred the rest. At six stems the two planes that
-     * can be wrong without either of those noticing are precisely the new ones —
-     * guitar at 8/9 and piano at 10/11 — so the mapping is now asserted for
-     * EVERY stem, `planes[2k]` -> L and `planes[2k+1]` -> R.
-     * (Folded in from TRACK A's isolation suite.)
-     */
-    const wrong = STEMS.filter((s, k) =>
-      Math.abs(st[s][0][0] - (planeL(k) + 1) / 10) > 1e-6 ||
-      Math.abs(st[s][1][0] - (planeR(k) + 1) / 10) > 1e-6);
-    ok('every stem reads back plane pair 2k / 2k+1, L then R — guitar is 8/9, piano 10/11, no off-by-two',
-      wrong.length === 0,
-      STEMS.map((s, k) => `${s}=${st[s][0][0].toFixed(1)}/${st[s][1][0].toFixed(1)}`).join(' '));
-    ok('a short final hop is not padded out', st.bass[0][159] !== 0 && st.bass[0].length === 160);
-    /**
-     * THE REFUSAL, and it is the one that keeps the widening from arriving
-     * half-done. An 8-plane caller would cache four stems, COMMIT, and read back
-     * later as a track that is silently missing its guitar and piano — the
-     * silently-stale entry this whole file exists to prevent, with nothing in
-     * the UI able to tell you. (Folded in from TRACK A's isolation suite.)
-     */
-    let shortAppend = '';
-    try { new CacheWriter('k', {}).append(planes.slice(0, 8), 100); } catch (e) { shortAppend = e.message; }
-    ok('append() REFUSES an 8-plane call rather than caching four stems and committing',
-      new RegExp(`needs ${STEMS.length * 2} planes for ${STEMS.length} stems, got 8`).test(shortAppend),
-      shortAppend || '(did not throw)');
-    w.abort();
-    ok('an aborted prime holds nothing and cannot commit', w.frames === 0);
+    try {
+      const w = new CacheWriter('k', { videoId: 'v' });
+      // TWELVE planes, one per stem channel. Each carries its own value so a
+      // plane-to-stem mapping error is a wrong number rather than a wrong length.
+      const planes = Array.from({ length: STEMS.length * 2 }, (_, q) => new Float32Array(100).fill((q + 1) / 10));
+      w.append(planes, 100);
+      w.append(planes, 60);                       // a short final hop
+      ok('frames accumulate across hops', w.frames === 160, `${w.frames}`);
+      const st = w.stems();
+      ok(`all ${STEMS.length} stems come back with both channels at the right length`,
+        Object.keys(st).length === STEMS.length &&
+        STEMS.every((s) => st[s].length === 2 && st[s][0].length === 160),
+        Object.keys(st).join(','));
+      /**
+       * WIDENED, NOT SPOT-CHECKED. The four-stem form asserted drums (planes 0/1)
+       * and vocals (6/7) and inferred the rest. At six stems the two planes that
+       * can be wrong without either of those noticing are precisely the new ones —
+       * guitar at 8/9 and piano at 10/11 — so the mapping is now asserted for
+       * EVERY stem, `planes[2k]` -> L and `planes[2k+1]` -> R.
+       * (Folded in from TRACK A's isolation suite.)
+       */
+      const wrong = STEMS.filter((s, k) =>
+        Math.abs(st[s][0][0] - (planeL(k) + 1) / 10) > 1e-6 ||
+        Math.abs(st[s][1][0] - (planeR(k) + 1) / 10) > 1e-6);
+      ok('every stem reads back plane pair 2k / 2k+1, L then R — guitar is 8/9, piano 10/11, no off-by-two',
+        wrong.length === 0,
+        STEMS.map((s, k) => `${s}=${st[s][0][0].toFixed(1)}/${st[s][1][0].toFixed(1)}`).join(' '));
+      ok('a short final hop is not padded out', st.bass[0][159] !== 0 && st.bass[0].length === 160);
+      /**
+       * THE REFUSAL, and it is the one that keeps the widening from arriving
+       * half-done. An 8-plane caller would cache four stems, COMMIT, and read back
+       * later as a track that is silently missing its guitar and piano — the
+       * silently-stale entry this whole file exists to prevent, with nothing in
+       * the UI able to tell you. (Folded in from TRACK A's isolation suite.)
+       */
+      let shortAppend = '';
+      try { new CacheWriter('k', {}).append(planes.slice(0, 8), 100); } catch (e) { shortAppend = e.message; }
+      ok('append() REFUSES an 8-plane call rather than caching four stems and committing',
+        new RegExp(`needs ${STEMS.length * 2} planes for ${STEMS.length} stems, got 8`).test(shortAppend),
+        shortAppend || '(did not throw)');
+      w.abort();
+      ok('an aborted prime holds nothing and cannot commit', w.frames === 0);
+    } catch (e) {
+      blockThrew('cache — the writer accumulates hops and refuses to commit a broken prime', e);
+    }
   }
 
   head('cache — eviction is strict LRU, predictable, and never touches the playing track');
@@ -4382,6 +4412,8 @@ if (group('cache')) {
       ok('...and the tier that was cleared really is empty, so the clear was not a no-op '
          + '(which would pass the assertion above for the wrong reason)',
         (await f32.list()).length === 0);
+    } catch (e) {
+      blockThrew('cache — one cache owns one directory (a second tier cannot reach the first)', e);
     } finally {
       o0.restore();
     }
@@ -4457,6 +4489,8 @@ if (group('cache')) {
       ok('delete() drops the manifest entry', !(await c.has(key)));
       const left = o.names().filter((n) => n.startsWith(key));
       ok('delete() removes the stem files too, not just the entry', left.length === 0, left.join(',') || 'none');
+    } catch (e) {
+      blockThrew('cache — put/get round trip through OPFS', e);
     } finally { o.restore(); }
   }
 
@@ -4473,6 +4507,8 @@ if (group('cache')) {
       ok(`all ${STEMS.length} stem files land BEFORE the manifest`,
         STEMS.every((s) => { const i = order.indexOf(`${key}.${s}.wav`); return i >= 0 && i < mi; }),
         `${mi} writes before the manifest`);
+    } catch (e) {
+      blockThrew('cache — the manifest is written LAST, so a crash leaves an INVISIBLE entry, not a half-readable one', e);
     } finally { o.restore(); }
   }
   {
@@ -4502,6 +4538,8 @@ if (group('cache')) {
         !(await c.has(key)));
       ok('...so get() reports a miss rather than a track with holes in it',
         (await c.get(key)) === null);
+    } catch (e) {
+      blockThrew('cache — the manifest is written LAST, so a crash leaves an INVISIBLE entry, not a half-readable one', e);
     } finally { o.restore(); }
   }
 
@@ -4527,6 +4565,8 @@ if (group('cache')) {
         !(await c.has(key)));
       const left = o.names().filter((n) => n.startsWith(key));
       ok('...and the surviving stem files are swept with it', left.length === 0, left.join(',') || 'none');
+    } catch (e) {
+      blockThrew('cache — get() self-heals an entry that lies about its files', e);
     } finally { o.restore(); }
   }
 
@@ -4572,6 +4612,8 @@ if (group('cache')) {
         plan.removed.length === 2 && plan.removed.every((e) => typeof e.bytes === 'number'));
       ok('wouldExceed is true when the pin alone is over the cap — the cache says so rather than deleting it',
         (await (async () => { c.maxBytes = 1; return (await c.evict(keys[0])).wouldExceed; })()) === true);
+    } catch (e) {
+      blockThrew('cache — evict() is LRU and the pin is never a candidate', e);
     } finally { o.restore(); }
   }
 
@@ -4610,6 +4652,8 @@ if (group('cache')) {
       late.append(makePlanes(128, 80), 128);
       ok('append() after abort() is ignored, so a late hop cannot revive a dead prime', late.frames === 0);
       ok('...and it still commits to null', (await late.commit(c)) === null);
+    } catch (e) {
+      blockThrew('cache — CacheWriter.commit(): an interrupted prime never becomes an entry', e);
     } finally { o.restore(); }
   }
 
@@ -4663,6 +4707,8 @@ if (group('cache')) {
       await f32.delete('k-live');          // a key that is not f32's to delete
       ok('delete() on one tier cannot remove the other tier\'s entry', await live.has('k-live'));
       ok('...nor the other tier\'s files', STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
+    } catch (e) {
+      blockThrew('cache — the tier boundary holds through get, put, delete and evict too', e);
     } finally { o.restore(); }
   }
   // ======================================================== U2: the 32f tier
@@ -4757,6 +4803,8 @@ if (group('cache')) {
       ok('...and the stem files are in two directories on disk',
         names32.some((n) => n.startsWith(k32)) && !namesLive.some((n) => n.startsWith(k32)),
         `${CACHE_DIR_32F}: ${names32.length} files, ${CACHE_DIR}: ${namesLive.length}`);
+    } catch (e) {
+      blockThrew('cache — a 32f tier writes 32-bit float, into its own directory, and leaves the live tier alone', e);
     } finally { o.restore(); }
   }
 
@@ -4835,6 +4883,8 @@ if (group('cache')) {
       ab.abort();
       ok('abort() drops the drop count with the audio — a dead prime carries nothing forward',
         ab.drops === 0);
+    } catch (e) {
+      blockThrew('cache — a cached entry records the chunks that went out UNSEPARATED', e);
     } finally { o.restore(); }
   }
 
