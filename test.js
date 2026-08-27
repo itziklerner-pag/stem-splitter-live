@@ -10343,11 +10343,13 @@ if (group('host')) {
 
   // ------------------------------- the deck as transport master (U6, #43)
   /**
-   * THE MUTATION TABLE FOR THIS SECTION — 24 of 24 watched red: M1-M17 at
-   * `d75a6fd`, M18-M24 at the D1 repair that follows it.
+   * THE MUTATION TABLE FOR THIS SECTION — 33 of 33 watched red: M1-M17 at
+   * `d75a6fd`, M18-M24 at the D1 repair that follows it, M25-M33 at the
+   * coverage repair that closes the review's D3/D4/D5/D7.
    *
    * EXECUTABLE COPY: `tools/mutations/u6-transport-master.mjs`, in the tree
-   * beside this suite, cut against `619908a`. Re-run it before any tag: a
+   * beside this suite, cut against `d75a6fd` (M1-M17), `980ef24` (M18-M24)
+   * and `7acd42c` (M25-M33). Re-run it before any tag: a
    * battery is only valid against the source it was cut for, and a later slice
    * that rewrites one of these lines stops its anchor matching with nothing
    * announcing it. That file reports ANCHOR and RED as two columns, never as
@@ -10360,17 +10362,22 @@ if (group('host')) {
    *       — the state `transport: null` puts the deck                                        `hosted=false, videoPlaying=null,
    *       in, with a transport present                                                       start/start/start — 3 capture grant
    *                                                                                          request(s), 3 model ask(s)`
-   *  M2   the follower stops registering onState       extension/ui/embed-state.js:208       3 reds; the first-gesture assertion and
-   *       — `videoPlaying` structurally unwritable                                           the page-hosted path
-   *  M3   the shipping Host declares it has no player  extension/ui/host.js                  4 reds AND 32 of 155 DID NOT RUN — the
+   *  M2   the follower stops registering onState       extension/ui/embed-state.js:208       4 reds; the first-gesture assertion, the
+   *       — `videoPlaying` structurally unwritable                                           page-hosted path, the unwritability
+   *                                                                                          precondition, and the idempotence
+   *                                                                                          test's registration
+   *  M3   the shipping Host declares it has no player  extension/ui/host.js                  4 reds AND 38 of 161 DID NOT RUN — the
    *       (FRAMED forced false)                                                              group guard reporting a truncation
    *  M4   the follower's start effect does nothing     extension/ui/embed.js:2238            the chain assertion: the count above
    *                                                                                          would stand in for nothing
    *  M5   the deck builds its follower over a          extension/ui/embed.js:2233            2 reds: the hosted derivation, and the
    *       transport of its own, not the Host's                                               chain regex that anchors on it
-   *  M6   the deck stops putting its report on         extension/offscreen/cacheddeck.js     6 reds; the playhead, the first
+   *  M6   the deck stops putting its report on         extension/offscreen/cacheddeck.js     8 reds; the playhead, the first
    *       the wire                                                                           gesture, the pair, the seeking check,
-   *                                                                                          the tri-state, the video-lock gate
+   *                                                                                          the tri-state, the video-lock gate,
+   *                                                                                          the ENDED pair and the NEW TRACK
+   *                                                                                          report — every assertion that reads
+   *                                                                                          the wire
    *  M7   the report carries a constant position       extension/offscreen/cacheddeck.js     3 reds: the playhead, plus the pair and
    *       instead of the playhead                                                            seeking assertions the collapsed dedupe
    *                                                                                          starves
@@ -10379,8 +10386,10 @@ if (group('host')) {
    *  M10  drive() spreads its patch                    extension/offscreen/cacheddeck.js:778 the closed write set: `volume=0.1`
    *  M11  pushMaster ignores the transport mute        extension/offscreen/cacheddeck.js     2 reds: the mute never reaches the
    *                                                                                          graph, and the lock gate reads the slot
-   *  M12  release() does not unmute                    extension/offscreen/cacheddeck.js     2 reds: the player is not handed back,
-   *                                                                                          and the lock gate reads the release
+   *  M12  release() does not unmute                    extension/offscreen/cacheddeck.js     3 reds: the player is not handed back,
+   *                                                                                          the lock gate reads the release, and
+   *                                                                                          the release-bus assertion reads 0
+   *                                                                                          from the slot it pins at −6 dB
    *  M13  load() lets a mute survive the track         extension/offscreen/cacheddeck.js     2 reds: the next track inherits the
    *                                                                                          lock, and the gate plays after that load
    *  M14  the effects bag is not checked               extension/ui/embed-state.js:169       a half-wired follower is accepted
@@ -10401,6 +10410,19 @@ if (group('host')) {
    *  M22  the report grows a sixth value                extension/offscreen/cacheddeck.js     the five-of-six assertion (FINDING A)
    *  M23  the boot line drops the declarations table    extension/ui/embed.js                 both boot-check assertions
    *  M24  assertHostOption stops passing them on        extension/shared/host.js              the refusal assertion, one layer in
+   *
+   *  ---- THE COVERAGE REPAIR: the review's D3/D4/D5/D7 ---------------------
+   *  M25  listen() drops its idempotence latch         extension/ui/embed-state.js:205       1 red: the idempotence assertion
+   *  M26  the report's `atMs` becomes the constant 0   extension/offscreen/cacheddeck.js:758 1 red: the sampled-in-the-call check
+   *  M27  the report's `ended` becomes the constant    extension/offscreen/cacheddeck.js:736 1 red: the ENDED pair
+   *       false
+   *  M28  release() speaks on the bus again            extension/offscreen/cacheddeck.js     1 red: the silent release
+   *  M29  stop() clears the lock flag, not the graph   extension/offscreen/cacheddeck.js     1 red: the STOPPED-under-a-lock check
+   *  M30  load() keeps the dedupe key across the       extension/offscreen/cacheddeck.js     1 red: the NEW TRACK report
+   *       track boundary
+   *  M31  the engine drops the refusal record          extension/offscreen/engine.js:1287    1 red: the raw-message chain
+   *  M32  a second `transport != null` appears         extension/ui/embed-state.js:182       1 red: the asks-once count
+   *  M33  drive() becomes Object.assign                extension/offscreen/cacheddeck.js:806 1 red: the closed write set
    *
    * M18 AND M21 ARE ONE PAIR AND NEITHER IS REDUNDANT. M18 breaks the ANSWER
    * and the chain link stays green; M21 breaks the WIRING and the gate stays
@@ -10424,6 +10446,12 @@ if (group('host')) {
    * reads 6, M7/M11/M12/M13 each read one and read two or three — and nothing
    * went red while they were wrong, which is exactly the decay INTEGRATION §26
    * is about: a mutation table is a set of measurements and it rots like one.
+   *
+   * AND THE COVERAGE REPAIR MOVED THEM AGAIN, measured the same way: M3's
+   * truncation is 38 of 161, M6 reads 8, M2 and M12 read 4 and 3 — each of the
+   * four assertions the repair added (the ENDED pair, the NEW TRACK report,
+   * the silent release, the idempotence latch) cost the battery one more
+   * claim, and the both-ways direction is what said so.
    *
    * M20 IS THE CASE THAT CHANGED AN ASSERTION RATHER THAN CONFIRMING IT. An
    * omitted declaration is ALSO not a boolean, so `assertDeclared` still threw

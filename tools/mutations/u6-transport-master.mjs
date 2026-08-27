@@ -152,11 +152,12 @@ const CUT_REPAIR = '980ef24';
  * stamping them to it would be a claim this file can be checked against and
  * would lose.
  *
- * PROSE UNTIL THE COMMIT EXISTS, which is the third answer the check below
- * keeps for exactly this: "not committed yet" and "rebased away" are opposite
- * findings and must not print as the same line. Re-stamp after landing.
+ * Landed as `7acd42c`; re-stamp after the rebase, when the coverage repair
+ * gets its rebased SHA — "not committed yet" and "rebased away" are opposite
+ * findings and must not print as the same line, which is what the check
+ * below's third answer is for.
  */
-const CUT_MAJORS = 'HEAD (the D3/D4/D5/D7 coverage repair; re-stamp at integration)';
+const CUT_MAJORS = '7acd42c';
 
 const SUITES = {
   host: { argv: ['test.js', 'host'], label: 'node test.js host' },
@@ -234,6 +235,10 @@ const MUTATIONS = [
       // Nothing writes the tri-state, so the unwritability assertion's own
       // precondition (`flagBefore === true`) can never be reached.
       'and nothing outside the transport can write `videoPlaying`',
+      // ...and the idempotence assertion counts the very registration this
+      // mutation skips: the stub keeps every handler it is given, and M2
+      // gives it none, so `twiceHandlers.length === 1` reads 0.
+      'listen() IS IDEMPOTENT',
     ],
     /**
      * NOT a red here, and the reason is worth the line: the duty-reach scan is
@@ -373,6 +378,12 @@ const MUTATIONS = [
       // ...and the video-lock gate reads the deck's own last report, which
       // never arrives, so its `playing === true` term has nothing to read.
       'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+      // ...and the two assertions that read the wire this mutation severs:
+      // the deck still reaches `ended` (and still loads a new track), but no
+      // report ever leaves the engine, so `endedRep` and `load2` both read
+      // null — the report is gone in the direction those tests exist for.
+      'and the report says ENDED when the track runs out',
+      'and a NEW TRACK always speaks',
     ],
     green: [
       'THE DECK DOES NOT START THE PIPELINE ON BOOT FOR A FILE SOURCE',
@@ -477,6 +488,11 @@ const MUTATIONS = [
       // ...and the video-lock gate reads the release back too, on the same
       // slot: it demands the gain above zero after the hand-back.
       'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+      // ...and the release-bus assertion drives the deck muted and releases
+      // it: the mute that is never given back leaves the master slot at 0
+      // instead of the user's −6 dB, and the very value it exists to pin
+      // fails — a quiet release and a wrong one are the same line here.
+      'and the release says NOTHING ON THE BUS',
     ],
     green: ['and the mute REACHES THE GRAPH rather than only the field'],
   },
