@@ -190,6 +190,32 @@ submit it under the MIT licence — see [developercertificate.org](https://devel
 - New code that touches the audio path needs the manual check too: load unpacked,
   play something, confirm you hear it.
 
+## Cutting a tag
+
+The tag is what a second product pins, so everything it points at has to be true
+of the commit it points at — not of an ancestor, and not of the branch the work
+was written on. Three things are easy to miss and none of them goes red:
+
+- **`CHANGELOG.md`'s link-reference block at the bottom.** Converting
+  `## [Unreleased]` into `## [x.y.z]` is the obvious half. The block underneath —
+  `[Unreleased]: …/compare/vPREV...HEAD` — also has to move to the new tag, and a
+  `[x.y.z]: …/compare/vPREV...vx.y.z` line has to be added. Nothing checks this,
+  and a missed link is wrong until the next person notices.
+- **`docs/VENDORING.md` §7's count table.** It is the intermediate green a
+  vendoring host checks its fresh copy against, so a stale number there tells a
+  correct copy it is broken. Re-measure it; do not adjust it arithmetically. This
+  was shipped stale once, at v0.3.0.
+- **Any number in a doc that says it was measured.** Re-derive it by running the
+  thing, not by editing the digits. A figure that claims to have been re-measured
+  and was not is worse than one that is merely old — v0.3.0 shipped one of those
+  too, and the mutation counts around it had drifted by a different amount than
+  the total had.
+
+Run the full gate on the **release commit itself**, after the CHANGELOG and
+version edits, not only on the code tree before them. `package.json` and
+`extension/manifest.json` both carry the version and `tools/tree-check.mjs`
+asserts they agree.
+
 ## Reporting bugs
 
 Open an issue with the template. The two things that make an audio bug reproducible

@@ -143,5 +143,25 @@ for (const rel of seen) {
 }
 ok(stale.length === 0, `no file loads a deleted surface${stale.length ? ` — BROKEN: ${stale.join(', ')}` : ''}`);
 
+/**
+ * THE VERSION LIVES IN TWO FILES AND NOTHING MADE THEM AGREE. `package.json`
+ * and `extension/manifest.json` both carry it, a release bumps both by hand, and
+ * until this assertion existed no gate compared them: v0.1.0 and v0.2.0 happened
+ * to match because someone remembered, and a release that forgot would have
+ * shipped an extension announcing the previous version with nothing red.
+ *
+ * IT COMPARES THE TWO FILES TO EACH OTHER AND NEVER EITHER TO A LITERAL. A
+ * literal here would be a THIRD place the version lives, so the next release
+ * would have three to remember instead of two — which is this defect again, one
+ * level up. There is deliberately no expected value in this file.
+ */
+const pkgPath = path.join(ROOT, 'package.json');
+const pkgVersion = JSON.parse(fs.readFileSync(pkgPath, 'utf8')).version;
+ok(typeof pkgVersion === 'string' && /^\d+\.\d+\.\d+$/.test(pkgVersion)
+   && typeof mf.version === 'string' && /^\d+\.\d+\.\d+$/.test(mf.version)
+   && pkgVersion === mf.version,
+  `package.json and extension/manifest.json declare the SAME version  `
+  + `package.json=${pkgVersion}, manifest.json=${mf.version}`);
+
 console.log(fails ? `\n${fails} of ${checks} FAILED` : `\ntree-check: ${checks} checks passed`);
 process.exit(fails ? 1 : 0);

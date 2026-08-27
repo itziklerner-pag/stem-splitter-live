@@ -157,11 +157,20 @@ Expect, verbatim on the last line:
 GREEN (partial — the vendored unit's suites only; 12 of 23 steps)
 ```
 
-exit 0, 12 of 12 steps PASS, **1183 assertions**, about 74 s. Per step:
+exit 0, 12 of 12 steps PASS, **1327 assertions**, about 74 s. Per step:
+
+> These twelve numbers are this repository's own `--unit` counts, **measured at
+> `b9dc537` (v0.3.0)** — not a floor and not a target. They move whenever a
+> suite gains an assertion, so they are a fact about a tag rather than about
+> the code in general. **If yours differ, compare against the figure in the
+> annotated tag you pinned** (`git cat-file -p v0.3.0`), which is immutable and
+> was measured at that commit; this table is a convenience for finding WHICH
+> step differs. A mismatch here with the tag body's total means this table is
+> stale — please report it rather than editing your copy.
 
 | step | count | step | count |
 |---|---|---|---|
-| `unit` (`test.js`) | 622 | `chroma` | 37 |
+| `unit` (`test.js`) | 766 | `chroma` | 37 |
 | `seam` | 17 | `keytap` | 23 |
 | `ui` | 124 | `bpmtap` | 46 |
 | `qa-edge` | 13 | `speed-pitch` | 10 |
@@ -215,16 +224,16 @@ rings, the mixer, the OLA planes, the scheduler — *and* it is this Host's
 conformance suite. Its `group('host')` installs a Chrome platform
 (`globalThis.chrome = { runtime: { … } }`) and asserts that
 `extension/offscreen/host.js` and `extension/ui/host.js` really behave the way
-`shared/host.js` declares: 125 of the file's assertions, 28 of them naming an
+`shared/host.js` declares: 132 of the file's assertions, 33 of them naming an
 `extension/{ui,offscreen}/host.js` entry point explicitly.
 
 Replace the two holes with your own — which you must; they are holes — and those
-125 assertions become claims about a platform that is no longer there. Measured,
-in #11's review and **re-measured at v0.3.0** because the step's count has moved
-since: swapping `offscreen/host.js`'s `send()` for a contract-satisfying
-non-Chrome implementation — same envelope, same `undefined` return, same
-swallowed delivery failure, over a plain bus — takes step `unit` from 622 passed
-to 620 passed, 2 failed, both reds naming `send()`.
+132 assertions become claims about a platform that is no longer there. Measured
+in #11's review, and **re-measured at `b9dc537` (v0.3.0)** because the step's
+count has moved twice since: swapping `offscreen/host.js`'s `send()` for a
+contract-satisfying non-Chrome implementation — same envelope, same `undefined`
+return, same swallowed delivery failure, over a plain bus — takes step `unit`
+from 766 passed to 764 passed, 2 failed, both reds naming `send()`.
 
 S11 considered splitting the group into a step of its own and **did not**,
 because the honest way to do that is to carve `test.js` in two, and a mechanical
@@ -266,9 +275,9 @@ the run.
 
 **That is a reporting improvement, not a completeness guarantee.** A hole that
 throws at import still takes the assertions after it with it, and they are the
-ones you wanted: measured, `node test.js` goes from 622 passed to 529 passed /
-2 failed — **91 assertions did not run**. Do not read a guarded suite that went
-red as fully covered. What tells you it was truncated is `tools/verify.mjs`'s
+ones you wanted: measured at `b9dc537` (v0.3.0), `node test.js` goes from 766
+passed to 680 passed / 2 failed — **84 assertions did not run**. Do not read a
+guarded suite that went red as fully covered. What tells you it was truncated is `tools/verify.mjs`'s
 coverage diff, which lists `no longer runs: <assertion name>` and warns that an
 absent assertion reads as green; the guard exists so that there is a completed
 run for it to compare against.
