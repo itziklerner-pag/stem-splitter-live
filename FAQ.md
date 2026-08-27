@@ -102,6 +102,16 @@ transformer bottleneck. It has 27.4 M parameters against 41.9 M.
 
 No, and this is deliberate rather than unimplemented. See below.
 
+If you have arrived here from another product built on this engine, two words in
+it mean different things and it is worth knowing which you want. An **Export** is
+the six untouched model outputs at unity, one file per stem, for a DAW. A
+**Bounce** is one file: the deck as you heard it, with its faders, mute/solo,
+crossfader and transpose baked in. Never call either of them "the mix". A bounce
+does **not** bake the playback speed — a bounce at a different speed is
+time-stretching, not baking, and it is not the same feature
+([`docs/AUDIO.md`](docs/AUDIO.md) §4.6 has the reasoning). This extension writes
+no files of either kind.
+
 ---
 
 ## The awkward ones

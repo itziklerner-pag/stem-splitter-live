@@ -134,7 +134,17 @@ Blink has **three different resamplers** and they are wildly different in qualit
 | `AudioContext` rate ≠ device rate (input and output) | `media::SincResampler` via `MediaMultiChannelResampler` | Good. **This is what §1.2 uses.** |
 | **`AudioBufferSourceNode` playing a buffer whose `sampleRate` ≠ the context rate**, or with `playbackRate` ≠ 1 | **linear interpolation** | **Unusable for music.** |
 
-That last row is the trap, and it is exactly what "just use an `OfflineAudioContext` at 44100" resolves to. `new OfflineAudioContext(2, len, 44100)` + `AudioBufferSourceNode(buffer @ 48000)` + `startRendering()` runs the buffer through the **linear** interpolator. The Web Audio spec deliberately leaves this implementation-defined; Gecko uses a higher-quality (Speex) resampler, Blink uses linear. So: **browser-implementation-defined, and the browser we target picked the bad one.**
+That last row is the trap, and it is exactly what "just use an `OfflineAudioContext` at 44100" resolves to. `new OfflineAudioContext(2, len, 44100)` + `AudioBufferSourceNode(buffer @ 48000)` + `startRendering()` runs the buffer through the **linear** interpolator.
+
+> **A BOUNCE IS NOT THAT, AND THIS ROW MUST NOT BE CITED AGAINST IT.** The offline
+> render in `extension/offscreen/bounce.js` does use `new OfflineAudioContext(2, len, 44100)`
+> — and it instantiates **no `AudioBufferSourceNode` at all**. The stems reach the graph
+> through the SAB stem ring, at 44 100 Hz, into the same `stem-playback` worklet the
+> speakers use; the render is 44 100 -> 44 100, so **no resampler of any kind is
+> constructed** and none of the three rows above is on the path. What the trap is really
+> about is the SOURCE NODE, not the context, and the sentence above is easy to read as
+> being about the context. Written out because a bounce is exactly the feature somebody
+> will reach for this paragraph to veto. The Web Audio spec deliberately leaves this implementation-defined; Gecko uses a higher-quality (Speex) resampler, Blink uses linear. So: **browser-implementation-defined, and the browser we target picked the bad one.**
 
 Quantitatively, linear interpolation at fractional phase `α` has magnitude response
 
@@ -916,6 +926,43 @@ Separated stems, especially `bass` and `other`, can carry a small DC offset (par
 ### 4.5 Export levels
 
 Different rules — see §5.3. **Do not soft-clip exported stems.** Export 32-bit float and leave the samples untouched.
+
+### 4.6 Export vs Bounce — two deliverables, two names, and a word withdrawn
+
+**Export** is the six untouched model outputs at unity, 32-bit float, for a DAW (§4.5, §5.1).
+**Bounce** is ONE file: what a deck is *playing*, rendered offline with its own settings baked
+in, for a listener who wants what they heard. A deliverable and a mix are different things with
+different consumers, so they get different names, and neither is ever called "the mix".
+
+**A bounce bakes THREE things: faders, mute/solo (with the crossfader, which is the same
+stage), and transpose.**
+
+**Speed is not one of them, and the word is withdrawn WITH ITS REASON rather than dropped.**
+The original wording — "faders, mute/solo, transpose and speed" — has no referent on the only
+path that can bounce:
+
+- `offscreen/engine.js`'s `SPEED` case refuses a cached deck in terms: *"this deck is playing
+  stems from disk, so there is no page rate to drive"*.
+- `CachedDeck` has no rate control anywhere in its surface, and a **File source is the only
+  kind a Bounce can render** — a live deck holds no whole track.
+- A **Live** source's speed is already baked into the captured stems by the browser's own
+  renderer, upstream of the capture tap. `engine.js` says why the engine's rate field is not a
+  control: *"IT IS A RECORD AND NOT A CONTROL."*
+
+A bounce at a **different** speed is new time-stretch DSP. It is not baking, and it collides
+with the standing key ruling that speed must not move the key (`qa/speed-pitch.mjs`). That is a
+separate, later item and must not arrive here by accident.
+
+**The master bus is NOT in a bounce**, and that is also deliberate: `offscreen/master.js` is one
+soft clipper on the SUM of both decks — its own header says *"a soft clipper per deck cannot
+protect the sum"* — so a per-deck bounce that ran one would apply a non-linearity that never
+acted on this deck alone, to a deliverable. A bounce may therefore exceed ±1.0, which is
+correct rather than tolerated: it is 32-bit float and `shared/wav.js`'s float path does not
+clamp, for exactly the reason §5.1 gives.
+
+The transpose lanes delay every plane by a constant 3072 samples at every setting including 0,
+so the render is `frames + 3072` long and the deliverable is that render with its first 3072
+frames trimmed off the head.
 
 ---
 

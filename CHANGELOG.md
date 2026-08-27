@@ -30,6 +30,39 @@ release, whether or not it is otherwise notable.
 None of this is visible in the browser. It is here because the tag is what a
 second product pins.
 
+- **Bounce — a deck rendered offline, as one file, with its own settings baked
+  in.** `engine/bounce.js` (the plan arithmetic and the closed `BOUNCE_CODES`
+  vocabulary) and `offscreen/bounce.js` (the render path) drive the SHIPPED
+  `stem-playback` worklet on an `OfflineAudioContext`, so the file carries the
+  same faders, mute/solo, crossfader and transpose the listener heard — from the
+  same code, not from a second copy of the mixer. The engine answers
+  `BOUNCE_START` / `BOUNCE_CANCEL` and reports `BOUNCE_PROGRESS` /
+  `BOUNCE_DONE` / `BOUNCE_ERROR`; the file goes wherever the Host's `exportSink`
+  puts it. This extension's own Host still refuses every destination, so nothing
+  about what the extension does changes.
+- **A bounce bakes THREE things, and "speed" is withdrawn with its reason.**
+  Faders, mute/solo (with the crossfader) and transpose. A File source is the
+  only kind a bounce can render, and there is no rate to bake on that path — the
+  engine refuses `SPEED` for a cached deck in terms, and a Live source's speed is
+  already inside the captured stems. A bounce at a *different* speed is new
+  time-stretch DSP, not baking, and it collides with the standing key ruling.
+  `docs/AUDIO.md` §4.6 carries the ruling; §1.3 now says in place that its
+  `OfflineAudioContext` warning is about `AudioBufferSourceNode` and does not
+  reach a bounce, which renders 44 100 → 44 100 and constructs no resampler.
+- **`exportSink` says out loud that N may be one.** The duty's prose read as a
+  six-file promise because the six-stem export is its example; a bounce passes
+  one base name and reads one writable back out of a one-key map. The duty
+  itself is unchanged — this is the sentence that stops a Host special-casing
+  six.
+- **`qa/bounce.mjs` — the first offline-render harness in this repository.**
+  Before it, neither `OfflineAudioContext` nor `startRendering` appeared anywhere
+  under `tools/` or `qa/`, and the playback worklet's ring read, gain stage, sum
+  and starvation fade were exercised only by a real browser. It boots the shipped
+  worklet in a `vm` realm and pumps it at the 128-frame render quantum, with a
+  fourteen-second fixture — longer than the 11.89 s stem ring on purpose, because
+  a bounce gate shorter than the ring cannot see the failure the whole feature
+  exists to prevent. `qa/bounce-mutations.mjs` is its mutation battery, in the
+  repository beside it, stamped against the commit its anchors were cut from.
 - **`MODEL_SOURCES`, and a three-valued `modelBytes` phase.** `shared/host.js`
   now declares the vocabulary a host announces its model phase from — `cache`,
   `download`, `bundled` — and `modelSourceWord()` is where the words for each
