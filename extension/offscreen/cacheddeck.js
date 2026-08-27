@@ -697,6 +697,14 @@ export class CachedDeck {
    * on `source === 'cache'` in any case — a cached deck's speed control has
    * been locked, with a sentence, since before this surface existed.
    *
+   * SO THE ANSWER TO "WHERE IS THE SIXTH" IS THAT THERE ISN'T ONE, AND THAT IS
+   * THE ANSWER RATHER THAN THE GAP. It is written here AND in
+   * `shared/host.js`'s freeze block as item 11, because the next reader of
+   * either file will try to add it; and `test.js` group('host') asserts this
+   * method's key set is exactly the five plus `atMs`, so adding a sixth is a
+   * red here and a second red in `qa/speed-pitch.mjs` rather than a quiet
+   * widening.
+   *
    * `seeking` IS FALSE ON EVERY REPORT, INCLUDING THE ONE seek() PUSHES, and
    * that is a decision rather than an omission. This deck's seek is one
    * synchronous turn — the ring is flushed and refilled before seek() returns —
@@ -804,8 +812,23 @@ export class CachedDeck {
     const was = this.transportMuted;
     this.transportMuted = false;
     if (was) this.pushMaster();
-    // Report outward, so a Host that took the lock can see it was given back
-    // rather than assume it. pushState() is what carries the transport report.
+    /**
+     * ...AND A HEARTBEAT, WHICH IS ALL THIS IS. An earlier version of this line
+     * claimed it let a Host "see the lock was given back rather than assume
+     * it", and MEASUREMENT SAYS OTHERWISE: no message this deck sends carries
+     * the mute at all — `transportReport()` above is the player's state as
+     * `DeckTransport.onState` declares it and `LIVE_STATE` is the readout, and
+     * neither has a mute field — so `pushTransport()` dedupes this away
+     * entirely on a still deck. Measured: `release()` on a paused deck puts
+     * ZERO `TRANSPORT_STATE` on the wire.
+     *
+     * IT IS RIGHT THAT NOTHING CARRIES IT. The only writer of this flag is a
+     * Host's own `drive({muted})`, so the only thing that could be told is the
+     * thing that already knows; a field on the wire with no reader is what
+     * freeze item 2 threw off this interface. What the release actually has to
+     * do is reach the GRAPH, two lines up, and `test.js` reads it back off the
+     * deck rather than off a message for exactly that reason.
+     */
     this.pushState();
   }
 

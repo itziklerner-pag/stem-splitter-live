@@ -146,7 +146,7 @@ import { syncCorrection, audioClockAt } from './extension/ui/audio-math.js';
 // The deck's BOOT COMPOSITION (U6, #43). `embed.js` cannot be imported from
 // Node — it builds a DOM at module scope — but the decision layer it hands the
 // Host's transport to can, which is the whole reason that layer is here.
-import { makeFollower } from './extension/ui/embed-state.js';
+import { makeFollower, videoLockWant } from './extension/ui/embed-state.js';
 import { SEGMENT, STRIDE, SR, STEMS, RING_FRAMES } from './extension/shared/config.js';
 import { RingConsumer, ringByteLength } from './extension/shared/ring.js';
 import { rfft, stft, istft, hann } from './extension/engine/fft.js';
@@ -7320,8 +7320,9 @@ if (group('host')) {
    * `no longer runs:` for each one.
    */
   const {
-    assertHost, assertHostOption,
+    assertHost, assertHostOption, assertDeclared,
     ENGINE_HOST_DUTIES, BACKEND_DUTIES, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+    DECK_TRANSPORT_DECLARATIONS,
   } = await import('./extension/shared/host.js');
   const engineHost = await importHole('extension/offscreen/host.js',
     () => import('./extension/offscreen/host.js'));
@@ -10028,12 +10029,22 @@ if (group('host')) {
         cost: 'a Host short a page duty boots clean and throws at the first height report',
       },
       {
-        call: "assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, …)",
-        at: /^const transport = assertHostOption\(host, 'transport'/m,
+        /**
+         * ...AND THIS ONE CARRIES THE DECLARATIONS TABLE, which is the half a
+         * 5th argument makes easy to forget. `assertHostOption`'s signature
+         * takes `declarations` optionally — it has to, it is generic — so a
+         * boot line that dropped it would still refuse a short transport and
+         * would silently stop refusing one that never declared `isDeckClock`,
+         * and the video lock would be back to muting a File source's deck with
+         * its own transport. The table's NAME is therefore part of the match.
+         */
+        call: "assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, …, DECK_TRANSPORT_DECLARATIONS)",
+        at: /^const transport = assertHostOption\([\s\S]{0,200}?DECK_TRANSPORT_DECLARATIONS/m,
         use: /\btransport\s*(\.|!=)/,
         guards: 'the `transport` binding',
         cost: 'a misspelled `transport` key reads as "this Host has no player", which follow() reads '
-          + 'as licence to run: a capture and a 109 MB download on a page nobody pressed play on',
+          + 'as licence to run: a capture and a 109 MB download on a page nobody pressed play on — and a '
+          + 'transport that never declared `isDeckClock` reaches videoLockWant() unchecked',
       },
     ];
     const boots = BOOTS.map((b) => ({ ...b, i: embedSrc.search(b.at), u: embedSrc.search(b.use) }));
@@ -10318,7 +10329,8 @@ if (group('host')) {
 
   // ------------------------------- the deck as transport master (U6, #43)
   /**
-   * THE MUTATION TABLE FOR THIS SECTION — 17 of 17 watched red, at `619908a`.
+   * THE MUTATION TABLE FOR THIS SECTION — 24 of 24 watched red: M1-M17 at
+   * `d75a6fd`, M18-M24 at the D1 repair that follows it.
    *
    * EXECUTABLE COPY: `tools/mutations/u6-transport-master.mjs`, in the tree
    * beside this suite, cut against `619908a`. Re-run it before any tag: a
@@ -10357,6 +10369,30 @@ if (group('host')) {
    *       deck sees it
    *  M16  the follower decides and dispatches nothing  extension/ui/embed-state.js:242       SEE BELOW
    *  M17  `videoPlaying` becomes a plain property      extension/ui/embed-state.js:194       a fixture can overwrite the flag
+   *
+   *  ---- THE D1 REPAIR: the declaration, and the lock it stops -------------
+   *  M18  videoLockWant drops the `isDeckClock` term    extension/ui/embed-state.js           THE BLOCKER: the lock takes the deck
+   *                                                                                          it IS. 1 red, controls hold
+   *  M19  the SHIPPED page Host declares it IS the      extension/ui/host.js                  2 reds: the declaration pair, and the
+   *       deck's own clock                                                                    lock gate losing its other half
+   *  M20  assertDeclared stops telling silence from     extension/shared/host.js              the refusal assertion — and it reds
+   *       a non-boolean answer                                                                ONLY because the two SENTENCES are read
+   *  M21  syncVideoLock spells the old condition        extension/ui/embed.js                 the chain link. The gate itself still
+   *       instead of asking the gate                                                          answers right and still passes
+   *  M22  the report grows a sixth value                extension/offscreen/cacheddeck.js     the five-of-six assertion (FINDING A)
+   *  M23  the boot line drops the declarations table    extension/ui/embed.js                 both boot-check assertions
+   *  M24  assertHostOption stops passing them on        extension/shared/host.js              the refusal assertion, one layer in
+   *
+   * M18 AND M21 ARE ONE PAIR AND NEITHER IS REDUNDANT. M18 breaks the ANSWER
+   * and the chain link stays green; M21 breaks the WIRING and the gate stays
+   * green. Either alone would leave a hole the other's assertion is the only
+   * thing standing in.
+   *
+   * M20 IS THE CASE THAT CHANGED AN ASSERTION RATHER THAN CONFIRMING IT. An
+   * omitted declaration is ALSO not a boolean, so `assertDeclared` still threw
+   * naming `isDeckClock` with its silence branch deleted, and the first draft of
+   * that assertion — which asked only "did it throw, naming the declaration" —
+   * stayed green. It now reads the two sentences apart, and M20 reds.
    *
    * M16 IS THE ONE WORTH READING TWICE, AND IT IS NOT ABOUT THE CODE. Delete
    * the follower's `start` dispatch and nothing can ever start. The gate above
@@ -10473,6 +10509,10 @@ if (group('host')) {
     const wire = { onState: null, onJump: null, onSpeedReport: null };
     const toEngine = [];
     const fileTransport = {
+      // WHAT THIS PLAYER IS, and it is the one thing a Host with a File source
+      // cannot leave unsaid: the player IS the deck. See the video-lock gate at
+      // the foot of this section for what the answer prevents.
+      isDeckClock: true,
       onState(fn) { wire.onState = fn; },
       onJump(fn) { wire.onJump = fn; },
       onSpeedReport(fn) { wire.onSpeedReport = fn; },
@@ -10482,8 +10522,16 @@ if (group('host')) {
     };
     /** Drain the engine's outbox into the Host's relay. The Host is the wire. */
     const reports = [];
+    /**
+     * ...AND THE READOUT IS KEPT RATHER THAN DROPPED. The video-lock gate below
+     * takes `source` and `status` from what the ENGINE actually said about this
+     * deck, not from two literals this file typed: a fixture that states the
+     * condition it is testing for cannot tell you the condition ever arises.
+     */
+    const lastLive = { m: null };
     const pump = () => {
       for (const m of bus.splice(0)) {
+        if (m.type === 'LIVE_STATE') { lastLive.m = m; continue; }
         if (m.type !== 'TRANSPORT_STATE') continue;
         const { type, deck, ...payload } = m;
         reports.push(payload);
@@ -10748,6 +10796,200 @@ if (group('host')) {
       + '[entry point: CachedDeck.load(), which clears it before pushMaster()]',
       cd.transportMuted === false && masterAfterLoad != null && masterAfterLoad.value > 0,
       `muted=${cd.transportMuted}, master -> ${masterAfterLoad ? masterAfterLoad.value : 'nothing'}`);
+
+    // --------------------------------- the declaration, and the lock it stops
+    /**
+     * `isDeckClock` — THE ONE THING A TRANSPORT SAYS ABOUT ITSELF RATHER THAN
+     * DOES (Host interface v1.1, upstream #43).
+     *
+     * BOTH TRANSPORTS GO THROUGH THE REAL `assertHostOption`, in the shape
+     * `ui/embed.js` calls it at module scope, and the answers must DIFFER: the
+     * File source's player is the deck and the page's player is not. An
+     * implementation that answered the same either way passes one of these and
+     * fails the other.
+     */
+    const fileHost = { send() {}, onMessage() {}, transport: fileTransport };
+    const fileTr = probe(assertHostOption, fileHost, 'transport',
+      DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS);
+    const pageTr = probe(assertHostOption, deckHost, 'transport',
+      DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS);
+    ok('A FILE SOURCE\'S TRANSPORT DECLARES IT IS THE DECK\'S OWN CLOCK, and the SHIPPED page transport declares '
+      + 'it is NOT  '
+      + '[entry point: assertHostOption(host, \'transport\', …, DECK_TRANSPORT_DECLARATIONS), at extension/ui/embed.js module scope]',
+      fileTr.ok && pageTr.ok && fileTr.v.isDeckClock === true && pageTr.v.isDeckClock === false,
+      fileTr.ok && pageTr.ok
+        ? `file -> isDeckClock=${fileTr.v.isDeckClock}, shipped page Host -> isDeckClock=${pageTr.v.isDeckClock}`
+        : `file: ${fileTr.ok ? 'ok' : fileTr.e} · page: ${pageTr.ok ? 'ok' : pageTr.e}`);
+
+    /**
+     * ...AND SILENCE IS NOT AN ANSWER. A transport that never mentions it and
+     * one that answers `false` are the same object from in here, and the deck
+     * acts on the answer at 10 Hz — so the omission is refused at boot, by
+     * name, exactly the way `assertHostOption` refuses a Host that never
+     * mentioned `transport` at all. A non-boolean is refused for the same
+     * reason: it is a Host that has not decided, wearing an answer.
+     *
+     * AND THE CHECK ITSELF MUST FAIL WHEN IT CANNOT LOOK — an empty
+     * declarations list would wave every transport through, so it throws.
+     */
+    const silentTr = { ...fileTransport };
+    delete silentTr.isDeckClock;
+    const silentWhy = threw(() => assertHostOption(
+      { send() {}, onMessage() {}, transport: silentTr },
+      'transport', DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS));
+    const fuzzyWhy = threw(() => assertHostOption(
+      { send() {}, onMessage() {}, transport: { ...fileTransport, isDeckClock: 'yes' } },
+      'transport', DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS));
+    const emptyWhy = threw(() => assertDeclared(fileTransport, {}, 'DeckHost.transport'));
+    ok('...and a transport that never SAID which it is, or answered with something that is not a boolean, is '
+      + 'refused at boot, naming the declaration  '
+      + '[entry point: assertDeclared(), reached from assertHostOption() at extension/ui/embed.js module scope]',
+      /**
+       * THE TWO REFUSALS ARE READ APART, and not merely counted. An omitted
+       * `isDeckClock` is ALSO not a boolean, so a check that had lost its
+       * silence branch would still throw — with the non-boolean sentence, and
+       * naming the declaration — and a condition that only asked "did it throw,
+       * naming isDeckClock" would go on passing over a check that had stopped
+       * telling a Host that said NOTHING from one that answered badly. Measured:
+       * emptying the silence filter reds nothing until the sentences are read.
+       */
+      silentWhy != null && silentWhy.includes('said nothing about') && silentWhy.includes('isDeckClock')
+      && silentWhy.includes('DeckHost.transport')
+      && fuzzyWhy != null && fuzzyWhy.includes('not a boolean') && fuzzyWhy.includes('isDeckClock')
+      && fuzzyWhy.includes('string')
+      && emptyWhy != null && emptyWhy.includes('no coverage'),
+      silentWhy == null ? 'a transport that declared NOTHING was ACCEPTED — the deck would read the silence at 10 Hz'
+        : fuzzyWhy == null ? `the omission is refused ("${silentWhy.slice(0, 60)}…") but \`isDeckClock: 'yes'\` was ACCEPTED`
+          : emptyWhy == null ? 'assertDeclared({}) accepted everything — a check with no list has no coverage'
+            : 'silence -> "said nothing about isDeckClock"; a string -> "not a boolean"; an empty list refuses itself');
+
+    /**
+     * THE BLOCKER THIS DECLARATION EXISTS FOR, DRIVEN AND MEASURED (upstream
+     * #43, ruled 2026-08-27). Read this before touching `videoLockWant`.
+     *
+     * `ui/embed.js::syncVideoLock` runs on every `LIVE_STATE` at 10 Hz and its
+     * gate WAS `live.source === 'cache' && live.status === 'running'` — and
+     * that is EXACTLY what a File source's cached deck reports, which is why
+     * the state below is read off the engine's own readout rather than typed
+     * here. Under that gate the lock's first act, `transport.drive({muted:
+     * true})`, lands on the deck ITSELF, and it stays there for the whole
+     * track while every meter and every status field says the deck is playing;
+     * `release()` on stop unmutes it. SILENT WHILE PLAYING, AUDIBLE WHILE
+     * STOPPED, with nothing red anywhere.
+     *
+     * SO THE ASSERTION IS A PAIR AND NOT A BOOLEAN. The two halves are the same
+     * engine state with the one declaration changed — a File source's `true`
+     * against the SHIPPED page transport's `false` — because a gate that only
+     * showed the deck-clock case answering `false` would be satisfied by a gate
+     * that answers `false` always, and the page's lock is a shipping feature.
+     *
+     * AND THE MUTE IS MEASURED RATHER THAN ARGUED. The write the lock would
+     * have sent is put through the real Host wire and the real
+     * `CachedDeck.drive`, and the master slot is read back off the worklet
+     * port: 0 while the deck's own last report says `playing: true`. That
+     * number is what the declaration is worth; the boolean alone would not say
+     * what it prevented.
+     */
+    cd.play();
+    cd.stopFill();
+    pump();
+    const lockAt = { source: lastLive.m && lastLive.m.source, status: lastLive.m && lastLive.m.status };
+    const playingReport = reports[reports.length - 1];
+    const wantDeckClock = videoLockWant({ ...lockAt, isDeckClock: fileTransport.isDeckClock });
+    const wantPagePlayer = videoLockWant({ ...lockAt, isDeckClock: deckHost.transport.isDeckClock });
+    // What the acquire does, through the Host wire and the real drive().
+    gainMsgs.length = 0;
+    toEngine.length = 0;
+    fileTransport.drive({ muted: true });
+    for (const m of toEngine.splice(0)) if (m.type === 'TRANSPORT_DRIVE') cd.drive(m);
+    const mutedGain = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    gainMsgs.length = 0;
+    fileTransport.release();
+    for (const m of toEngine.splice(0)) if (m.type === 'TRANSPORT_RELEASE') cd.release();
+    const backGain = gainMsgs.filter((g) => g.t === 'gain' && g.i === G_MASTER).pop();
+    ok('THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK, and it still takes the page\'s player under the '
+      + 'IDENTICAL engine state — the acquire it would have sent silences this deck for the whole track  '
+      + '[entry point: videoLockWant(), the gate of ui/embed.js::syncVideoLock, on every LIVE_STATE]',
+      lockAt.source === 'cache' && lockAt.status === 'running'
+      && wantDeckClock === false && wantPagePlayer === true
+      && playingReport != null && playingReport.playing === true
+      && mutedGain != null && mutedGain.value === 0
+      && backGain != null && backGain.value > 0,
+      lockAt.source !== 'cache' || lockAt.status !== 'running'
+        ? `the deck reported source=${lockAt.source} status=${lockAt.status} — the lock's own gate never arose, `
+          + 'so this assertion could not look'
+        : `engine says source=${lockAt.source}/${lockAt.status} — want(isDeckClock=true)=${wantDeckClock}, `
+          + `want(isDeckClock=false)=${wantPagePlayer}; the acquire puts the master slot at `
+          + `${mutedGain ? mutedGain.value : 'NOTHING'} while the deck's own report says playing=`
+          + `${playingReport ? playingReport.playing : '?'}, and the release puts it back to `
+          + `${backGain ? backGain.value.toFixed(6) : 'NOTHING'}`);
+
+    /**
+     * ...AND `videoLockWant` REFUSES A TRANSPORT THAT NEVER DECLARED, rather
+     * than reading the silence as `false` — which is the answer that would put
+     * the mute back. `assertDeclared` above makes that unreachable at boot;
+     * this is what stops the unreachable case being a quiet return to the
+     * defect if it ever becomes reachable.
+     */
+    const undeclaredWhy = threw(() => videoLockWant({ source: 'cache', status: 'running' }));
+    ok('...and the gate itself refuses a transport that declared nothing, instead of defaulting to the answer '
+      + 'that takes the lock',
+      undeclaredWhy != null && undeclaredWhy.includes('isDeckClock'),
+      undeclaredWhy == null
+        ? `it returned ${videoLockWant({ source: 'cache', status: 'running', isDeckClock: false })} for a transport `
+          + 'that said nothing — a default is how the mute comes back'
+        : undeclaredWhy);
+
+    /**
+     * ...AND THE DECK'S LOCK REALLY ASKS IT. The two assertions above drive
+     * `videoLockWant` directly, which proves the function and proves NOTHING
+     * about `ui/embed.js::syncVideoLock` ever calling it — a pure gate nobody
+     * consults is a fixture in which the thing under test is a no-op, and it is
+     * the same gap the three boot checks above were caught in.
+     *
+     * READ AS TEXT, comments stripped, and it is HALF the evidence rather than
+     * all of it: `embed.js` builds a DOM at module scope and cannot be
+     * evaluated here. The link that matters is the SECOND one — the gate must
+     * be handed the TRANSPORT'S OWN declaration, because a `syncVideoLock` that
+     * called `videoLockWant` with a literal, or with a value from anywhere but
+     * the transport `assertHostOption` returned, would satisfy the first link
+     * and ship the mute.
+     */
+    const lockSrc = strip(readFileSync(new URL('./extension/ui/embed.js', import.meta.url), 'utf8'));
+    const lockChain = [
+      ['syncVideoLock\u2019s gate IS videoLockWant', /function syncVideoLock\([\s\S]{0,700}?const want = videoLockWant\(/],
+      ['...and it is handed the transport\u2019s own declaration',
+        /const want = videoLockWant\(\{[\s\S]{0,200}?isDeckClock: transport\.isDeckClock/],
+      ['...and the acquire it gates is still the mute', /if \(!videoLocked\)[\s\S]{0,600}?transport\.drive\(\{ muted: true \}\)/],
+    ];
+    const lockBroken = lockChain.filter(([, re]) => !re.test(lockSrc)).map(([w]) => w);
+    ok('...and the DECK\'s lock really asks that gate, with the transport\'s own answer  '
+      + '[entry point: extension/ui/embed.js::syncVideoLock, comments stripped \u2014 the gate is driven above, '
+      + 'the call is read here]',
+      lockBroken.length === 0,
+      lockBroken.length
+        ? `the lock is broken at: ${lockBroken.join('; ')} \u2014 the gate above would still pass and the deck `
+          + 'would still mute itself'
+        : `${lockChain.length} of ${lockChain.length} links`);
+
+    /**
+     * FIVE OF THE SIX, AND THE ABSENCE IS THE ANSWER (freeze block item 11).
+     * `DeckTransport.onState` names six values the deck reads; this player has
+     * no rate to report — the ring is consumed by the audio device at its own
+     * rate, there is no resampler on this path, and the transpose is
+     * length-exact — so the report carries five plus its timestamp and nothing
+     * else. THIS IS THE ASSERTION THAT MAKES THE NEXT READER'S SIXTH FIELD A
+     * RED rather than a quiet widening; `qa/speed-pitch.mjs` is the second red,
+     * one file away, if the sixth is the rate.
+     */
+    const repKeys = Object.keys(cd.transportReport()).sort().join(',');
+    ok('THE ENGINE-BACKED REPORT CARRIES FIVE VALUES AND ITS TIMESTAMP — a sixth is a red here rather than a '
+      + 'field a Host relays and nothing reads  '
+      + '[entry point: CachedDeck.transportReport(), the payload pushTransport() puts on the wire]',
+      repKeys === 'atMs,currentTime,duration,ended,playing,seeking',
+      repKeys === 'atMs,currentTime,duration,ended,playing,seeking'
+        ? `${repKeys} — five plus atMs, exactly as DeckTransport.onState is documented to be short by one`
+        : `the report is now {${repKeys}} — see shared/host.js freeze item 11 before adding to it`);
 
     cd.stop();
     cd.dispose();

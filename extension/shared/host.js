@@ -48,11 +48,17 @@
  *
  *   FROZEN — the five duty tables below (`ENGINE_HOST_DUTIES`,
  *     `BACKEND_DUTIES`, `DECK_HOST_DUTIES`, `DECK_PAGE_DUTIES`,
- *     `DECK_TRANSPORT_DUTIES`), the `BUS` addresses, the shapes of the four
- *     messages a Host must ORIGINATE, and the write set on `DeckTransport.drive`.
+ *     `DECK_TRANSPORT_DUTIES`), the one DECLARATION table
+ *     (`DECK_TRANSPORT_DECLARATIONS`), the `BUS` addresses, the shapes of the
+ *     four messages a Host must ORIGINATE, and the write set on
+ *     `DeckTransport.drive`.
  *     Removing or renaming any of those is a MAJOR change and gets a major tag.
  *     Adding a duty is a MINOR change that every existing Host fails at boot,
  *     loudly, by `assertHost` — which is the whole reason `assertHost` exists.
+ *     ADDING A DECLARATION IS THE SAME KIND OF MINOR, by `assertDeclared`, and
+ *     it is deliberately the same kind: a Host that says nothing about a
+ *     question the deck acts on is the failure both checks exist to move to
+ *     boot. `isDeckClock` (v1.1) is the first of them.
  *   NOT FROZEN — the prose. Every paragraph here is an obligation the type
  *     cannot show, and a sharper wording of the same obligation is a patch.
  *
@@ -151,6 +157,34 @@
  *     a seam slice (`CONTRIBUTING.md` is rank 1 over everything in this file).
  *     v1 therefore freezes the SHAPE that ships and flags the wording. This is
  *     the one thing in this block that is somebody else's to close.
+ *
+ * 11. AN ENGINE-BACKED TRANSPORT REPORTS FIVE OF THE SIX, AND THE ABSENCE IS
+ *     THE ANSWER RATHER THAN A GAP. Item 10 names the five values the deck
+ *     reads plus `seeking`. A Host whose Source is a FILE backs `onState` with
+ *     the cached deck's own playback clock, and that player HAS NO RATE TO
+ *     REPORT: the stem ring is consumed by the audio device at the device's own
+ *     rate, there is no resampler anywhere on that path, and the transpose is
+ *     length-exact (`engine/pitch.js` promises `framesIn === framesOut`), so a
+ *     transposed deck still plays one second per second.
+ *     REPORTING A CONSTANT `1` WOULD BE WORSE THAN REPORTING NOTHING, and not
+ *     only because it is an invented value of exactly the kind the paragraph at
+ *     the head of this block was written to catch. `qa/speed-pitch.mjs` asserts
+ *     that no file under `extension/{engine,offscreen,workers,shared}/` except
+ *     `offscreen/engine.js` names the page rate IN CODE — that gate is how this
+ *     project knows the engine never shifts on the page's rate — so the
+ *     constant would make `offscreen/cacheddeck.js` the first engine file to
+ *     grow a reader of it, to satisfy a field nothing reads.
+ *     THE DECK SIDE IS UNHARMED and this is why the absence is safe rather than
+ *     merely honest: `ui/embed.js::onElementRate` ignores anything that is not
+ *     a positive finite number, so nothing paints a rate; and `speedGate`
+ *     (`ui/embed-state.js`) greys the speed control on `source === 'cache'`
+ *     regardless, which it has done, with a sentence, since before this
+ *     surface existed.
+ *     RECORDED HERE BECAUSE THE NEXT READER WILL TRY TO ADD THE SIXTH.
+ *     `offscreen/cacheddeck.js::transportReport()` carries the same paragraph
+ *     beside the code, and `test.js` group('host') asserts the report's key set
+ *     is exactly those five plus `atMs` — so adding a sixth is a red here and
+ *     in `qa/speed-pitch.mjs`, rather than a quiet widening.
  * ========================================================================= */
 
 /**
@@ -1338,12 +1372,23 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *
  *   WHAT AN ENGINE-BACKED TRANSPORT IS MADE OF, since the unit supplies both
  *   ends of it and a Host is only the wire between them:
+ *     `isDeckClock`    `true`. It is the declaration below, and it is what
+ *                      stops the deck locking a player to itself.
  *     `onState`        relay `TRANSPORT_STATE` — `{playing, currentTime,
  *                      duration, ended, seeking, atMs}`, pushed by
  *                      `offscreen/cacheddeck.js` on every event that moves it.
- *                      FIVE OF THE SIX VALUES: that player reports no rate,
- *                      because it has none, and the block in that file says
- *                      why the absence is the honest answer rather than a gap.
+ *                      FIVE OF THE SIX VALUES, AND THE ABSENCE IS THE ANSWER:
+ *                      THIS PLAYER HAS NO RATE. The stem ring is consumed by
+ *                      the audio device at the device's own rate, there is no
+ *                      resampler anywhere on that path, and the transpose is
+ *                      length-exact — so a transposed deck still plays one
+ *                      second per second and there is nothing to report.
+ *                      A constant `1` would be an invented value AND would make
+ *                      `offscreen/cacheddeck.js` the first engine file to name
+ *                      the page rate in code, which `qa/speed-pitch.mjs`
+ *                      forbids. Freeze block item 11; the same paragraph is
+ *                      beside the code in that file, because the next reader
+ *                      will try to add the sixth.
  *     `onJump`         the Host's own: a new Source opened under the deck.
  *     `onSpeedReport`  the Host's own verdict. The deck greys its speed control
  *                      on a cached deck regardless of what is reported here.
@@ -1353,6 +1398,40 @@ export const DECK_HOST_DUTIES = Object.freeze({
  *                      the mute a lock took has to be given back, or the track
  *                      plays silently with every meter saying otherwise.
  *     `requestSpeed`   the Host's own. Unreachable from a cached deck's UI.
+ *
+ * @property {boolean} isDeckClock
+ *   IS THIS PLAYER THE DECK'S OWN CLOCK? A DECLARATION AND NOT A DUTY — there
+ *   is nothing to call, so it is checked by `assertDeclared` below rather than
+ *   by `assertHost`, and the KEY is required exactly the way `transport`'s own
+ *   key is: a Host that says nothing here has not decided, and the deck acts on
+ *   the answer.
+ *
+ *   `false` — the ordinary case, and what `ui/host.js` declares. There is a
+ *   SEPARATE player somewhere the deck cannot reach: a `<video>` on the host's
+ *   page, whose clock is its own and drifts against the deck's audio clock. The
+ *   deck may take it, mute it and correct it (`docs/AUDIO.md` §8.2).
+ *
+ *   `true` — the player IS this deck, running off the engine's playback clock.
+ *   A Host whose Source is a FILE declares this.
+ *
+ *   WHY THE TRANSPORT CARRIES THIS AND NOT THE SOURCE. The question is "whose
+ *   clock is on the other end of these six duties", and the transport is the
+ *   only thing that already knows: a source KIND arrives on a different message
+ *   from a different direction, and answering from it would make the deck learn
+ *   a Source taxonomy to decide something about its own player.
+ *
+ *   WHAT IT COSTS TO GET WRONG, measured. `ui/embed.js::syncVideoLock` runs on
+ *   every `LIVE_STATE` at 10 Hz and its gate is `source === 'cache' &&
+ *   status === 'running'` — precisely what a File source's cached deck reports.
+ *   Under `isDeckClock: true` that transport IS the deck, so the lock's first
+ *   act, `drive({muted: true})`, MUTES THE DECK ITSELF, for the whole track,
+ *   while every meter and every status field says it is playing; `release()` on
+ *   stop then unmutes it. Silent while playing, audible while stopped —
+ *   perfectly inverted, with nothing red anywhere. The same loop computes a
+ *   correction between the deck's audio clock and the deck's own reported
+ *   position, which is a clock locked to itself, and re-asserts at ~4 Hz a rate
+ *   the engine must refuse. So `videoLockWant` (`ui/embed-state.js`) answers
+ *   `false` for the whole of it: no acquire, no correction, no re-assertion.
  *
  * @property {(fn: (d: object) => void) => void} onState
  *   The player moved. PUSH, NEVER POLL — a contract, not a taste: the deck
@@ -1462,6 +1541,26 @@ export const DECK_TRANSPORT_DUTIES = Object.freeze({
 });
 
 /**
+ * WHAT A `DeckTransport` DECLARES ABOUT ITSELF, as opposed to what it DOES.
+ *
+ * `assertHost` answers "is every duty here, and callable". These are not
+ * duties: there is nothing to call, and `typeof x === 'function'` — the one
+ * thing that check does — would be the wrong question asked loudly. They get
+ * their own table and their own check for the same reason `DeckHost.page` and
+ * `DeckHost.transport` are not in `DECK_HOST_DUTIES`: a table is only as useful
+ * as the check behind it, and one table behind two different checks is how a
+ * check quietly stops being the check it says it is.
+ *
+ * THE SENTENCE DOES NOT REACH FOR THE PAGE-RATE VOCABULARY, and that is not a
+ * style note. A `*_DUTIES`/`*_DECLARATIONS` table is executable string literals
+ * in a file `qa/speed-pitch.mjs` scans with comments STRIPPED — so the typedef
+ * above is invisible to it and this line is not.
+ */
+export const DECK_TRANSPORT_DECLARATIONS = Object.freeze({
+  isDeckClock: "whether this player IS the deck itself, running on the engine's own playback clock",
+});
+
+/**
  * A duty NAMESPACE a Host may legitimately not have — AND MUST SAY IT DOES NOT.
  *
  * `assertHost` answers "did this Host supply everything". This answers the
@@ -1488,7 +1587,32 @@ export const DECK_TRANSPORT_DUTIES = Object.freeze({
  * @param {string} what   the interface's name, for the message
  * @returns {object|null} the namespace, or null if the Host declared it absent
  */
-export function assertHostOption(host, key, duties, what = 'Host') {
+export function assertDeclared(ns, declarations, what = 'Host') {
+  const names = declarations ? Object.keys(declarations) : [];
+  if (!names.length) {
+    throw new Error(`${what}: no declarations were listed, so this check has no coverage — `
+      + 'assertDeclared was handed an empty list and would accept any object at all.');
+  }
+  if (!ns || (typeof ns !== 'object' && typeof ns !== 'function')) {
+    throw new Error(`${what}: nothing was supplied to declare anything (got ${ns === null ? 'null' : typeof ns}). `
+      + `It owes ${names.length} declaration(s): ${names.join(', ')}.`);
+  }
+  const silent = names.filter((k) => !(k in ns));
+  if (silent.length) {
+    throw new Error(`${what} said nothing about ${silent.length} of its ${names.length} declaration(s): `
+      + silent.map((k) => `${k} — ${declarations[k]}`).join('; ')
+      + '. An absent property and a deliberate answer read the same from in here, and the deck acts on the answer.');
+  }
+  const wrong = names.filter((k) => typeof ns[k] !== 'boolean');
+  if (wrong.length) {
+    throw new Error(`${what} answered ${wrong.length} of its ${names.length} declaration(s) with something that is `
+      + `not a boolean: ${wrong.map((k) => `${k} = ${ns[k] === null ? 'null' : typeof ns[k]}`).join('; ')}`
+      + '. A declaration is yes or no; anything else is a Host that has not decided, wearing an answer.');
+  }
+  return ns;
+}
+
+export function assertHostOption(host, key, duties, what = 'Host', declarations = null) {
   if (!host || (typeof host !== 'object' && typeof host !== 'function')) {
     throw new Error(`${what}: no host module was supplied (got ${host === null ? 'null' : typeof host}), `
       + `so whether it has a ${key} cannot even be asked.`);
@@ -1500,5 +1624,12 @@ export function assertHostOption(host, key, duties, what = 'Host') {
   }
   const got = host[key];
   if (got == null) return null;
-  return assertHost(got, duties, `${what}.${key}`);
+  assertHost(got, duties, `${what}.${key}`);
+  // ...AND WHAT IT DECLARES, when the namespace has declarations to make. Same
+  // call, so a namespace cannot arrive half-checked: `assertHost` is what makes
+  // its duties callable and this is what makes its answers present. Optional in
+  // the SIGNATURE and not in the surface — `DeckTransport` has one, and
+  // `tools/unit-check.mjs` is what keeps its table and its typedef one thing.
+  if (declarations) assertDeclared(got, declarations, `${what}.${key}`);
+  return got;
 }

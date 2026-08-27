@@ -37,11 +37,11 @@ import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, PREFS_KEY, SR } from '../shared
  */
 import {
   assertHost, assertHostOption, BUS,
-  DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
+  DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES, DECK_TRANSPORT_DECLARATIONS,
 } from '../shared/host.js';
 import { host } from './host.js';
 import {
-  chip, makeFollower, RUNNING, peakTick,
+  chip, makeFollower, videoLockWant, RUNNING, peakTick,
   shortcut, hostKeys, stemKeyHint, keyPlan, clampSemitones, SEMITONE_MIN, SEMITONE_MAX,
   snapSpeed, stepSpeed, speedFar, speedGate, SPEED_HOME, bpmPlan, beatPulse,
   isMac, modLabel, chordLabel,
@@ -126,8 +126,16 @@ assertHost(host.page, DECK_PAGE_DUTIES, 'DeckHost.page');
  * will ever tell me" as licence to start the pipeline on boot. See the
  * `DeckTransport` typedef; `assertHostOption` is what makes a Host that has no
  * player SAY so rather than merely omit it.
+ *
+ * ...AND WHAT THAT PLAYER DECLARES ABOUT ITSELF, in the same call, because a
+ * transport half-checked is a transport whose answers arrive at the first tick
+ * instead of at boot. `DECK_TRANSPORT_DECLARATIONS` is `isDeckClock` — is this
+ * player the deck itself, on the engine's playback clock — and `syncVideoLock`
+ * below is what acts on it. A Host that never said is refused here.
  */
-const transport = assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost');
+const transport = assertHostOption(
+  host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS,
+);
 /**
  * THE DECK'S TWO CORRESPONDENTS, addressed out of the seam's own declaration
  * (`BUS`, `../shared/host.js`) rather than out of three string literals.
@@ -932,7 +940,24 @@ function syncVideoLock(correct = false) {
   // No transport, no player to lock to. This is the whole of the guard: with
   // no transport the lock is never acquired, so there is never one to release.
   if (!transport) return;
-  const want = live.source === 'cache' && live.status === 'running';
+  /**
+   * ...AND THE GATE ITSELF IS `videoLockWant` IN `embed-state.js`, WHERE IT CAN
+   * BE DRIVEN. It is not a tidy-up: it carries the `isDeckClock` term, and
+   * without that term this loop MUTES A FILE SOURCE'S DECK WITH ITS OWN
+   * TRANSPORT — `source === 'cache' && status === 'running'` is exactly what
+   * that deck reports, and `drive({muted: true})` two lines down then lands on
+   * the deck itself. Silent for the whole track with every meter saying
+   * otherwise, and audible again the moment it stops. See there.
+   *
+   * ONE ANSWER, THREE CONSEQUENCES, and that is why the term is in the gate
+   * rather than at the three sites below: `false` here means the lock is never
+   * acquired, so the correction below is never computed and the rate below is
+   * never sent — and there is no held lock to release, because there was never
+   * one to take.
+   */
+  const want = videoLockWant({
+    source: live.source, status: live.status, isDeckClock: transport.isDeckClock,
+  });
   if (!want) {
     if (videoLocked) {
       videoLocked = false;
@@ -2208,16 +2233,6 @@ host.onMessage((m) => {
 host.page.onKey(onHostKey);
 host.page.onAutonav(onAutonav);
 /**
- * ...and the player, when there is one. PUSH, NOT POLL, and the seek is why:
- * `onContentJump` is the deck's whole notice that the ~2.4 s already in the
- * ring is now audio from somewhere else, and a poll would see a seek that
- * opened and closed between two samples as nothing at all.
- *
- * `onSpeedReport` is speed.js's verdict on the element, and it is the ONLY
- * thing that greys the speed control — read as "anything that is not ok" rather
- * than as a list of states; see speedGate.
- */
-/**
  * THE FOLLOWER — the boot composition, built in `embed-state.js` where it can
  * be driven from Node. It is handed the transport `assertHostOption` returned
  * and NOTHING ELSE about whether this deck is hosted: `hosted` is derived from
@@ -2239,10 +2254,10 @@ const follower = makeFollower(transport, {
   stop: stopLive,
 });
 /**
- * ...and the player, when there is one. PUSH, NOT POLL, and the seek is why:
- * `onContentJump` is the deck's whole notice that the ~2.4 s already in the
- * ring is now audio from somewhere else, and a poll would see a seek that
- * opened and closed between two samples as nothing at all.
+ * ...and the handlers go up, when there is a player to report. PUSH, NOT POLL,
+ * and the seek is why: `onContentJump` is the deck's whole notice that the
+ * ~2.4 s already in the ring is now audio from somewhere else, and a poll would
+ * see a seek that opened and closed between two samples as nothing at all.
  *
  * `onSpeedReport` is speed.js's verdict on the element, and it is the ONLY
  * thing that greys the speed control — read as "anything that is not ok" rather

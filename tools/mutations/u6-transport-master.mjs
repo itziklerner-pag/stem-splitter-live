@@ -19,20 +19,26 @@
  * directory that is shared between agents. So: in the tree, beside the suite it
  * tests, named for its slice.
  *
- * ANCHORS CUT AGAINST `619908a` — "feat(deck): make the deck the transport
+ * ANCHORS CUT AGAINST `d75a6fd` — "feat(deck): make the deck the transport
  * master for a File source, over the engine's playback clock", the commit that
- * introduced every line these cases patch. Every case carries that stamp in
- * `cut`, and this file prints it beside the current HEAD on every run so a
- * reader sees the distance without being told.
+ * introduced every line M1-M17 patch. Every case carries a stamp in `cut`, and
+ * this file prints it beside the current HEAD on every run so a reader sees the
+ * distance without being told.
  *
- * THAT COMMIT IS THIS BRANCH'S, NOT `main`'s, AND THAT IS THE ONE THING TO
+ * THAT STAMP HAS ALREADY MOVED ONCE, WHICH IS WHY THE FILE NOW CHECKS IT. It
+ * read `619908a` until a rebase replaced that commit with `d75a6fd`, and
+ * NOTHING WENT RED: the anchors still matched, because a rebase copies the
+ * content, and the SHA that no longer named anything was prose. The check the
+ * runner does below is deliberately NOT `git cat-file -e` — that answers YES
+ * for an orphaned commit, for as long as any un-force-pushed remote ref still
+ * holds it, so it would have given a clean all-clear on exactly this. It asks
+ * ANCESTOR-OF-HEAD, which is the claim the stamp actually makes.
+ *
+ * THE COMMIT IS THIS BRANCH'S, NOT `main`'s, AND THAT IS THE ONE THING TO
  * RE-CHECK AT INTEGRATION. The lines these anchors patch do not exist on `main`
- * — they are this slice — so there was no landed commit to stamp against when
- * the battery was written. If the branch is rebased before it lands, the SHA
- * above names a commit nobody can resolve, which is precisely the failure the
- * stamp exists to prevent. Re-run this file against final `main` and re-stamp
- * it to the merge SHA; the ANCHOR column is what tells you whether anything
- * actually moved.
+ * — they are this slice — so there is no landed commit to stamp against yet.
+ * Re-run this file against final `main` and re-stamp it to the landed SHA; the
+ * ANCHOR column is what tells you whether anything actually moved.
  *
  * WHAT IT REPORTS, AND WHY IT IS TWO ANSWERS AND NOT ONE:
  *
@@ -57,7 +63,8 @@
  * visible.
  *
  * ONE SUITE. Every assertion this slice added is in `test.js` group('host') —
- * `node test.js host`, 149 passed / 0 failed at the stamp. The prose table
+ * `node test.js host`, 155 passed / 0 failed with the D1 repair in the tree
+ * (149 before it, 132 on `main` at `b9dc537`). The prose table
  * lives with the assertions, under the head
  * "host — THE DECK AS TRANSPORT MASTER"; this file is the executable copy and
  * the one that can be re-run.
@@ -71,8 +78,9 @@
  * one nobody asks about; the control is the answer to it, and M16 is the proof
  * the control works.
  *
- * THIS FILE IS ITSELF AN INSTRUMENT, SO IT WAS WATCHED FAILING. Three
- * mutations, applied to this file at `619908a` and each restored:
+ * THIS FILE IS ITSELF AN INSTRUMENT, SO IT WAS WATCHED FAILING. Five
+ * mutations, applied to this file — the first three at the commit now known as
+ * `d75a6fd`, the last two at the D1 repair — and each restored:
  *
  *   1. M6's `find` altered so it matches NOTHING
  *      -> `M6  ANCHOR DECAYED  extension/offscreen/cacheddeck.js: 0 match(es)`,
@@ -85,6 +93,17 @@
  *      already red -> `baseline ... NOT GREEN`, exit 2, nothing run. Against an
  *      already-red suite every case below would "go red" while measuring
  *      nothing.
+ *   4. `CUT_AGAINST` set back to `619908a`, the SHA the rebase orphaned
+ *      -> `stamp M1-M17  619908a: !! NOT AN ANCESTOR OF HEAD — rebased or
+ *         amended away`. The point of watching this one is what the OTHER
+ *         question answers on the same input: `git cat-file -e 619908a` exits
+ *         0, because the object is still held by an un-force-pushed remote ref.
+ *         The wrong check passes on precisely the case the stamp exists for.
+ *   5. `CUT_AGAINST` set to `deadbee`, which no repository has
+ *      -> `stamp M1-M17  deadbee: !! DOES NOT RESOLVE AT ALL`. A separate line
+ *         from case 4 on purpose: "rebased away" and "never existed" are
+ *         different repairs, and `CUT_REPAIR` — prose until the repair lands —
+ *         must print as neither.
  *
  * IT WRITES TO THE WORKING TREE AND PUTS IT BACK. Each case is applied, run and
  * reverted one at a time; the revert also runs on a throw, on SIGINT and on
@@ -103,7 +122,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const CUT_AGAINST = '619908a';
+const CUT_AGAINST = 'd75a6fd';
+/**
+ * ...AND THE REPAIR'S OWN ANCHORS, which are a different commit. M18-M24 patch
+ * the `isDeckClock` declaration and the video-lock gate, and none of those
+ * lines existed at `d75a6fd`. `HEAD` until the repair lands: the same problem
+ * `CUT_AGAINST` has above, said again rather than hidden, and re-stamped at
+ * integration to the landed SHA. It is a STRING AND NOT A SHA on purpose — the
+ * reachability check below skips what it cannot resolve rather than reporting a
+ * commit missing, because "not yet committed" and "rebased away" are opposite
+ * findings and must not print the same line.
+ */
+const CUT_REPAIR = 'HEAD (the D1 repair; re-stamp at integration)';
 
 const SUITES = {
   host: { argv: ['test.js', 'host'], label: 'node test.js host' },
@@ -419,6 +449,130 @@ const MUTATIONS = [
     red: ['and the engine really carries both halves of the wire, with the RAW message'],
     green: ['drive() WRITES MUTE AND POSITION AND NOTHING ELSE'],
   },
+  // ------------------------------- the declaration, and the lock it stops (D1)
+  /**
+   * M18-M24 ARE CUT AGAINST A LATER COMMIT THAN M1-M17, and each says so in its
+   * own `cut` field rather than sharing the file's constant. They patch the
+   * repair for the BLOCKER — the video lock silencing a File source with that
+   * source's own transport — and those lines did not exist when M1-M17 were
+   * cut. A battery whose anchors come from two commits and pretends to one is
+   * a battery whose decay nobody can date.
+   */
+  {
+    id: 'M18', suite: 'host', cut: CUT_REPAIR,
+    what: 'videoLockWant drops the `isDeckClock` term — the gate goes back to what it was',
+    why: 'THE BLOCKER. `source === "cache" && status === "running"` is exactly what a File source’s cached '
+      + 'deck reports, so the lock acquires on the deck it IS and `drive({muted:true})` silences it for the '
+      + 'whole track while every meter says it is playing. Silent while playing, audible while stopped.',
+    edits: [{
+      file: 'extension/ui/embed-state.js',
+      find: '  if (s.isDeckClock) return false;',
+      replace: '  if (false) return false;   // U6/M18 mutation: the gate cannot tell a deck from a page player',
+    }],
+    red: ['THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK'],
+    // The call site is untouched, so the red above is the ANSWER changing and
+    // not the wiring going away. That is the pair M21 completes from the other side.
+    green: [
+      '...and the DECK\'s lock really asks that gate',
+      '...and the gate itself refuses a transport that declared nothing',
+    ],
+  },
+  {
+    id: 'M19', suite: 'host', cut: CUT_REPAIR,
+    what: 'the SHIPPING page Host declares it IS the deck’s own clock',
+    why: 'The declaration answered wrongly by the one Host that ships. The page’s `<video>` really does need '
+      + 'the lock — docs/AUDIO.md §8.2 — so this silently retires a shipping feature, and it is why the gate '
+      + 'assertion is a PAIR: a gate that answered `false` always would pass the deck-clock half alone.',
+    edits: [{
+      file: 'extension/ui/host.js',
+      find: '    isDeckClock: false,',
+      replace: '    isDeckClock: true,   // U6/M19 mutation: the page player claims to be the deck',
+    }],
+    red: [
+      'A FILE SOURCE\'S TRANSPORT DECLARES IT IS THE DECK\'S OWN CLOCK',
+      'THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK',
+    ],
+    green: ['...and a transport that never SAID which it is'],
+  },
+  {
+    id: 'M20', suite: 'host', cut: CUT_REPAIR,
+    what: 'assertDeclared stops telling a Host that said NOTHING from one that answered badly',
+    why: 'The subtle half, and the reason that assertion reads the two SENTENCES rather than counting throws: '
+      + 'an omitted declaration is also not a boolean, so the check still throws naming `isDeckClock`, and a '
+      + 'condition that asked only "did it throw" would go on passing over a check that had stopped '
+      + 'distinguishing silence from a wrong answer.',
+    edits: [{
+      file: 'extension/shared/host.js',
+      find: '  const silent = names.filter((k) => !(k in ns));',
+      replace: '  const silent = [];   // U6/M20 mutation: silence is no longer its own failure',
+    }],
+    red: ['...and a transport that never SAID which it is'],
+    green: ['A FILE SOURCE\'S TRANSPORT DECLARES IT IS THE DECK\'S OWN CLOCK'],
+  },
+  {
+    id: 'M21', suite: 'host', cut: CUT_REPAIR,
+    what: 'syncVideoLock stops asking the gate and spells the old condition itself',
+    why: 'The other side of M18’s pair. The pure gate still answers correctly and the two assertions that '
+      + 'DRIVE it still pass — a fixture in which the thing under test is a no-op — so only the chain link '
+      + 'catches it, which is why that link exists and why it names the transport’s own declaration.',
+    edits: [{
+      file: 'extension/ui/embed.js',
+      find: '  const want = videoLockWant({\n'
+        + '    source: live.source, status: live.status, isDeckClock: transport.isDeckClock,\n'
+        + '  });',
+      replace: "  const want = live.source === 'cache' && live.status === 'running';   // U6/M21 mutation",
+    }],
+    red: ['...and the DECK\'s lock really asks that gate'],
+    green: ['THE VIDEO LOCK NEVER TAKES A DECK THAT IS ITS OWN CLOCK'],
+  },
+  {
+    id: 'M22', suite: 'host', cut: CUT_REPAIR,
+    what: 'the engine-backed report grows a sixth value',
+    why: 'FINDING A, made a red. `DeckTransport.onState` names six values and this player reports five, '
+      + 'because it has no rate to report; the next reader will try to close the gap with a constant. The '
+      + 'sixth here is deliberately NOT the rate, so this case measures the key set rather than borrowing '
+      + 'qa/speed-pitch.mjs’s claim — which is the second red, one file away, if the sixth ever is.',
+    edits: [{
+      file: 'extension/offscreen/cacheddeck.js',
+      find: '      atMs: Date.now(),',
+      replace: '      atMs: Date.now(), sixth: 1,   // U6/M22 mutation: a value nothing reads',
+    }],
+    red: ['THE ENGINE-BACKED REPORT CARRIES FIVE VALUES AND ITS TIMESTAMP'],
+    green: ['onState REPORTS THE ENGINE\'S OWN PLAYHEAD'],
+  },
+  {
+    id: 'M23', suite: 'host', cut: CUT_REPAIR,
+    what: 'the deck’s boot line drops the declarations table',
+    why: '`assertHostOption` takes `declarations` OPTIONALLY — it has to, it is generic — so this is the one '
+      + 'character of the repair that can be forgotten without any direct drive noticing: every refusal '
+      + 'above still passes, and a Host that never declared `isDeckClock` reaches the lock unchecked.',
+    edits: [{
+      file: 'extension/ui/embed.js',
+      find: 'const transport = assertHostOption(\n'
+        + "  host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost', DECK_TRANSPORT_DECLARATIONS,\n"
+        + ');',
+      replace: "const transport = assertHostOption(host, 'transport', DECK_TRANSPORT_DUTIES, 'DeckHost');"
+        + '   // U6/M23 mutation',
+    }],
+    red: [
+      'THE DECK ITSELF RUNS ALL THREE BOOT CHECKS',
+      '...and each runs BEFORE the deck first reaches for the thing it guards',
+    ],
+    green: ['...and a transport that never SAID which it is'],
+  },
+  {
+    id: 'M24', suite: 'host', cut: CUT_REPAIR,
+    what: 'assertHostOption stops passing the declarations on to assertDeclared',
+    why: 'M23’s defect one layer in: the table is named at the call site and the check it names never runs. '
+      + 'The direct drives all still pass, because they hand the table in themselves.',
+    edits: [{
+      file: 'extension/shared/host.js',
+      find: '  if (declarations) assertDeclared(got, declarations, `${what}.${key}`);',
+      replace: '  if (false) assertDeclared(got, declarations, `${what}.${key}`);   // U6/M24 mutation',
+    }],
+    red: ['...and a transport that never SAID which it is'],
+    green: ['A FILE SOURCE\'S TRANSPORT DECLARES IT IS THE DECK\'S OWN CLOCK'],
+  },
 ];
 
 // ---------------------------------------------------------------- the runner
@@ -428,7 +582,7 @@ if (argv.includes('--help') || argv.includes('-h')) {
   process.exit(0);
 }
 if (argv.includes('--table')) {
-  console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST}\n`);
+  console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST} (M1-M17) and ${CUT_REPAIR} (M18-M24)\n`);
   for (const m of MUTATIONS) {
     console.log(`${m.id.padEnd(5)} ${SUITES[m.suite].label.padEnd(20)} ${m.what}`);
     console.log(`${''.padEnd(5)} ${'why'.padEnd(20)} ${m.why}`);
@@ -452,7 +606,47 @@ try {
   head = execFileSync('git', ['-C', ROOT, 'rev-parse', '--short', 'HEAD'], { encoding: 'utf8' }).trim();
 } catch { /* a vendored copy has no git; the stamp still prints */ }
 
-console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST}; HEAD is ${head}`);
+/**
+ * IS THE STAMP STILL POINTING AT SOMETHING? THREE ANSWERS AND NOT TWO.
+ *
+ * `git cat-file -e` is the WRONG QUESTION and this file is the reason the rule
+ * exists: it answers YES for a commit a rebase orphaned, because the object
+ * survives while any un-force-pushed remote ref still names it. Asked that way
+ * the check gives a clean all-clear today and starts failing on the first
+ * force-push, GC or fresh clone — the one moment nobody is looking. Ask
+ * ANCESTOR-OF-HEAD instead: that is the claim the stamp makes.
+ *
+ * A WARNING AND NOT AN EXIT. The anchors are the evidence and the ANCHOR column
+ * measures them directly; an unreachable stamp means "re-stamp this file", not
+ * "these cases are wrong". Exiting here would turn a provenance note into a
+ * failed battery and teach the next reader to skip it.
+ *
+ * UNRESOLVABLE IS ITS OWN ANSWER, third and separate. `CUT_REPAIR` is prose
+ * until the repair lands, and a vendored copy has no git at all; reporting
+ * either as "rebased away" would be a false alarm of exactly the kind the
+ * paragraph above is about.
+ */
+const SHA = /^[0-9a-f]{7,40}$/;
+function stampState(stamp) {
+  if (head === '(unknown)') return 'unchecked (no git here)';
+  if (!SHA.test(stamp)) return 'not a SHA yet — nothing to check';
+  try {
+    execFileSync('git', ['-C', ROOT, 'merge-base', '--is-ancestor', stamp, 'HEAD'], { stdio: 'ignore' });
+    return 'reachable from HEAD';
+  } catch {
+    try {
+      execFileSync('git', ['-C', ROOT, 'rev-parse', '--verify', `${stamp}^{commit}`], { stdio: 'ignore' });
+      return '!! NOT AN ANCESTOR OF HEAD — rebased or amended away. RE-STAMP (INTEGRATION 22, 35c)';
+    } catch {
+      return '!! DOES NOT RESOLVE AT ALL — RE-STAMP (INTEGRATION 22, 35c)';
+    }
+  }
+}
+
+console.log(`U6 mutation battery — anchors cut against ${CUT_AGAINST} (M1-M17) and ${CUT_REPAIR} (M18-M24); `
+  + `HEAD is ${head}`);
+console.log(`  stamp M1-M17  ${CUT_AGAINST}: ${stampState(CUT_AGAINST)}`);
+console.log(`  stamp M18-M24 ${CUT_REPAIR}: ${stampState(CUT_REPAIR)}`);
 console.log(`${cases.length} case(s), ${new Set(cases.map((c) => c.suite)).size} suite(s)\n`);
 
 /**
@@ -567,7 +761,7 @@ try {
 const decayed = results.filter((x) => x.anchor !== 'ok');
 const missed = results.filter((x) => x.anchor === 'ok' && x.red !== 'ok');
 console.log('---');
-console.log(`anchors   : ${results.length - decayed.length} of ${results.length} still match ${CUT_AGAINST}'s source`);
+console.log(`anchors   : ${results.length - decayed.length} of ${results.length} still match the source they were cut against`);
 console.log(`mutations : ${results.length - decayed.length - missed.length} of ${results.length - decayed.length} matching anchors still RED as specified`);
 if (decayed.length) console.log(`DECAYED   : ${decayed.map((x) => x.id).join(', ')} — re-cut these; they are instruments, not findings`);
 if (missed.length) console.log(`NOT RED   : ${missed.map((x) => x.id).join(', ')} — decayed instrument OR a real coverage loss; investigate before re-cutting`);

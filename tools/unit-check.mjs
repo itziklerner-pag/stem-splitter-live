@@ -634,7 +634,25 @@ const tableKeys = (name) => {
   const m = ifaceSrc.match(new RegExp(`export const ${name} = Object\\.freeze\\(\\{([\\s\\S]*?)\\}\\);`));
   return m ? [...m[1].matchAll(/^\s{2}(\w+):/gm)].map((x) => x[1]) : null;
 };
-const TABLE_OF = (typeName) => `${typeName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()}_DUTIES`;
+const SCREAM = (typeName) => typeName.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase();
+const TABLE_OF = (typeName) => `${SCREAM(typeName)}_DUTIES`;
+/**
+ * ...AND THE DECLARATION TABLE, WHICH IS OPTIONAL AND IS STILL GATED BOTH WAYS.
+ *
+ * A DECLARATION is a value a Host states rather than a function it supplies —
+ * `DeckTransport.isDeckClock` is the first — so it cannot live in a `*_DUTIES`
+ * table: `assertHost` requires `typeof host[k] === 'function'` and would refuse
+ * a boolean, loudly, for being the right answer.
+ *
+ * IT IS ENCODED RATHER THAN LISTED, exactly like the namespace exception below.
+ * An interface with no declarations has no `*_DECLARATIONS` export and this
+ * contributes nothing; an interface that grows one gets both directions checked
+ * with no edit here. What must NOT happen is a declaration documented in the
+ * typedef and enforced by nothing, or enforced by `assertDeclared` and
+ * documented nowhere — the same two failures the duty halves have, in a place
+ * where they would be easier to miss because the table is smaller.
+ */
+const DECLS_OF = (typeName) => `${SCREAM(typeName)}_DECLARATIONS`;
 
 /**
  * Every `@typedef {object} X` in the interface, with the `@property` names that
@@ -663,14 +681,17 @@ for (const t of typedefs) {
   const isNamespace = (type) => type.split('|').map((x) => x.trim())
     .filter((x) => x !== 'null' && x !== 'undefined')
     .every((x) => named.has(x) && tableKeys(TABLE_OF(x)));
-  const undocumented = table.filter((k) => !t.props.some((p) => p.prop === k));
-  const unchecked = t.props.filter((p) => !table.includes(p.prop) && !isNamespace(p.type)).map((p) => p.prop);
+  // Declarations are optional per interface; where there are none this is [].
+  const decls = tableKeys(DECLS_OF(t.name)) || [];
+  const stated = table.concat(decls);
+  const undocumented = stated.filter((k) => !t.props.some((p) => p.prop === k));
+  const unchecked = t.props.filter((p) => !stated.includes(p.prop) && !isNamespace(p.type)).map((p) => p.prop);
   ok(t.props.length > 0 && undocumented.length === 0 && unchecked.length === 0,
     `${t.name} is one interface, not two: every duty ${TABLE_OF(t.name)} names is documented and every documented duty is checked${
       t.props.length === 0 ? '  — NO @property PARSED, so this compared nothing'
-        : unchecked.length ? `  — DOCUMENTED BUT UNCHECKED: ${unchecked.join(', ')} (in the typedef, in no duty table, and not a declared namespace)`
-          : undocumented.length ? `  — CHECKED BUT UNDOCUMENTED: ${undocumented.join(', ')} (in ${TABLE_OF(t.name)}, in no @property)`
-            : `  ${t.props.length} properties, ${table.length} duties`}`);
+        : unchecked.length ? `  — DOCUMENTED BUT UNCHECKED: ${unchecked.join(', ')} (in the typedef, in no duty or declaration table, and not a declared namespace)`
+          : undocumented.length ? `  — CHECKED BUT UNDOCUMENTED: ${undocumented.join(', ')} (in ${TABLE_OF(t.name)}${decls.length ? ` or ${DECLS_OF(t.name)}` : ''}, in no @property)`
+            : `  ${t.props.length} properties, ${table.length} duties${decls.length ? `, ${decls.length} declaration(s)` : ''}`}`);
 }
 
 /* ------------------------------------------------------- extension/unit.sha256

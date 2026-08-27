@@ -287,6 +287,21 @@ export const host = {
    * reads the answer as a fact about the world and boots differently on it.
    */
   transport: FRAMED ? {
+    /**
+     * `false` — THERE IS A SEPARATE PLAYER AND IT IS NOT THIS DECK. The
+     * `<video>` is on the host's page, its clock is its own, and it drifts
+     * against the deck's audio clock, so the deck may take it, mute it and
+     * correct it (`docs/AUDIO.md` §8.2). That is the whole of what this answer
+     * licences, and it is the ordinary case.
+     *
+     * SPELLED RATHER THAN OMITTED, and `assertDeclared` is what refuses the
+     * omission — for the same reason `assertHostOption` refuses a Host that
+     * never mentioned `transport`: from inside the unit, a Host that has not
+     * decided and a Host that decided `false` are the same object, and the deck
+     * acts on the answer at 10 Hz.
+     */
+    isDeckClock: false,
+
     onState: on('VIDEO'),
     onJump: on('JUMP'),
     onSpeedReport: on('SPEED'),

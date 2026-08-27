@@ -247,6 +247,54 @@ export function makeFollower(transport, o) {
 }
 
 /**
+ * SHOULD THE DECK BE HOLDING THE PLAYER RIGHT NOW? The gate of the video lock
+ * (`ui/embed.js::syncVideoLock`, `docs/AUDIO.md` §8.2), pure and here rather
+ * than there for the same reason `makeFollower` is: `embed.js` builds a DOM at
+ * module scope and cannot be evaluated from Node, and this decision had never
+ * been driven for anything but the one player that ships.
+ *
+ * THE `isDeckClock` TERM IS THE WHOLE POINT OF EXTRACTING IT, and it is a
+ * BLOCKER fixed rather than a case tidied. `source === 'cache' && status ===
+ * 'running'` is exactly what a File source's cached deck reports, and that
+ * deck's transport IS the deck. So under the old gate the lock's first act —
+ * `drive({muted: true})` — muted the deck ITSELF, for the whole track, while
+ * every meter and every status field said it was playing; `release()` on stop
+ * then unmuted it. SILENT WHILE PLAYING, AUDIBLE WHILE STOPPED, with nothing
+ * red anywhere. The same loop then corrected the deck's audio clock against the
+ * deck's own reported position — a clock locked to itself — and re-asserted a
+ * rate at ~4 Hz that the engine must refuse.
+ *
+ * ONE ANSWER CARRIES ALL THREE CONSEQUENCES, which is why the term is here and
+ * not at three call sites. `syncVideoLock` is shaped `if (!want) { release if
+ * held; return } ; acquire if not held ; return unless correcting ; correct` —
+ * so `false` means it never acquires, never computes a correction, and never
+ * sends a rate, and there is no held lock to release because there was never
+ * one to take.
+ *
+ * IT REFUSES A TRANSPORT THAT NEVER SAID, rather than reading silence as
+ * `false` — which is the answer that would put the mute back. `assertDeclared`
+ * (`shared/host.js`) makes that unreachable at boot; this is what stops the
+ * unreachable case being a quiet return to the defect if it ever becomes
+ * reachable.
+ *
+ * @param {{source:string|null, status:string, isDeckClock:boolean}} s
+ *   `source` and `status` are the engine's last word on this deck; `isDeckClock`
+ *   is the Host's declaration on the transport.
+ * @returns {boolean}
+ */
+export function videoLockWant(s) {
+  if (!s || typeof s.isDeckClock !== 'boolean') {
+    throw new TypeError('videoLockWant: the transport did not declare whether it is this deck\'s own clock, '
+      + 'so whether to take a lock on it cannot be decided. A Host declares `isDeckClock` and '
+      + '`assertDeclared` refuses one that does not.');
+  }
+  // A clock cannot drift from itself, and a player that IS the deck is muted by
+  // the very write that was meant to silence something else.
+  if (s.isDeckClock) return false;
+  return s.source === 'cache' && s.status === 'running';
+}
+
+/**
  * THE ONE READOUT, in the place a Start button used to be. It is now the whole
  * of the deck's self-report, so its wording is the feature: a user who pressed
  * play and hears nothing for two seconds must be able to see why.
