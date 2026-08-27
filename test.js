@@ -374,6 +374,28 @@ if (group('window')) {
  * was restored. AGENTS.md:118: "an assertion never observed failing is one whose
  * ability to fail is an assumption."
  *
+ * THE BATTERY IS `qa/mutations-u1-wavstream.mjs`, AND THIS TABLE IS ITS OUTPUT.
+ * Re-run it rather than believing this comment. A mutation anchors on a span of
+ * source, and a later slice that rewrites that span decays the anchor SILENTLY —
+ * a search that matches nothing reads exactly like one that matched and passed.
+ * Two other Phase 4 batteries decayed that way with neither author knowing; this
+ * one had no file at all until it was re-run and checked in, so its only record
+ * was this table, and a table cannot re-measure itself.
+ *
+ *     node qa/mutations-u1-wavstream.mjs               the fifteen, with a control
+ *     node qa/mutations-u1-wavstream.mjs --list        do the anchors still match?
+ *     node qa/mutations-u1-wavstream.mjs --self-check  can the battery say MUTE?
+ *
+ * PROVENANCE, because a mutation is only evidence about the source it was cut
+ * for. M1-M12 were cut against 1040de1 and M13-M15 against 0fb693a — both landed
+ * commits, so both stamps stay resolvable. RE-ESTABLISHED against main 5993d32:
+ * 15 of 15 anchors still matching, 15 of 15 reddening EXACTLY the assertions
+ * named here and nothing else, and all 18 assertions covered by at least one
+ * mutation. Nothing needed re-cutting because wav.js is untouched between
+ * 0fb693a and 5993d32. The `wav.js:NNN` coordinates below are as of 5993d32 and
+ * are the first thing that will go stale; the anchor TEXT in the battery is what
+ * is authoritative, and `--list` prints the current line for each.
+ *
  * THE MUTATIONS TARGET THE COMPOSITION, NOT THE SAMPLE LOOP, and that is not an
  * oversight. `writeFrames` is shared by all three writers, so breaking it moves
  * both sides of a byte-identity assertion equally and the assertion stays green
@@ -381,35 +403,41 @@ if (group('window')) {
  * than a second one. What these assertions can see is everything built around
  * that loop: the header, the chunk boundaries, the pad byte, the frame
  * accounting and the two refusals. The existing group('window') covers the loop
- * itself against the byte map.
+ * itself against the byte map, and M15 below is where that transitive coverage
+ * is observed rather than assumed.
  *
- *   M1  wav.js:268  chunk() interleaves the channels in reverse order
- *                   -> 3 red: 32f identity, 16-bit identity, pipeTo identity
+ *   M1  wav.js:279  chunk() interleaves the channels in reverse order
+ *                   -> 4 red: 32f identity, the streamed out-of-range read-back,
+ *                   16-bit identity, pipeTo identity
  *                   (sizing the chunk buffer by bytesPerSample instead of
  *                   blockAlign is also red, but as a DataView overflow that
- *                   takes the whole suite down before the assertion reports)
- *   M2  wav.js:249  header() declares `written` instead of `frames`
- *                   -> 6 red: all three identities, header-is-final, pipeTo
- *                   identity, and the no-options default header
- *   M3  wav.js:280  end() stops refusing a short write
+ *                   takes the whole suite down before the assertion reports —
+ *                   re-measured at 5993d32, it still ends the run in a stack
+ *                   trace with nothing named, which is why it is not the anchor)
+ *   M2  wav.js:260  header() declares `written` instead of `frames`
+ *                   -> 7 red: all three identities, the streamed out-of-range
+ *                   read-back, header-is-final, pipeTo identity, and the
+ *                   no-options default header
+ *   M3  wav.js:291  end() stops refusing a short write
  *                   -> 2 red: the short-write refusal, and pipeTo's abort
- *   M4  wav.js:257  chunk() stops refusing a long write
+ *   M4  wav.js:268  chunk() stops refusing a long write
  *                   -> 1 red: the long-write refusal
- *   M5  wav.js:284  end() never emits the RIFF pad byte
+ *   M5  wav.js:295  end() never emits the RIFF pad byte
  *                   -> 1 red: 24-bit mono odd frame count
- *   M6  wav.js:244  the constructor computes the length without riffSizeFor
+ *   M6  wav.js:255  the constructor computes the length without riffSizeFor
  *                   -> 1 red: the 4 GiB refusal at construction
- *   M7  wav.js:372  WavSyncWriter.close does not patch the data-chunk size
- *                   -> 1 red: the sync writer's byte identity
- *   M8  wav.js:344  WavSyncWriter.append checks the ceiling after it writes
+ *   M7  wav.js:383  WavSyncWriter.close does not patch the data-chunk size
+ *                   -> 3 red: the 32f sync identity, the 16-bit sync identity,
+ *                   and the odd-payload pad
+ *   M8  wav.js:355  WavSyncWriter.append checks the ceiling after it writes
  *                   -> 1 red: the sync writer refuses before writing
- *   M9  wav.js:47   the 16-bit dither default is dropped
+ *   M9  wav.js:58   the 16-bit dither default is dropped
  *                   -> 1 red: the dither default
- *   M10 wav.js:230  the constructor stops refusing planes as a channel count
+ *   M10 wav.js:240  the constructor stops refusing planes as a channel count
  *                   -> 1 red: the named refusal
- *   M11 wav.js:244  byteLength forgets the header bytes
+ *   M11 wav.js:255  byteLength forgets the header bytes
  *                   -> 1 red: the length known before any audio is written
- *   M12 wav.js:301  pipeTo closes the sink on a refusal instead of aborting it
+ *   M12 wav.js:312  pipeTo closes the sink on a refusal instead of aborting it
  *                   -> 1 red: pipeTo aborts rather than closes
  *
  * M13-M15 CLOSE A COVERAGE HOLE AN ADVERSARIAL REVIEW FOUND, and M13 is the
@@ -430,8 +458,12 @@ if (group('window')) {
  *                   -> 1 red: the odd-payload pad
  *   M15 wav.js:134  the float path clamps to ±1.0 like the fixed-point paths
  *                   -> 1 red here (the streamed out-of-range read-back), and 2
- *                   more in group('window') — which is the transitive coverage
- *                   the note above describes, observed rather than assumed
+ *                   more in group('window') — `32f round trip is bit exact` and
+ *                   `32f preserves out-of-range samples`, both re-measured at
+ *                   5993d32 with `node test.js window`. That is the transitive
+ *                   coverage the note above describes, observed rather than
+ *                   assumed, and it is the assertion that would go missing if a
+ *                   future writer were given its own conversion loop.
  */
 if (group('wavstream')) {
   head('wavstream — the streaming writers emit exactly the bytes encodeWav emits (U1)');

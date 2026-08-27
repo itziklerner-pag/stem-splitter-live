@@ -98,6 +98,20 @@
  * absence, because an unlisted suite is indistinguishable from a suite nobody
  * knew about, which is the whole subject of this note:
  *
+ *   qa/mutations-u1-wavstream.mjs
+ *       A MUTATION BATTERY, and it is not gated because it EDITS TRACKED SOURCE.
+ *       It patches extension/shared/wav.js fifteen times, runs
+ *       `node test.js wavstream` after each, and restores the file in a
+ *       `finally`. A gate that writes the tree it is gating is a gate that can
+ *       leave the tree written — an interrupted step would hand the next agent a
+ *       dirty wav.js and no explanation — so it stays a thing a person runs, not
+ *       a step. It IS a real instrument: it refuses to score anything unless the
+ *       unmutated suite is green first, it compares each mutation's red set
+ *       EXACTLY rather than as a subset, and `--self-check` proves it can still
+ *       report MUTE by applying an edit that changes only a comment. Its subject
+ *       is the eighteen assertions in group('wavstream'), which step `unit`
+ *       already runs; what the battery adds is the evidence that those eighteen
+ *       can fail, which no count can carry.
  *   qa/run-qa.mjs, qa/soak.mjs, qa/probe.mjs, qa/probe-msg.mjs
  *       REPORT GENERATORS, not gates. They print notes and write JSON; they
  *       contain no PASS/FAIL assertion at all, so this runner would correctly
