@@ -111,13 +111,13 @@ const SUITE = 'test.js';
  * that form and the run says so first.
  */
 export const ANCHORED_AT = {
-  base: '5993d32',
-  slice: 'U11 / phase4/u11-e1-export / issue #42, re-cut after the review repair',
+  base: 'd0ab7fc',
+  slice: 'U11 / phase4/u11-e1-export / issue #42, re-stamped after the rebase onto v0.3.1 — all 49 anchors re-verified as matching and reddening exactly, so nothing needed re-cutting',
   files: {
     [EXPORT]: 'b6c953f2ca7d409efc4178a22dd52209049aa9331202eae7932f810796c7b758',
     [WAV]: 'd9e06b208d4b1051ced3a0b46991b83a3bab397fd21b56dc4b78d1275ae531ac',
     [ENGINE]: '84660beb44179ba0c98ad6adc1fce6c2e322f2b67ae48344fcfddca3d15184b5',
-    [SUITE]: 'fda301b09bf882aded149724e20b6b662bc7479c7c5d01b180f331217c3194eb',
+    [SUITE]: 'd04e404335a45d0856585fa4289a6c1d87946cd29cd15f6b715214be29d42411',
     [CACHE]: 'afa77f527575a0e48a401cb2618417d963d879c88996a6932e7c34109ff6f578',
   },
 };
