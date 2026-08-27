@@ -4645,10 +4645,13 @@ if (group('cache')) {
       ok('...and this is not a cache that simply reads nothing: each tier still gets its own back',
         (await live.get('k-live')) !== null && (await f32.get('k-32f')) !== null);
 
-      await f32.delete('k-live');          // a key that is not f32's to delete
-      ok('delete() on one tier cannot remove the other tier\'s entry', await live.has('k-live'));
-      ok('...nor the other tier\'s files', STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
-
+      // EVICT BEFORE DELETE, AND THE ORDER IS LOAD-BEARING. When the delete ran
+      // first, a shared-directory regression had already removed `k-live`
+      // through f32 by the time evict was reached, so `evict()` saw one entry
+      // and the assertion below passed for the wrong reason — it was masked by
+      // an earlier statement in its own block. Evicting first leaves both
+      // entries present, so the shared-directory case really is what this
+      // measures. Do not reorder these two.
       f32.maxBytes = 1;                    // force it to evict everything it owns
       const plan = await f32.evict();
       ok('evict() only ever considers its own tier\'s entries',
@@ -4656,6 +4659,10 @@ if (group('cache')) {
         plan.removed.map((e) => e.key).join(',') || 'nothing removed');
       ok('...so a cap of 1 byte on one tier does not empty the other',
         (await live.has('k-live')) && STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
+
+      await f32.delete('k-live');          // a key that is not f32's to delete
+      ok('delete() on one tier cannot remove the other tier\'s entry', await live.has('k-live'));
+      ok('...nor the other tier\'s files', STEMS.every((s2) => o.names(CACHE_DIR).includes(`k-live.${s2}.wav`)));
     } finally { o.restore(); }
   }
   // ======================================================== U2: the 32f tier
