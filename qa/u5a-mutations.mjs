@@ -613,7 +613,7 @@ const MUTATIONS = [
     find: "    return fail('DECODE_FAILED', `the decoder produced audio the geometry cannot use: ${why(e)}`);",
     to: '    throw e;',
     expect: [
-      'offline — the whole run — the block ran to its end without throwing  THREW: offline: channels differ — 516970 vs 516969  ...the assertions after that point DID NOT RUN and are not counted. This names the death; it does not undo it.',
+      'offline — the whole run — the block ran to its end without throwing',
       '...and ALL ELEVEN were raised by code th',
     ],
     truncates: true },
@@ -699,6 +699,22 @@ const MUTATIONS = [
     to: '    for (let i = 0; i < planes; i++) planeViews.push(stems.subarray(0, segment));',
     expect: [
       'the separator returns ONE VIEW PER PLANE',
+    ] },
+
+  { id: 'E12', file: OFF, what: 'a cancel succeeds when there is NOTHING to cancel — a receiver '
+      + 'is told a run it never started has stopped',
+    find: '    if (!this.job || this.job.deck !== deck) return false;',
+    to: '    if (!this.job || this.job.deck !== deck) return true;',
+    expect: [
+      'a cancel names the deck it belongs to: the wrong deck is r',
+      '...and once released there is nothing to cancel, which is ',
+    ] },
+  { id: 'E13', file: OFF, what: 'the LEFT channel is read off the last channel rather than the '
+      + 'first, so a stereo file comes back as two copies of its right',
+    find: '  const l = buf.getChannelData(0);',
+    to: '  const l = buf.getChannelData(buf.numberOfChannels - 1);',
+    expect: [
+      'a STEREO decode keeps two distinct channels, and the frame',
     ] },
 
   // --------------------------------------------------- the tier it writes to
@@ -923,6 +939,14 @@ const badKeys = [];
 for (const m of MUTATIONS) {
   for (const key of (m.expect || [])) {
     const { hits } = resolve(key, baseNames);
+    /**
+     * A TRUNCATING CASE'S RED IS THE GUARD'S OWN LINE, and that line DOES NOT
+     * EXIST in a green baseline — `blockThrew` only prints when a block throws.
+     * So zero hits is legitimate there and nowhere else, and it contributes
+     * nothing to coverage: an assertion that only exists when the suite is
+     * broken cannot be one of the assertions being watched.
+     */
+    if (hits.length === 0 && m.truncates) continue;
     if (hits.length !== 1) badKeys.push(`${m.id} expect ${JSON.stringify(key)} names ${hits.length} assertions`);
     else declared.add(hits[0]);
   }
