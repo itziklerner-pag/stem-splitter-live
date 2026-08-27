@@ -36,11 +36,26 @@
  * produce measurably different stems: corr 0.9909 vs 0.9938 against offline).
  *
  * ---------------------------------------------------------------------------
- * PRIMING IS ONE REAL-TIME PASS AND CANNOT BE SPED UP. Raising
+ * PRIMING FROM A CAPTURE IS ONE REAL-TIME PASS AND CANNOT BE SPED UP. Raising
  * `video.playbackRate` still captures at 48 kHz, so at 3x everything above
  * 8 kHz is gone; `preservesPitch` phase-vocodes exactly the fine structure the
  * separator relies on. Design the UX around "prime this while the previous
  * track plays" (AUDIO.md §8.3), never around a trick.
+ *
+ * WHAT THAT RULE IS ABOUT IS THE CAPTURE, AND IT IS UNCHANGED. It was written
+ * when every Source was a tab, and every word of it still holds for one: the
+ * damage is done by the CAPTURE running at a rate, not by the separation
+ * finishing early.
+ *
+ * A FILE SOURCE NEVER TOUCHES THAT PATH. It is decoded whole, at the model's own
+ * clock, before a single window is separated — no `playbackRate`, no tab stream,
+ * no 48 kHz capture to lose the top of the band from, and no phase vocoder
+ * anywhere near it. The samples the separator sees are the samples in the file.
+ * So an ahead-of-time run over a file has no deadline and is faster than real
+ * time, and that is not the trick this paragraph forbids; the two cases differ in
+ * where the audio comes from, which is the thing the rule was always about.
+ * Entries made that way are keyed apart by `pipelineVersion`'s `geometry`
+ * component, so neither can be served for the other.
  */
 
 import { SR, SEGMENT, STEMS, MODEL, SEAM_XFADE_LAW, SEAM_XFADE_MS } from './config.js';

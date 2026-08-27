@@ -22,6 +22,9 @@
  *   wavstream  U1's streaming WAV writers: the chunked and the unknown-length
  *            OPFS writer emit exactly the bytes encodeWav emits, the header is
  *            final before any audio is written, and a wrong frame count throws
+ *   offline  U5a's SYMMETRIC ahead-of-time geometry: windows advance by STRIDE,
+ *            the joins are complementary linear ramps that sum to one, and an
+ *            identity separator reconstructs the input to the float32 floor
  *   fft      rfft agrees with a naive DFT; STFT/iSTFT round-trips
  *   ring     the SAB capture ring is lossless across wrap
  *   live     Mode 1: the causal chunk plan emits every sample exactly once, the
@@ -155,6 +158,7 @@ import {
   makeLivePlan, chunkPlan, makeFades, LiveEmitter, readWindow, primedPct, skipFrames, STEM_PLANES,
   PASS_PLANE_L, PASS_PLANE_R,
 } from './extension/engine/live.js';
+import { makeOfflinePlan, windowPlan, bufferRing, OfflineAssembler } from './extension/engine/offline.js';
 import { StemRingWriter, stemRingByteLength, PLANES, H_READ, H_PLAY } from './extension/shared/stemring.js';
 import { outputTick, OUTPUT_DEAD_HOLD_SEC, OUTPUT_DEAD_HOLD_FRAMES, MIXER_SILENT_PEAK } from './extension/offscreen/live.js';
 import {
@@ -7570,6 +7574,244 @@ if (group('cache')) {
       msg || 'RETURNED A SILENTLY PADDED TRACK');
     ok('...and it says which way the entry would have been wrong',
       msg !== null && /padded with silence/.test(msg), msg);
+  }
+}
+
+// ===========================================================================
+/**
+ * WATCHED RED BY MUTATION — every assertion below. Each was applied to a green
+ * tree, `node test.js offline` run, the red read, and the file restored.
+ *
+ * THE GATE THAT IS NOT HERE, DELIBERATELY. There is no assertion comparing this
+ * output to the LIVE path's. Under the symmetric window the two must legitimately
+ * differ — that is the entire reason this geometry exists — so such an assertion
+ * would go green exactly when the runner was wrong and red when it was right. It
+ * nearly reached the contract; it is named here so nobody adds it back.
+ */
+if (group('offline')) {
+  head('offline — the symmetric window, and what it is NOT');
+  {
+    const p = makeOfflinePlan(STRIDE * 6 + SEGMENT);
+    ok('windows advance by STRIDE and each is a whole SEGMENT, so Backend.separate() is '
+       + 'called exactly as the live path calls it  [entry point: makeOfflinePlan/windowPlan]',
+      p.stride === STRIDE && p.segment === SEGMENT
+      && windowPlan(1, p).inputStart - windowPlan(0, p).inputStart === STRIDE
+      && windowPlan(0, p).inputEnd - windowPlan(0, p).inputStart === SEGMENT,
+      `stride ${p.stride}, segment ${p.segment}`);
+    ok('the overlap is SEGMENT - STRIDE, which is 1.95 s and NOT the 50 ms seam crossfade',
+      p.overlap === SEGMENT - STRIDE && p.overlap === 85995 && p.overlap !== Math.round(SEAM_XFADE_MS / 1000 * SR),
+      `${p.overlap} frames = ${(p.overlap / SR).toFixed(3)} s`);
+
+    /**
+     * MEASURED HERE TOO, and deliberately not only in `qa/test-edge.mjs`. That
+     * suite gates the CONSTANTS; this gates the geometry the assembler below is
+     * built on, and they are different entry points onto the same fact. The name
+     * over there used to claim ">= 2 contributions" while checking only
+     * `STRIDE < SEGMENT` — it is fixed, and this is the second, independent
+     * count. At 0.75 the average cover is SEGMENT/STRIDE = 1.33.
+     */
+    const n = STRIDE * 6 + SEGMENT;
+    const cover = new Uint8Array(n);
+    for (let k = 0; k < p.windows; k++) {
+      const w = windowPlan(k, p);
+      for (let i = w.inputStart; i < Math.min(n, w.inputEnd); i++) cover[i]++;
+    }
+    const ones = cover.reduce((a, c) => a + (c === 1 ? 1 : 0), 0);
+    const twos = cover.reduce((a, c) => a + (c === 2 ? 1 : 0), 0);
+    ok('a sample gets ONE or TWO contributions, never zero and never three — so the '
+       + 'weighting cannot divide by a constant cover count',
+      ones + twos === n && ones > 0 && twos > 0
+      && cover.every((c) => c === 1 || c === 2) && STRIDE > SEGMENT / 2,
+      `${ones} samples covered once, ${twos} twice, STRIDE ${STRIDE} > SEGMENT/2 ${SEGMENT / 2}`);
+  }
+
+  head('offline — an identity separator reconstructs the track EXACTLY (the COLA gate)');
+  /**
+   * THE PRIMARY GATE, and it needs no model and no testbed. Replace the separator
+   * with identity and the analysis/synthesis must give the input back. It goes red
+   * on a wrong fade law, a wrong stride, an un-normalised first or last window, a
+   * dropped contribution or a mis-sized ramp — and it cannot be excused by the
+   * separator being poor on synthetic material, because there is no separator in
+   * it (AGENTS.md: an instrument may not excuse itself on the system under test).
+   */
+  {
+    const lengths = [1000, SEGMENT, SEGMENT + 1, STRIDE * 3 + 7, STRIDE * 6 + SEGMENT];
+    /**
+     * 2^-23, AND NOT A ROUNDER NUMBER — DO NOT "TIDY" THIS.
+     *
+     * float32 carries a 24-bit significand, so the round-trip ulp for values in
+     * [0.5, 1) is 2^-24 = 5.96e-8. The worst residual this run measures is
+     * EXACTLY that: one ulp, the error of a single rounded add, not an
+     * accumulation across joins. 2^-23 is that floor with one ulp of headroom.
+     *
+     * MEASURED, so "not an accumulation" is evidence rather than an argument:
+     * the single-window lengths return 0.00e+0 (no join, so no add at all) and
+     * every multi-window length returns the SAME 5.96e-8 whether it crosses one
+     * join or six. The residual is set by the arithmetic of one join and not by
+     * how many there are — which is also why the `lengths` fixture is not
+     * saturated: the parameter genuinely partitions the result.
+     *
+     * A rounder gate — 1e-6, say — would pass with about seventeen ulp of real
+     * error in it, which is enough to hide a wrong ramp: an equal-power join
+     * gains through the middle of every overlap and would still sit under it.
+     * The threshold is the instrument's resolution, so it is written as the
+     * resolution.
+     */
+    const FLOOR = 2 ** -23;                      // one ulp of headroom over 2^-24
+    let worstAll = 0, windowsSeen = 0, mostWindows = 0;
+    for (const n of lengths) {
+      const l = noise(n, 7), r = noise(n, 11);
+      const plan = makeOfflinePlan(n);
+      windowsSeen += plan.windows;
+      mostWindows = Math.max(mostWindows, plan.windows);
+      const ring = bufferRing(l, r);
+      const asm = new OfflineAssembler(plan, 2);
+      const wl = new Float32Array(SEGMENT), wr = new Float32Array(SEGMENT);
+      for (let k = 0; k < plan.windows; k++) {
+        readWindow(ring, windowPlan(k, plan).inputStart, SEGMENT, wl, wr);
+        asm.add(k, [Float32Array.from(wl), Float32Array.from(wr)]);   // identity
+      }
+      const [ol, orr] = asm.finish();
+      let worst = 0;
+      for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(ol[i] - l[i]), Math.abs(orr[i] - r[i]));
+      worstAll = Math.max(worstAll, worst);
+    }
+    ok(`an identity separator reconstructs every length to the float32 floor — worst `
+       + `${worstAll.toExponential(2)} over ${lengths.length} lengths and ${windowsSeen} windows. `
+       + 'THIS CANNOT SEE A MISSING CROSSFADE: under identity both sides of a join are the '
+       + 'same samples, so complementary ramps are arithmetically a no-op and a butt splice '
+       + 'reconstructs just as exactly — the join is gated by the step test below  '
+       + '[entry point: OfflineAssembler.add/finish over engine/live.js readWindow]',
+      worstAll <= FLOOR && windowsSeen > lengths.length, worstAll.toExponential(3));
+    /**
+     * THE INDEPENDENCE CHECK. A single-window track reconstructs trivially — one
+     * copy, no ramp, no join — so without this the assertion above could report a
+     * perfect floor while never having crossed a join at all. It asserts the
+     * PROPERTY (joins were crossed, repeatedly) rather than a total, which would
+     * only pin today's fixture lengths.
+     */
+    ok('...and the run really crossed joins, so the floor above is not one window '
+       + 'trivially copied through',
+      mostWindows >= 7 && windowsSeen > lengths.length * 2,
+      `${windowsSeen} windows over ${lengths.length} lengths, longest ${mostWindows} `
+      + `(${mostWindows - 1} joins)`);
+  }
+
+  head('offline — the join is a CROSSFADE and not a butt splice (what the identity test cannot see)');
+  /**
+   * WHY THE IDENTITY TEST IS NOT ENOUGH, and this is not a caveat — it is a second
+   * instrument, because the first is blind here by construction.
+   *
+   * Under an identity separator the two windows meeting at a join carry THE SAME
+   * SAMPLES. Complementary ramps sum to one, so the crossfade is arithmetically a
+   * no-op — and therefore its ABSENCE is invisible. MEASURED, not reasoned: with
+   * every ramp deleted and each window simply overwriting from its own start, the
+   * whole offline group stays green and the residual IMPROVES to 0.00e+0, because
+   * a hard cut has no rounded add in it. The number gets better when the join
+   * goes away. That is the shape `AGENTS.md` calls an estimator whose range
+   * excludes the defect.
+   *
+   * THE DISCRIMINATOR IS A STEP, AND IT IS A RATIO RATHER THAN A THRESHOLD. Give
+   * each window a DIFFERENT constant — window k separates to `DELTA * k` — over a
+   * silent input, so every sample-to-sample change in the output comes from the
+   * join and from nothing in the material:
+   *
+   *   crossfaded : the output RAMPS from DELTA*k to DELTA*(k+1) across the overlap
+   *                -> largest single-sample step is about DELTA / overlap
+   *   butt splice: the output STEPS between them in one sample
+   *                -> largest step is DELTA
+   *
+   * A ratio of `overlap` — 85 995 here, where the live path's crossfade gives
+   * 2205 — which is dynamic range rather than a number chosen to pass. It is a
+   * count and a ratio, never a clock. Borrowed from the live drain's gate on
+   * `phase4/u7-live-recording`, where the same blind spot was found first.
+   */
+  {
+    const DELTA = 1.0;
+    const n = STRIDE * 3 + 1000;
+    const plan = makeOfflinePlan(n);
+    const asm = new OfflineAssembler(plan, 1);
+    for (let k = 0; k < plan.windows; k++) {
+      asm.add(k, [new Float32Array(SEGMENT).fill(DELTA * k)]);
+    }
+    const [out] = asm.finish();
+    let maxStep = 0;
+    for (let i = 1; i < n; i++) maxStep = Math.max(maxStep, Math.abs(out[i] - out[i - 1]));
+    const ramped = DELTA / plan.overlap;
+    ok('THE JOIN IS A CROSSFADE, NOT A BUTT SPLICE — the largest step across a join is the '
+       + `ramp's (${maxStep.toExponential(2)}), not the whole discontinuity (${DELTA.toFixed(1)}); `
+       + `ramp reference ${ramped.toExponential(2)}, so a splice would read ${plan.overlap}x larger  `
+       + '[entry point: OfflineAssembler.add over windows separating to different constants]',
+      maxStep > 0 && maxStep < ramped * 4,
+      `maxStep ${maxStep.toExponential(3)} vs ramp ${ramped.toExponential(3)} vs splice ${DELTA}`);
+    ok('...and the fixture really did straddle joins with DIFFERENT values on each side, so '
+       + 'the step above was measured rather than absent',
+      plan.windows >= 3 && out[0] === 0 && out[n - 1] === DELTA * (plan.windows - 1),
+      `${plan.windows} windows, out[0] ${out[0]}, out[n-1] ${out[n - 1]}`);
+  }
+
+  head('offline — the joins, and the two edges that have no join');
+  {
+    const { fi, fo } = makeFades(SEGMENT - STRIDE, SEAM_XFADE_LAW);
+    let worst = 0;
+    for (let i = 0; i < fi.length; i++) worst = Math.max(worst, Math.abs(fi[i] + fo[i] - 1));
+    ok('the ramps are the LIVE module’s makeFades and they sum to one, which is why '
+       + 'nothing has to be divided afterwards  [entry point: engine/live.js makeFades]',
+      worst < 1e-6 && SEAM_XFADE_LAW === 'linear', `worst |fi+fo-1| ${worst.toExponential(2)}`);
+
+    // A DC track: every sample 1.0. Anything that fades an edge shows up as a dip.
+    const n = STRIDE * 3 + 100;
+    const one = new Float32Array(n).fill(1);
+    const plan = makeOfflinePlan(n);
+    const asm = new OfflineAssembler(plan, 1);
+    const w1 = new Float32Array(SEGMENT);
+    const ring = bufferRing(one, one);
+    for (let k = 0; k < plan.windows; k++) {
+      readWindow(ring, windowPlan(k, plan).inputStart, SEGMENT, w1, new Float32Array(SEGMENT));
+      asm.add(k, [Float32Array.from(w1)]);
+    }
+    const [out] = asm.finish();
+    let dip = 0;
+    for (let i = 0; i < n; i++) dip = Math.max(dip, Math.abs(out[i] - 1));
+    ok('the FIRST window does not fade in and the LAST does not fade out — a DC track '
+       + 'comes back flat instead of dipping at its own head and tail',
+      dip <= 2 ** -23, `worst deviation from unity ${dip.toExponential(2)} at ${plan.windows} windows`);
+  }
+
+  head('offline — refusals, because a gap or a short run is a track with holes in it');
+  {
+    const threw = (f) => { try { f(); return null; } catch (e) { return e.message; } };
+    ok('a stride at or past the segment is refused — the windows would stop overlapping '
+       + 'and leave audio no window covers',
+      threw(() => makeOfflinePlan(1000, { stride: SEGMENT })) !== null
+      && threw(() => makeOfflinePlan(1000, { stride: SEGMENT + 1 })) !== null);
+    ok('...but a stride inside the segment is accepted, so that refusal is not blanket',
+      makeOfflinePlan(1000, { stride: SEGMENT - 1 }).windows >= 1);
+    ok('a window index outside the plan is refused rather than reading past the track',
+      threw(() => windowPlan(3, makeOfflinePlan(1000))) !== null
+      && threw(() => windowPlan(-1, makeOfflinePlan(1000))) !== null);
+
+    const plan = makeOfflinePlan(STRIDE * 2 + 10);
+    const full = () => [new Float32Array(SEGMENT)];
+    const a1 = new OfflineAssembler(plan, 1);
+    ok('a window that arrives out of order is refused, naming both indices — the fade of '
+       + 'a join is written by the window that follows it',
+      threw(() => a1.add(1, full())) !== null);
+    const a2 = new OfflineAssembler(plan, 1);
+    a2.add(0, full());
+    ok('a plane shorter than a window is refused rather than read past its end',
+      threw(() => a2.add(1, [new Float32Array(SEGMENT - 1)])) !== null);
+    ok('the wrong number of planes is refused',
+      threw(() => new OfflineAssembler(plan, 2).add(0, full())) !== null);
+    const a3 = new OfflineAssembler(plan, 1);
+    a3.add(0, full());
+    const shortRun = threw(() => a3.finish());
+    ok('finish() before every window is folded in is refused, naming both counts — the '
+       + 'rest of the track would be silence, and silence reads back as part of the song',
+      shortRun !== null && /1 of 3|2 of 3|1 of 2/.test(shortRun), shortRun || 'RETURNED A PART-SILENT TRACK');
+
+    ok('channels of different lengths are refused by the ring adapter',
+      threw(() => bufferRing(new Float32Array(10), new Float32Array(11))) !== null);
   }
 }
 

@@ -1217,12 +1217,23 @@ async function readOpfsRoot(name) {
  * the code that ships today — one integer sample clock at 44 100 Hz, no JS
  * resampler, nothing about the ratified conversion line moved.
  *
- * AND IT MUST NEVER BE READ AS PERMISSION TO PRIME FASTER THAN REAL TIME (the spec
- * ruling; `docs/AUDIO.md` §8.3 and `shared/stemcache.js`'s header settled it on
- * audio grounds long before it was a control). Capture is at 48 kHz whatever the
- * rate, so a fast pass throws away the top of the band and hands the separator
- * material it has never heard. Priming is one real-time pass. If a future reader
- * wants this field for a prime decision, the answer is no.
+ * AND IT MUST NEVER BE READ AS PERMISSION TO PRIME A CAPTURE FASTER THAN REAL TIME
+ * (the spec ruling; `docs/AUDIO.md` §8.3 and `shared/stemcache.js`'s header settled
+ * it on audio grounds long before it was a control). Capture is at 48 kHz whatever
+ * the rate, so a fast pass throws away the top of the band and hands the separator
+ * material it has never heard. Priming from a capture is one real-time pass. If a
+ * future reader wants THIS FIELD for a prime decision, the answer is still no, and
+ * the reason is unchanged: the rate is the page's, the capture follows it, and the
+ * band is gone before the separator sees anything.
+ *
+ * THAT IS A STATEMENT ABOUT CAPTURE, NOT ABOUT SEPARATION, and the distinction
+ * became load-bearing when a Source stopped always being a tab. A FILE is decoded
+ * whole at the model's clock before any window runs — no capture, no
+ * `playbackRate`, nothing this field describes — so separating one ahead of time,
+ * as fast as the machine allows, is outside what this paragraph forbids rather
+ * than an exception to it. See `engine/offline.js`, which carries the same note
+ * from the other side. The prohibition here is on reading `pageRate` and deciding
+ * a capture may be hurried; that has not moved.
  *
  * @type {Record<'A'|'B', number>}
  */

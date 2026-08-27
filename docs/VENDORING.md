@@ -73,7 +73,19 @@ worth doing until you know which.
 
 `extension/unit.sha256` is written by `node tools/unit-hash.mjs` and is checked
 against the tree by `node tools/unit-check.mjs` on every run of the gate, so a
-sums file that had gone stale on our side could not have reached the tag. It does
+sums file that had gone stale on our side could not have reached the tag.
+
+> **ADDING A FILE TO THE UNIT? STAGE IT FIRST, OR BOTH GATES AGREE ABOUT NOTHING.**
+> `unit-hash` expands `unit.json`'s directory clauses with `git ls-files`, so a new
+> file under `extension/` is invisible to it until the file is `git add`ed — and
+> `unit-check` **passes** in that window, because the crawl's closure and the sums
+> file are then both missing it in the same way. The result is a green gate over a
+> unit file that nothing hashes, which is the one failure this pair exists to make
+> impossible. Stage the file, re-run `node tools/unit-hash.mjs`, and re-run the gate;
+> if the new file has no importer yet, `unit-check` will then say so and it needs a
+> `roots` entry in `unit.json` with a `why`.
+
+ It does
 not hash itself — no sums file can — and it does hash
 `extension/unit.json`, because that is the file everything else is verified
 *against*, and a copy that verified 34 files against a manifest it had taken on

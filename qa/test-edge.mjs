@@ -96,7 +96,38 @@ else {
 head('config — constants still match the ONNX graph');
 ok('SEGMENT / STRIDE / SR / overlap', SEGMENT === 343980 && STRIDE === 257985 && SR === 44100 &&
   STRIDE === Math.floor(SEGMENT * 0.75), `${SEGMENT} ${STRIDE} ${SR}`);
-ok('STRIDE < SEGMENT so every interior sample gets >= 2 contributions', STRIDE < SEGMENT);
+ok('STRIDE < SEGMENT, so consecutive windows overlap at all', STRIDE < SEGMENT);
+/**
+ * WHAT THE OVERLAP ACTUALLY BUYS — MEASURED, because the line above used to claim
+ * it in its NAME and never check it.
+ *
+ * It was called "STRIDE < SEGMENT so every interior sample gets >= 2
+ * contributions". The inequality is true and the sentence is not: two everywhere
+ * would need STRIDE <= SEGMENT/2, and 257 985 > 171 990. At this stride a sample
+ * is covered ONCE OR TWICE, and 72.7 % of a long track is covered exactly once.
+ * Everyone downstream read the name — this file, the Phase 4 contract, and the
+ * brief for the ahead-of-time runner all repeated it before anyone counted.
+ *
+ * The real property is the one this asserts, and the overlap-add in
+ * `extension/engine/offline.js` depends on it: a cover count that is NOT CONSTANT
+ * is one you cannot divide by, which is why its joins use complementary ramps
+ * that already sum to one rather than accumulating a weight and normalising
+ * afterwards.
+ */
+{
+  const n = STRIDE * 6 + SEGMENT;
+  const windows = Math.ceil((n - SEGMENT) / STRIDE) + 1;
+  const cover = new Uint8Array(n);
+  for (let k = 0; k < windows; k++) {
+    for (let i = k * STRIDE; i < Math.min(n, k * STRIDE + SEGMENT); i++) cover[i]++;
+  }
+  const seen = [...new Set(cover)].sort((a, b) => a - b);
+  const once = cover.reduce((a, c) => a + (c === 1 ? 1 : 0), 0);
+  ok('...and a sample is covered ONCE or TWICE — never none, never three — so an '
+    + 'overlap-add over this geometry cannot divide by a constant cover count',
+  seen.length === 2 && seen[0] === 1 && seen[1] === 2 && once > n / 2 && windows > 2,
+  `${windows} windows, coverage {${seen.join(',')}}, ${once} of ${n} covered once`);
+}
 
 console.log(`\n${fail ? '\x1b[31m' : '\x1b[32m'}${pass} passed, ${fail} failed\x1b[0m`);
 process.exit(fail ? 1 : 0);
