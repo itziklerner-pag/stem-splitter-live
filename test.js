@@ -10348,8 +10348,8 @@ if (group('host')) {
    * coverage repair that closes the review's D3/D4/D5/D7.
    *
    * EXECUTABLE COPY: `tools/mutations/u6-transport-master.mjs`, in the tree
-   * beside this suite, cut against `d75a6fd` (M1-M17), `980ef24` (M18-M24)
-   * and `7acd42c` (M25-M33). Re-run it before any tag: a
+   * beside this suite, cut against `f9c4088` (M1-M17), `e4cc898` (M18-M24)
+   * and `9b589a3` (M25-M33). Re-run it before any tag: a
    * battery is only valid against the source it was cut for, and a later slice
    * that rewrites one of these lines stops its anchor matching with nothing
    * announcing it. That file reports ANCHOR and RED as two columns, never as
