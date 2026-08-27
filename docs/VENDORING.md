@@ -262,8 +262,16 @@ nothing and reads exactly like a broken vendored copy.
 Since v0.3.0 the group imports each hole in a `try`, so an evaluation-time throw
 is a **named red** carrying the hole's path and what it threw, and a throw
 anywhere else in the group turns the assertion at its foot red instead of ending
-the run. That is a repair, not a licence: a hole that throws at import still
-takes the ~120 assertions after it with it, and they are the ones you wanted.
+the run.
+
+**That is a reporting improvement, not a completeness guarantee.** A hole that
+throws at import still takes the assertions after it with it, and they are the
+ones you wanted: measured, `node test.js` goes from 622 passed to 529 passed /
+2 failed — **91 assertions did not run**. Do not read a guarded suite that went
+red as fully covered. What tells you it was truncated is `tools/verify.mjs`'s
+coverage diff, which lists `no longer runs: <assertion name>` and warns that an
+absent assertion reads as green; the guard exists so that there is a completed
+run for it to compare against.
 
 **So: hold nothing at module scope that your platform has to be present for.**
 Read the bridge, the window, the IPC channel inside the duty, on the first call.

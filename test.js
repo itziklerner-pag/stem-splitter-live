@@ -4594,6 +4594,25 @@ if (group('host')) {
    *      three groups after this one, and the two checks at the foot of the
    *      file, still report.
    *
+   * THIS IS A REPORTING IMPROVEMENT AND NOT A COMPLETENESS GUARANTEE. Anyone
+   * adopting this shape elsewhere needs that distinction, because the failure it
+   * invites is subtler than the one it fixes: the guard buys a named cause and a
+   * summary, and it does NOT recover the assertions after the throw. Measured on
+   * the mutation it was watched red against — a `ui/host.js` that reads its
+   * preload bridge at module scope — `node test.js` goes from 622 passed to
+   * 529 passed / 2 failed. NINETY-ONE ASSERTIONS DID NOT RUN. A guarded suite
+   * that went red must not be read as fully covered.
+   *
+   * WHAT MAKES THAT TRUNCATION VISIBLE, rather than merely absent, is a gate
+   * that already existed: `tools/verify.mjs`'s coverage diff prints
+   * `no longer runs: <assertion name>` for every assertion that stopped
+   * executing, under the warning "An ABSENT assertion reads as green. N/N is
+   * only comparable between runs when N is." The guard's job is to make sure
+   * there is a completed run for that diff to compare against at all — before
+   * it, the process died and the runner reported `RED — 0 failing assertions`,
+   * which names nothing and reads like a broken vendored copy. The count in this
+   * group's own detail line is the other half: it says how much did not run.
+   *
    * THE BODY IS DELIBERATELY NOT RE-INDENTED under this `try`. It is ~2800 lines
    * and 122 assertions; re-indenting them would bury a four-line change in a
    * whole-file diff and take the blame history with it.
