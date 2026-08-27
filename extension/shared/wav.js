@@ -1,7 +1,9 @@
 // wav.js — RIFF/WAVE writer + minimal reader. See docs/AUDIO.md §5 for the byte map.
 // Supports 32-bit IEEE float (default, recommended), 24-bit PCM, 16-bit PCM (+TPDF dither).
 //
-// THREE WRITERS, ONE ENCODER. `encodeWav` builds a whole file in one buffer;
+// THREE WRITERS, ONE ENCODER; TWO READERS, ONE BYTE MAP.
+//
+// `encodeWav` builds a whole file in one buffer;
 // `WavStreamEncoder` emits the same bytes a chunk at a time into a
 // `WritableStream`; `WavSyncWriter` appends into an OPFS
 // `FileSystemSyncAccessHandle` without knowing the length in advance. They share
@@ -27,6 +29,15 @@
 // `encodeWav` allocates the entire file before it writes a byte
 // (`new ArrayBuffer(8 + riffSize)`). That is the ceiling ARCHITECTURE R6 names
 // for export and stemcache.js's header names for the cache write.
+//
+// TWO READERS, ONE BYTE MAP, for the same reason. `decodeWav` materialises a
+// whole file; `WavWindowReader` returns one window at a time out of a `Blob`
+// without the file ever being resident. They share `readFormat` and
+// `readFrames`, so there is one chunk walk and one sample-reading loop, and
+// `group('window')`'s round trips are what cover both. THE PAIRING IS THE POINT:
+// streaming the write while materialising the read moves E1's memory ceiling
+// instead of removing it, and "peak resident does not scale with track length"
+// is a claim about the pair, never about either half.
 //
 // WHY THE KNOWN-LENGTH VARIANT NEEDS NO SEEK. An ahead-of-time export knows its
 // frame count before it starts, so the RIFF sizes are correct in the first bytes
@@ -179,6 +190,60 @@ export function encodeWav(channels, opts = {}) {
   return buf;
 }
 
+/**
+ * THE ONE CHUNK WALK AND THE ONE SAMPLE-READING LOOP, shared by `decodeWav` and
+ * `WavWindowReader` for exactly the reason `writeFrames` is shared by the three
+ * writers: a second copy of the byte map is a second chance to be wrong about
+ * it, and only one of the two copies would be under `group('window')`.
+ *
+ * `readFormat` is NOT `wavFormat`. `wavFormat` resolves what we are about to
+ * WRITE, from options and defaults; this reports what a file on disk already IS,
+ * from its own `fmt ` chunk, and it defaults nothing — a reader that filled in a
+ * missing field would answer questions about a file it had not read.
+ */
+function readFormat(dv, body, size) {
+  let format = dv.getUint16(body, true);
+  const numChannels = dv.getUint16(body + 2, true);
+  const sampleRate = dv.getUint32(body + 4, true);
+  const bitDepth = dv.getUint16(body + 14, true);
+  if (format === 0xfffe && size >= 40) format = dv.getUint16(body + 24, true); // EXTENSIBLE
+  const bytesPerSample = bitDepth >> 3;
+  return {
+    format, numChannels, sampleRate, bitDepth,
+    bytesPerSample, blockAlign: numChannels * bytesPerSample,
+    float: format === FMT_IEEE_FLOAT,
+  };
+}
+
+/**
+ * De-interleave and convert `count` frames starting at BYTE offset `at` in `dv`.
+ * THE ONE SAMPLE-READING LOOP IN THIS FILE — the mirror of `writeFrames`.
+ *
+ * `at` is a byte offset into `dv`, not a frame index, because the two callers
+ * measure from different origins: `decodeWav` holds the whole file and starts at
+ * the `data` chunk's body, while `WavWindowReader` holds a slice that BEGINS at
+ * the frame it asked for. A frame index would have made one of them convert, and
+ * an off-by-one in that conversion reads plausible audio from the wrong place.
+ * @returns {number} frames read
+ */
+function readFrames(dv, at, rfmt, count, channels, dstOffset = 0) {
+  const { numChannels, bytesPerSample: bps, bitDepth, blockAlign } = rfmt;
+  for (let i = 0; i < count; i++) {
+    for (let c = 0; c < numChannels; c++) {
+      const o = at + i * blockAlign + c * bps;
+      let v;
+      if (rfmt.float) v = bps === 8 ? dv.getFloat64(o, true) : dv.getFloat32(o, true);
+      else if (bps === 2) v = dv.getInt16(o, true) / 32768;
+      else if (bps === 3) { let u = dv.getUint8(o) | (dv.getUint8(o + 1) << 8) | (dv.getUint8(o + 2) << 16); if (u & 0x800000) u -= 0x1000000; v = u / 8388608; }
+      else if (bps === 4) v = dv.getInt32(o, true) / 2147483648;
+      else if (bps === 1) v = (dv.getUint8(o) - 128) / 128;
+      else throw new Error('unsupported bit depth ' + bitDepth);
+      channels[c][dstOffset + i] = v;
+    }
+  }
+  return count;
+}
+
 /** Minimal reader for the subset we write (and for museval/reference material). */
 export function decodeWav(arrayBuffer) {
   const dv = new DataView(arrayBuffer);
@@ -187,34 +252,134 @@ export function decodeWav(arrayBuffer) {
   let p = 12, fmt = null, data = null;
   while (p + 8 <= dv.byteLength) {
     const id = tag(p), size = dv.getUint32(p + 4, true), body = p + 8;
-    if (id === 'fmt ') {
-      let format = dv.getUint16(body, true);
-      const numChannels = dv.getUint16(body + 2, true);
-      const sampleRate = dv.getUint32(body + 4, true);
-      const bitDepth = dv.getUint16(body + 14, true);
-      if (format === 0xfffe && size >= 40) format = dv.getUint16(body + 24, true); // EXTENSIBLE
-      fmt = { format, numChannels, sampleRate, bitDepth };
-    } else if (id === 'data') data = { offset: body, size: Math.min(size, dv.byteLength - body) };
+    if (id === 'fmt ') fmt = readFormat(dv, body, size);
+    else if (id === 'data') data = { offset: body, size: Math.min(size, dv.byteLength - body) };
     p = body + size + (size & 1);
   }
   if (!fmt || !data) throw new Error('missing fmt or data chunk');
-  const bps = fmt.bitDepth >> 3, blockAlign = fmt.numChannels * bps;
-  const frames = Math.floor(data.size / blockAlign);
+  const frames = Math.floor(data.size / fmt.blockAlign);
   const chans = Array.from({ length: fmt.numChannels }, () => new Float32Array(frames));
-  for (let i = 0; i < frames; i++) {
-    for (let c = 0; c < fmt.numChannels; c++) {
-      const o = data.offset + i * blockAlign + c * bps;
-      let v;
-      if (fmt.format === FMT_IEEE_FLOAT) v = bps === 8 ? dv.getFloat64(o, true) : dv.getFloat32(o, true);
-      else if (bps === 2) v = dv.getInt16(o, true) / 32768;
-      else if (bps === 3) { let u = dv.getUint8(o) | (dv.getUint8(o + 1) << 8) | (dv.getUint8(o + 2) << 16); if (u & 0x800000) u -= 0x1000000; v = u / 8388608; }
-      else if (bps === 4) v = dv.getInt32(o, true) / 2147483648;
-      else if (bps === 1) v = (dv.getUint8(o) - 128) / 128;
-      else throw new Error('unsupported bit depth ' + fmt.bitDepth);
-      chans[c][i] = v;
+  readFrames(dv, data.offset, fmt, frames, chans, 0);
+  return { channels: chans, sampleRate: fmt.sampleRate, bitDepth: fmt.bitDepth, float: fmt.float };
+}
+
+/**
+ * WINDOWED READ, THE COUNTERPART TO `WavStreamEncoder` — a file's frames a
+ * window at a time, without the file ever being resident.
+ *
+ *   const r = new WavWindowReader(await fileHandle.getFile());
+ *   await r.open();                       // fmt + data offset, from small reads
+ *   await r.read(from, n, [l, r]);        // fills the planes in place
+ *
+ * WHY IT EXISTS. `decodeWav` allocates every channel whole (`wav.js:99`), so
+ * reading a four-minute six-stem cache entry back costs ~508 MB of
+ * `Float32Array` before a single byte reaches a sink. Streaming the WRITE while
+ * materialising the READ moves the ceiling rather than removing it, and E1's
+ * whole claim — "peak resident does not scale with track length" — is a claim
+ * about the pair. `StemCache.get()` is still the right call for a deck, which
+ * genuinely needs the whole track; it is the wrong call for an export, which
+ * needs each frame exactly once and in order.
+ *
+ * DUCK-TYPED ON TWO MEMBERS — `size` and `slice(start, end)` returning something
+ * with `arrayBuffer()` — which is what `Blob` and OPFS's `File` both are, the
+ * same way `WavSyncWriter` is duck-typed on four members of a sync access
+ * handle. A suite can drive it over a fake and count the bytes it asked for,
+ * which is how the memory claim above is MEASURED rather than believed: a reader
+ * that quietly slurped the file would satisfy every sample assertion here.
+ *
+ * IT DOES NOT REPORT A FORMAT IT DID NOT READ. `open()` must run before
+ * `frames`, `sampleRate`, `bitDepth` or `float` mean anything, and reading them
+ * first throws rather than answering with a default — the export refuses a
+ * source whose own header disagrees with the tier it was filed under, and a
+ * reader that defaulted would hand it agreement it had not checked.
+ */
+export class WavWindowReader {
+  /** @param {{size:number, slice:(start:number,end:number)=>{arrayBuffer:()=>Promise<ArrayBuffer>}}} blob */
+  constructor(blob) {
+    if (!blob || typeof blob.slice !== 'function' || typeof blob.size !== 'number') {
+      throw new TypeError('wav window: needs something with size and slice(start, end) — a Blob or an OPFS File');
     }
+    this.blob = blob;
+    this.fmt = null;
+    this.dataOffset = 0;
+    this.dataSize = 0;
+    this.frames = 0;
   }
-  return { channels: chans, sampleRate: fmt.sampleRate, bitDepth: fmt.bitDepth, float: fmt.format === FMT_IEEE_FLOAT };
+
+  /** Everything but the audio: the RIFF tag, the `fmt ` chunk, the `data` offset. */
+  async open() {
+    const b = this.blob;
+    const head = new DataView(await b.slice(0, 12).arrayBuffer());
+    if (head.byteLength < 12) throw new Error('wav window: file is shorter than a RIFF header');
+    const tag4 = (dv, o) => String.fromCharCode(dv.getUint8(o), dv.getUint8(o + 1), dv.getUint8(o + 2), dv.getUint8(o + 3));
+    if (tag4(head, 0) !== 'RIFF' || tag4(head, 8) !== 'WAVE') throw new Error('wav window: not a RIFF/WAVE file');
+    let p = 12, fmt = null, data = null;
+    // ONE 8-BYTE READ PER CHUNK HEADER, and the body of `data` is never read
+    // here — which is the whole point. A probe of "the first N bytes" would have
+    // needed an N, and any N is either too small for a file with a big LIST
+    // chunk in front of its audio or big enough to be a copy of the audio.
+    while (p + 8 <= b.size) {
+      const h = new DataView(await b.slice(p, p + 8).arrayBuffer());
+      if (h.byteLength < 8) break;
+      const id = tag4(h, 0), size = h.getUint32(4, true), body = p + 8;
+      if (id === 'fmt ') {
+        const f = new DataView(await b.slice(body, body + size).arrayBuffer());
+        fmt = readFormat(f, 0, size);
+      } else if (id === 'data') data = { offset: body, size: Math.min(size, b.size - body) };
+      p = body + size + (size & 1);
+    }
+    if (!fmt || !data) throw new Error('wav window: missing fmt or data chunk');
+    if (!(fmt.blockAlign > 0)) throw new Error(`wav window: blockAlign ${fmt.blockAlign} — a file that declares no frame size`);
+    this.fmt = fmt;
+    this.dataOffset = data.offset;
+    this.dataSize = data.size;
+    this.frames = Math.floor(data.size / fmt.blockAlign);
+    return this;
+  }
+
+  get sampleRate() { return this.#opened().sampleRate; }
+  get bitDepth() { return this.#opened().bitDepth; }
+  get float() { return this.#opened().float; }
+  get channels() { return this.#opened().numChannels; }
+
+  #opened() {
+    if (!this.fmt) throw new Error('wav window: open() has not run — this reader has read no header and knows no format');
+    return this.fmt;
+  }
+
+  /**
+   * Fill `into[c][0 .. count)` with frames `[from, from + count)`.
+   * REFUSES A READ PAST THE END rather than returning a short one: a caller that
+   * took a short read for a complete one would write a file whose header
+   * promised more than its data, which is the failure `WavStreamEncoder.end()`
+   * exists to make impossible on the other side.
+   * @param {number} from  frame index
+   * @param {number} count frames
+   * @param {Float32Array[]} into planar, `channels` of them, each >= count long
+   */
+  async read(from, count, into) {
+    const fmt = this.#opened();
+    if (!Number.isInteger(from) || from < 0 || !Number.isInteger(count) || count < 0) {
+      throw new RangeError(`wav window: read(${from}, ${count}) — both must be non-negative integers`);
+    }
+    if (from + count > this.frames) {
+      throw new RangeError(`wav window: frames ${from}..${from + count} asked for, the file holds ${this.frames}`);
+    }
+    if (into.length !== fmt.numChannels) {
+      throw new RangeError(`wav window: ${into.length} planes for a ${fmt.numChannels}-channel file`);
+    }
+    for (const c of into) {
+      if (c.length < count) throw new RangeError(`wav window: a plane holds ${c.length} frames, ${count} asked for`);
+    }
+    if (count === 0) return 0;
+    const at = this.dataOffset + from * fmt.blockAlign;
+    const buf = await this.blob.slice(at, at + count * fmt.blockAlign).arrayBuffer();
+    if (buf.byteLength < count * fmt.blockAlign) {
+      throw new RangeError(`wav window: asked for ${count * fmt.blockAlign} bytes at ${at} and got ${buf.byteLength} — `
+        + 'the data chunk is shorter than its own size field says');
+    }
+    return readFrames(new DataView(buf), 0, fmt, count, into, 0);
+  }
 }
 
 /**
