@@ -85,7 +85,8 @@
 import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
   videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR,
-  CACHE_DIR_32F, separationRefusal } from './extension/shared/stemcache.js';
+  CACHE_DIR_32F, separationRefusal,
+  fileIdFromBytes, fileIdentity, fileRefusal, fileCommitRefusal } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 // The transpose lanes' group delay, IMPORTED and never re-typed. It is a term in
 // the latency assertion below, and a second copy of 3072 in this file is a second
@@ -4033,6 +4034,256 @@ if (group('cache')) {
     ok('and with no page transport to check against, it refuses rather than ' +
        'committing on the frame count alone',
       commitRefusal(W(FULL), null) !== null);
+  }
+
+  // ======================================== U3: the File source's identity
+  /**
+   * cache — A FILE SOURCE IS KEYED BY WHAT IT IS, NOT BY WHAT IT IS CALLED.
+   *
+   * REACHABLE: drives the real `fileIdFromBytes`, `fileIdentity`, `fileRefusal`
+   * and `fileCommitRefusal` in `shared/stemcache.js`. Pure functions over a
+   * platform digest — no OPFS, no clock, no model, no fixture longer than it
+   * needs to be.
+   *
+   * WHY IT EXISTS. `videoIdFromUrl` returns null for anything that is not a
+   * YouTube page, and `cacheKey(null, hop)` is the literal key
+   * `'null--<pipelineVersion>'` — ONE key shared by every file the user ever
+   * opens. The CONTROL assertion below produces that collision rather than
+   * describing it, so what the assertions around it protect is on the record.
+   *
+   * TODAY'S TREE DOES NOT REACH THAT KEY: `trackKey()` (`offscreen/engine.js:
+   * 547-551`) has `if (!videoId) return null` and caches nothing. That guard is
+   * right for a YouTube tab off a video page and wrong for a file, where the
+   * videoId is ALWAYS absent — reusing it means the ahead-of-time tier never
+   * fills. Collide-everything and cache-nothing are the two answers a shared
+   * identity gives a File source, and neither is a cache; hence a separate one.
+   *
+   * MUTATION LOG — every assertion in both blocks watched red, each mutation
+   * applied ALONE to a green tree, `node test.js cache` run and read before the
+   * file was restored. Line numbers are `extension/shared/stemcache.js` at this
+   * commit; `reds` counts FAIL lines. Every assertion this slice adds is covered
+   * by at least one row.
+   *
+   *   #    mutation                                                    where   reds
+   *   M1   fileIdentity: keys from videoIdFromUrl, as trackKey does   :401     5   <- shows the null-- collision
+   *   M2   fileIdFromBytes: hash only the first 4096 bytes             :372     2   <- the prefix-hash this slice ruled out
+   *   M3   fileIdFromBytes: digest SHA-1 rather than SHA-256           :372     3
+   *   M4   fileIdFromBytes: drop padStart(2, '0') from the hex         :374     3
+   *   M5   fileIdFromBytes: return null rather than throw on no bytes  :364     1
+   *   M6   fileRefusal: the isFileId branch removed                    :431     6
+   *   M7   fileRefusal: the "no bytes" branch removed                  :435     2
+   *   M8   fileRefusal: the empty-file branch removed                  :445     2
+   *   M9   fileRefusal: empty checked by length only, not the digest   :445     1
+   *   M10  fileCommitRefusal: equality relaxed to PRIME_TAIL_MAX_SEC   :482     3
+   *   M11  fileCommitRefusal: no decoded source returns null           :481     2
+   *   M12  fileCommitRefusal: the aborted branch removed               :473     1
+   *   M13  fileCommitRefusal: the empty-writer branch removed          :474     1
+   *   M14  fileCommitRefusal: short/past wording swapped               :485     3
+   *   M15  fileIdFromBytes: a random digest per call                   :372     3   <- the "same file" claim
+   *   M16  fileIdentity: the tier dropped from cacheKey                :402     2
+   *   M17  videoIdFromUrl: a non-YouTube host returns its pathname     :137     2   <- the CONTROL can fail
+   *   M18  fileRefusal: refuses unconditionally                        :446     3
+   *   M19  fileCommitRefusal: refuses unconditionally                  :487     2
+   *   M20  fileCommitRefusal: the no-writer branch returns null        :472     1
+   *   M21  primeRefusal: the !videoId branch returns null              :261     2
+   *   M22  commitRefusal: the !page branch returns null                :283     2
+   */
+  head('cache — a File source is identified by its CONTENT, and videoIdFromUrl is not on that path');
+  {
+    /** Deterministic file bytes; the same LCG `noise()` uses, one byte at a time. */
+    const fileBytes = (n, seed) => {
+      let s = seed >>> 0;
+      const b = new Uint8Array(n);
+      for (let i = 0; i < n; i++) { s = (s * 1664525 + 1013904223) >>> 0; b[i] = (s >>> 24) & 0xff; }
+      return b;
+    };
+    const ascii = (s) => new TextEncoder().encode(s);
+    const F32 = { depth: 32, geometry: 'offline' };
+
+    /**
+     * THE PAIR THAT PRICES THE RULED-OUT ALTERNATIVE. A first-N-MB-plus-length
+     * hash was rejected for this slice; these two files are exactly what it
+     * gets wrong — 64 KiB, the same 65 535-byte prefix, differing only in the
+     * LAST byte. That is a re-tagged duplicate, a second render out of one
+     * session, or a copy a file manager finished writing differently, and every
+     * one of those is a pair somebody really has on disk.
+     */
+    const A = fileBytes(1 << 16, 7);
+    const B = new Uint8Array(A); B[B.length - 1] ^= 0xff;
+
+    const a = await fileIdentity(A, 1.95, F32);
+    const b = await fileIdentity(B, 1.95, F32);
+
+    ok('two files that differ ONLY in their last byte never share a key  '
+      + '[entry point: fileIdentity(bytes, hop, tier)]',
+      a.key !== b.key && a.id !== b.id, `${String(a.id).slice(0, 16)}… vs ${String(b.id).slice(0, 16)}…`);
+
+    /**
+     * RE-IDENTIFICATION, over a buffer built from scratch rather than the same
+     * object handed back — "the same file" means the same BYTES on a later
+     * visit, from a different read, possibly in a different process.
+     */
+    const again = await fileIdentity(fileBytes(1 << 16, 7), 1.95, F32);
+    ok('...and the same bytes re-identify to the same key on a separate call, from a separate buffer',
+      again.key === a.key && again.id === a.id, String(again.id).slice(0, 16) + '…');
+
+    ok('the identity is the file’s real SHA-256 — the published vectors, so the key is one '
+      + '`shasum -a 256` reproduces  [entry point: fileIdFromBytes(bytes)]',
+      (await fileIdFromBytes(ascii('abc')))
+        === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+      && (await fileIdFromBytes(new Uint8Array(0)))
+        === 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+      await fileIdFromBytes(ascii('abc')));
+
+    ok('how the Host hands the bytes over cannot change the key: a view, an offset view and the '
+      + 'whole buffer identify the same 64 KiB the same way',
+      (await fileIdFromBytes(A.buffer)) === a.id
+      && (await fileIdFromBytes(new Uint8Array(A.buffer, 0, A.length))) === a.id
+      && (await fileIdFromBytes(A.subarray(1))) !== a.id);
+
+    /**
+     * THE 64-CHARACTER FIT IS ASSERTED, NOT ASSUMED. `cacheKey` slices a
+     * caller-supplied name at 64 to bound it, and a digest is exactly 64, so
+     * nothing is cut today. A later prefix on the id would be — silently, into a
+     * key nobody could reproduce with a checksum tool. This is where that goes
+     * red.
+     */
+    ok('the WHOLE digest reaches the key — cacheKey’s 64-character cap does not truncate it',
+      String(a.id).length === 64 && a.key === `${a.id}--${pipelineVersion(1.95, F32)}`
+      && a.key.startsWith(`${a.id}--`), `${a.key.length} chars`);
+
+    ok('the tier reaches a File key too, so a 32f offline entry cannot be read back as a live one',
+      /-d32f-go$/.test(a.key) && a.key !== (await fileIdentity(A, 1.95)).key,
+      a.key.slice(-24));
+
+    /**
+     * WHY THE TWO IDENTITY SPACES CANNOT COLLIDE, structurally rather than by
+     * luck: a videoId is 11 characters of the URL alphabet and a file identity
+     * is 64 of hex. No string is both, so a File entry and a YouTube entry never
+     * name each other however the two tiers are mixed.
+     */
+    ok('a file identity can never be mistaken for a videoId — 64 hex against 11 URL characters',
+      /^[0-9a-f]{64}$/.test(a.id) && !/^[A-Za-z0-9_-]{11}$/.test(a.id));
+
+    ok('no bytes is a THROW, not a null that would flow into cacheKey and become the key below  '
+      + '[entry point: fileIdFromBytes(null)]',
+      await (async () => {
+        for (const bad of [null, undefined, 'a file', 42, { byteLength: 8 }]) {
+          try { await fileIdFromBytes(bad); return false; } catch { /* named error, wanted */ }
+        }
+        return true;
+      })());
+
+    /**
+     * THE CONTROL, and it asserts that the BUG is real. Route the File path back
+     * through `videoIdFromUrl` — which is what `offscreen/engine.js:548` does
+     * today for a Source with no YouTube URL — and the two files above do not
+     * merely get different-looking keys, they get the SAME key. A `null--…`
+     * shared by every file is the stale-but-plausible entry `stemcache.js`'s own
+     * header calls the worst failure it has.
+     */
+    const viaUrlA = cacheKey(videoIdFromUrl('file:///music/one.flac'), 1.95, F32);
+    const viaUrlB = cacheKey(videoIdFromUrl('file:///music/two.flac'), 1.95, F32);
+    ok('CONTROL — deriving a File key from a URL collides EVERY file onto one key',
+      viaUrlA === viaUrlB && viaUrlA.startsWith('null--'), viaUrlA);
+    ok('...and neither real file key is that key, nor each other’s',
+      a.key !== viaUrlA && b.key !== viaUrlA && a.key !== b.key,
+      `${a.key.slice(0, 12)}… ${b.key.slice(0, 12)}… vs ${viaUrlA.slice(0, 12)}…`);
+  }
+
+  head('cache — the File refusal pair: neither prime-policy function can be used here');
+  /**
+   * ENTRY POINTS: `fileRefusal` answers when the Host's `sourceBytes` has
+   * returned and before the model runs; `fileCommitRefusal` answers when the
+   * runner has finished, before `CacheWriter.commit()`. Both are pure and both
+   * are driven here over a table — no OPFS, no clock, and the only numbers are
+   * frame counts.
+   *
+   * They exist because NEITHER live function can be used for a File source, and
+   * the two assertions that close this block say so by calling them:
+   * `primeRefusal` refuses on `!videoId`, and `commitRefusal` requires
+   * `page.ended` from a page transport a file does not have.
+   */
+  {
+    const ID_A = 'a'.repeat(64);
+    const EMPTY_ID = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+    const some = new Uint8Array(1024);
+
+    /** [what, fileId, bytes, expected — null for go-ahead, else a pattern] */
+    const REFUSALS = [
+      ['a real identity and real bytes goes ahead', ID_A, some, null],
+      ['...however the bytes arrived — an ArrayBuffer is the same answer', ID_A, some.buffer, null],
+      ['a NULL identity is refused — the value videoIdFromUrl hands back for any file',
+        null, some, /no content identity/],
+      ['the STRING "null" is refused too, which is what reaches cacheKey unguarded',
+        'null', some, /no content identity/],
+      ['a videoId is not a file identity, however valid it is as a videoId',
+        'dQw4w9WgXcQ', some, /no content identity/],
+      ['63 hex characters is not a digest', 'a'.repeat(63), some, /no content identity/],
+      ['65 hex characters is not a digest either', 'a'.repeat(65), some, /no content identity/],
+      ['64 characters that are not hex is not a digest', 'z'.repeat(64), some, /no content identity/],
+      ['no bytes at all is a refusal, not an assumption about the file',
+        ID_A, null, /no bytes came back/],
+      ['something that is not a buffer is a refusal — a length is not evidence of bytes',
+        ID_A, { byteLength: 1024 }, /no bytes came back/],
+      ['a zero-length file is a refusal — it decodes to a track that is silently not the track',
+        ID_A, new Uint8Array(0), /the file is empty/],
+      ['...and so is the identity every empty file shares, even with bytes in hand',
+        EMPTY_ID, some, /the file is empty/],
+    ];
+    for (const [what, id, bytes, want] of REFUSALS) {
+      const got = fileRefusal(id, bytes);
+      ok(`fileRefusal: ${what}`,
+        want === null ? got === null : typeof got === 'string' && want.test(got),
+        got === null ? 'go ahead' : String(got));
+    }
+
+    /**
+     * THE COMPLETENESS TEST IS EQUALITY, and the fixture is deliberately a frame
+     * count rather than a duration: the runner knows how many frames the decode
+     * produced before it starts, so anything but that exact number is a bug in
+     * the runner and not a track that ended early.
+     */
+    const N = 240 * SR;
+    const W = (frames, aborted = false) => ({ frames, aborted });
+    const SRC = (frames = N) => ({ frames });
+
+    const COMMITS = [
+      ['a run that produced exactly the decoded length commits', W(N), SRC(), null],
+      ['nothing running commits nothing', null, SRC(), /nothing was being separated/],
+      ['a cancelled run never commits', W(N, true), SRC(), /cancelled/],
+      ['an empty writer never commits', W(0), SRC(), /nothing was separated/],
+      ['no decoded source to check against is a REFUSAL, not a commit on the writer’s own count',
+        W(N), null, /no decoded source/],
+      ['...and a source that reports no length is the same refusal',
+        W(N), SRC(0), /no decoded source/],
+      ['ONE frame short is refused — there is no causal tail to forgive offline',
+        W(N - 1), SRC(), /^1 frame short of/],
+      ['one frame PAST is refused too, and says which way it went',
+        W(N + 1), SRC(), /^1 frame past/],
+      ['the live tail tolerance does not apply: 4 s short is a refusal here',
+        W(N - 4 * SR), SRC(), /^176400 frames short of/],
+    ];
+    for (const [what, w, src, want] of COMMITS) {
+      const got = fileCommitRefusal(w, src);
+      ok(`fileCommitRefusal: ${what}`,
+        want === null ? got === null : typeof got === 'string' && want.test(got),
+        got === null ? 'commit' : String(got));
+    }
+
+    /**
+     * AND THE TWO REASONS THE PAIR HAD TO BE WRITTEN AT ALL, called rather than
+     * asserted about in prose. If either of these ever returns null for a File
+     * source, this slice is dead code and the collision is back.
+     */
+    ok('primeRefusal CANNOT stand in: it refuses a File source on the videoId it correctly lacks',
+      primeRefusal(null, { currentTime: 0, duration: 240, ended: false })
+        === 'not a recognisable video page');
+    ok('commitRefusal CANNOT stand in either: it demands a page transport a file does not have',
+      commitRefusal(W(N), null) === 'no page transport to check completeness against'
+      && /did not play to the end/.test(commitRefusal(W(N), { duration: 240, ended: false }) || ''));
+    ok('...while the File pair answers both of those on the evidence a file actually has',
+      fileRefusal(ID_A, some) === null && fileCommitRefusal(W(N), SRC()) === null);
   }
 
   head('cache — 16-bit round trip is good enough for playback, and is NOT dithered');

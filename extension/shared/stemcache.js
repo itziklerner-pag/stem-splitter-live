@@ -289,6 +289,204 @@ export function commitRefusal(writer, page, tailMaxSec = PRIME_TAIL_MAX_SEC) {
   return null;
 }
 
+// ------------------------------------------------------- the File source
+/**
+ * A FILE SOURCE HAS NO videoId, AND `null` IS NOT A USABLE STAND-IN FOR ONE.
+ *
+ * `videoIdFromUrl` returns null for anything that is not a YouTube page, and
+ * `cacheKey(null, hop)` is then the literal string `'null--<pipelineVersion>'` —
+ * ONE key shared by every file the user ever opens, serving the first file's
+ * stems for the second with nothing anywhere able to tell: same six names, same
+ * length shape, plausible audio. That is the stale-but-plausible failure this
+ * file's header calls the worst bug it has, arriving through a MISSING key
+ * rather than a stale one.
+ *
+ * TODAY'S TREE DOES NOT REACH IT, and saying so is the point. `trackKey()`
+ * (`offscreen/engine.js:547-551`) guards with `if (!videoId) return null` and
+ * caches nothing, which is right for a YouTube tab that is not on a video page.
+ * Reuse that guard for a File source and it is still wrong, just quietly: a file
+ * ALWAYS has no videoId, so the answer is always "never cache this", and the
+ * ahead-of-time tier the whole Phase exists to fill would stay empty for ever.
+ * A File source needs an identity of its own — the two failures a shared one
+ * gives are collide-everything or cache-nothing, and neither is a cache.
+ *
+ * The identity is therefore WHAT THE FILE IS, not what it is called: the SHA-256
+ * of every byte of it. Not the name (two files can share one), not the size
+ * (many do), not a prefix plus the length — a prefix-and-length hash collides on
+ * exactly the pair a file-manager copy produces, a re-tagged duplicate, or two
+ * renders from one session, and each of those is a pair a DJ really does have on
+ * disk. The whole point of the identity is that a wrong hit serves the wrong
+ * stems, so the identity may not be an estimate of the file.
+ *
+ * WHAT IT COSTS, MEASURED RATHER THAN BUDGETED: ~0.31 s for 100 MB on this box,
+ * three runs, `crypto.subtle.digest` on a warm 100 MB buffer in Node 22 — the
+ * phase contract priced it at ~1 s, so the ruling holds with room to spare and
+ * the figure is written down rather than left as a guess for the next reader.
+ *
+ * The cost is still real and it belongs on the "separating…" path, because the
+ * key NAMES the track: it has to exist before the UI can say which track is
+ * being worked on. Read the bytes, hash them, then tell the user — a spinner
+ * that names the wrong track is worse than one that names none.
+ */
+
+/** The SHA-256 of the empty input, which is what every empty file hashes to. */
+const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+
+/** A file identity as this module spells one: SHA-256, lower-case hex. */
+const isFileId = (id) => typeof id === 'string' && /^[0-9a-f]{64}$/.test(id);
+
+/** `byteLength` if this really is a buffer, else null — "cannot look" stays visible. */
+const byteLengthOf = (b) => (b instanceof ArrayBuffer || ArrayBuffer.isView(b) ? b.byteLength : null);
+
+/**
+ * The identity of a File source: SHA-256 over the whole file, lower-case hex.
+ *
+ * THROWS RATHER THAN RETURNING null, which is the opposite of `videoIdFromUrl`
+ * one screen up, and the difference is the point. A page that is not a video
+ * page is an ordinary answer — the user is on their subscriptions feed — so null
+ * is information. A File source that reached here without its bytes is a broken
+ * Host: `sourceBytes` (`shared/host.js`) is documented to reject rather than
+ * return empty for this exact reason. A null here would flow straight into
+ * `cacheKey(null, …)` and become the collision above, so it is not allowed to be
+ * a value.
+ *
+ * `crypto.subtle` IS SECURE-CONTEXT-ONLY and is a Host duty nothing else in this
+ * module needs: an extension page and an Electron renderer on a protocol
+ * registered `secure` both have it, a plain `http://` one does not. Named here
+ * because the failure is otherwise `Cannot read properties of undefined` from a
+ * line that looks like arithmetic.
+ *
+ * @param {ArrayBuffer|ArrayBufferView} bytes  the ENCODED file, as `sourceBytes` hands it over
+ * @returns {Promise<string>} 64 lower-case hex characters
+ */
+export async function fileIdFromBytes(bytes) {
+  if (byteLengthOf(bytes) == null) {
+    throw new Error(`stem cache: a file identity is the file's bytes, and none arrived (got ${
+      bytes === null ? 'null' : typeof bytes})`);
+  }
+  const subtle = globalThis.crypto && globalThis.crypto.subtle;
+  if (!subtle) {
+    throw new Error('stem cache: crypto.subtle is absent, so a File source cannot be identified — '
+      + 'the Host must serve the unit from a secure context');
+  }
+  const digest = new Uint8Array(await subtle.digest('SHA-256', bytes));
+  let hex = '';
+  for (const b of digest) hex += b.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/**
+ * Identify a File source AND key it, in one call.
+ *
+ * ONE CALL BECAUSE THE HASH IS THE EXPENSIVE HALF. The caller needs the id for
+ * the manifest and the key for the cache, and a surface that made it ask twice
+ * would hash a 100 MB file twice for one separation — a second of wall clock
+ * spent to produce a number it already had. This is the shape `offscreen/
+ * engine.js`'s `trackKey()` already returns for a Live source (`{videoId, key}`);
+ * it is the same job for a Source whose name is its content.
+ *
+ * THE ID IS EXACTLY 64 CHARACTERS AND `cacheKey` TRUNCATES AT 64. That is a fit,
+ * not a coincidence to be relied on quietly: `cacheKey`'s `slice(0, 64)` exists
+ * to bound a caller-supplied name, and a longer identity would be silently cut
+ * down to one — still 236 bits and still safe, but no longer the digest anyone
+ * could reproduce with `shasum`. The suite asserts the whole digest survives, so
+ * a future prefix goes red here rather than becoming a key nobody can check.
+ *
+ * @param {ArrayBuffer|ArrayBufferView} bytes
+ * @param {number} hopSeconds
+ * @param {{depth?:16|32, geometry?:'causal'|'offline'}} [tier]
+ * @returns {Promise<{id:string, key:string}>}
+ */
+export async function fileIdentity(bytes, hopSeconds, tier) {
+  const id = await fileIdFromBytes(bytes);
+  return { id, key: cacheKey(id, hopSeconds, tier) };
+}
+
+/**
+ * May this File source start a separation? The File half of `primeRefusal`, and
+ * it exists because `primeRefusal` cannot be used here: its first line refuses
+ * on `!videoId`, and a File source correctly has none.
+ *
+ * Same contract as every other refusal in this file — `null` for "go ahead", a
+ * human-readable reason otherwise — so a run that does not happen can say why
+ * instead of being indistinguishable from one that failed.
+ *
+ * IT ANSWERS AFTER THE HASH AND BEFORE THE MODEL. `separationRefusal` above is
+ * the capacity question and answers before the bytes are even fetched; this is
+ * the identity question and needs the bytes in hand. Both run; neither replaces
+ * the other.
+ *
+ * @param {string|null} fileId  from `fileIdFromBytes`
+ * @param {ArrayBuffer|ArrayBufferView|null} bytes  the encoded file `sourceBytes` returned
+ */
+export function fileRefusal(fileId, bytes) {
+  /**
+   * THE ONE THAT MUST NOT REGRESS, and it is first for the same reason
+   * `primeRefusal`'s is: this is where a caller that skipped the hash arrives.
+   * `videoIdFromUrl(d.source && d.source.url)` (`offscreen/engine.js:548`)
+   * returns `null` for a File source, and a caller that passed that value on
+   * would be one line from `cacheKey(null, …)` — the key `'null--…'` every file
+   * shares. Refusing makes that unreachable rather than merely unlikely.
+   */
+  if (!isFileId(fileId)) {
+    return 'this source has no content identity (a file is keyed by its bytes, not its address)';
+  }
+  const n = byteLengthOf(bytes);
+  if (n == null) return 'no bytes came back for this file';
+  /**
+   * AN EMPTY FILE HAS A PERFECTLY VALID-LOOKING IDENTITY — every one of them
+   * hashes to `EMPTY_SHA256` — so the length is checked as well as the digest.
+   * Either alone is a hole: the digest catches a caller that hashed nothing and
+   * kept the id, the length catches one that passed a fresh empty buffer. A
+   * zero-length source decodes to a zero-length track and caches as a track that
+   * is silently not the track, which is what `sourceBytes` is documented to
+   * throw rather than allow.
+   */
+  if (n === 0 || fileId === EMPTY_SHA256) return 'the file is empty';
+  return null;
+}
+
+/**
+ * May this separation become a cache entry? The File half of `commitRefusal`,
+ * and it exists because `commitRefusal` cannot be used here either: it requires
+ * `page.ended`, and a File source has no page transport at all — no content
+ * script, no `<video>`, nothing to have ended.
+ *
+ * THERE IS NO TAIL TOLERANCE HERE, and that is the substantive difference from
+ * the live policy rather than an omission. `PRIME_TAIL_MAX_SEC` exists because
+ * the live pipeline is causal: when the capture stops, the last buffer's worth
+ * of audio has not been separated and never will be, so every live prime is
+ * about one buffer short and refusing that would refuse everything. An
+ * ahead-of-time run over a decoded file has no deadline and no future it cannot
+ * see — it knows the frame count before it starts, from the decode. So the
+ * completeness test is EQUALITY, and a run that came up short is a bug in the
+ * runner, not a track that ended early.
+ *
+ * COUNTS, NOT SECONDS. The evidence is two frame counters, and converting them
+ * to seconds to compare them would only add a rounding boundary to argue about.
+ *
+ * @param {{aborted:boolean, frames:number}|null} writer
+ * @param {{frames:number}|null} source  the DECODED source: what the file holds
+ */
+export function fileCommitRefusal(writer, source) {
+  if (!writer) return 'nothing was being separated';
+  if (writer.aborted) return 'the separation was cancelled';
+  if (!writer.frames) return 'nothing was separated';
+  /**
+   * NO DECODED LENGTH IS A REFUSAL, NOT A DEFAULT — the same ruling
+   * `primeRefusal` makes about a missing page transport. Committing on the
+   * writer's own frame count alone would mean the entry is complete because the
+   * only thing that could have contradicted it was absent.
+   */
+  if (!source || !(source.frames > 0)) return 'no decoded source to check completeness against';
+  if (writer.frames !== source.frames) {
+    const d = writer.frames - source.frames;
+    const n = Math.abs(d);
+    return `${n} frame${n === 1 ? '' : 's'} ${d < 0 ? 'short of' : 'past'} the file's ${source.frames}`;
+  }
+  return null;
+}
+
 // ------------------------------------------------------------------- storage
 /**
  * The OPFS directory ONE CACHE OWNS, named by the caller rather than by this
