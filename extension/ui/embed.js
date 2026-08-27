@@ -22,7 +22,7 @@
 import {
   UNITY_U, FLOOR_DB, MIN_DB, MAX_DB, faderDb, dbToFader, linAmp, linToDb,
   dbToMeterFrac, BALLISTICS, onePole, fmtDb, speakDb, MINUS, INF, fmtBytes,
-  behindText, bufState, errorSummary, errorAction, ARM_CODES, armErrorFresh,
+  behindText, bufState, errorSummary, errorAction, ARM_CODES, checkArmCode, armErrorFresh,
   normalizeDeck, syncCorrection, audioClockAt,
 } from './audio-math.js';
 import { ARM_ERROR_KEY, ARM_ERROR_TTL_MS, MODEL, PREFS_KEY, SR } from '../shared/config.js';
@@ -2123,6 +2123,12 @@ host.onMessage((m) => {
       if (forOther) break;
       halted = true;
       err = { code: m.code || 'ARM_FAILED', message: m.message, advisory: false, seq: m.seq };
+      // #29: `code` is a CLOSED VOCABULARY the unit owns and the Host originates
+      // into. Checked here rather than in paintBanner() because this runs once
+      // per refusal and paintBanner runs on every repaint — a Host developer
+      // needs to be told once, not sixty times a second. It does not change what
+      // is painted; see `checkArmCode`.
+      checkArmCode(err.code, 'ARM_ERROR from the Host');
       paint();
       break;
     }
@@ -2487,6 +2493,10 @@ const bootPoll = setInterval(() => {
   if (err) return;   // a live message already beat us here; it is fresher
   if (normalizeDeck(rec.deck) !== DECK) return;
   err = { code: rec.code || 'ARM_FAILED', message: rec.message, advisory: false, seq: rec.seq };
+  // #29, the other way in. A Host that persists a refusal it never sent as a
+  // live message reaches the banner only through here, so the vocabulary is
+  // checked on both entry points or it is checked on neither.
+  checkArmCode(err.code, `the persisted refusal at storage key ${ARM_ERROR_KEY}`);
   paint();
 })();
 

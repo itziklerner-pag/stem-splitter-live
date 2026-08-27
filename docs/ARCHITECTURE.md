@@ -118,7 +118,7 @@ worker can do.
 | `SW_DISARM` | deck → sw | forget the armed tab |
 | `SW_ARM_ERROR_CLEAR` | deck → sw | dismiss a refusal, carrying the `seq` the user actually saw |
 | `SESSION` | sw → deck | the armed tab, or an empty record |
-| `ARM_ERROR` / `ARM_ERROR_CLEARED` | sw → deck | a refusal, and its clearance |
+| `ARM_ERROR` / `ARM_ERROR_CLEARED` | sw → deck | a refusal, and its clearance. `code` is drawn from `ARM_CODES` (`ui/audio-math.js`) — a closed set, checked on arrival since v0.3.0 |
 
 **`chrome.runtime` — deck ⇄ engine.** The fast path: a fader move must not wait
 for a chunk boundary, so these go straight to the offscreen document and are

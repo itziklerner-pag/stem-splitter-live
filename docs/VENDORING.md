@@ -157,13 +157,13 @@ Expect, verbatim on the last line:
 GREEN (partial — the vendored unit's suites only; 12 of 23 steps)
 ```
 
-exit 0, 12 of 12 steps PASS, **1156 assertions**, about 74 s. Per step:
+exit 0, 12 of 12 steps PASS, **1183 assertions**, about 74 s. Per step:
 
 | step | count | step | count |
 |---|---|---|---|
-| `unit` (`test.js`) | 612 | `chroma` | 37 |
+| `unit` (`test.js`) | 622 | `chroma` | 37 |
 | `seam` | 17 | `keytap` | 23 |
-| `ui` | 107 | `bpmtap` | 46 |
+| `ui` | 124 | `bpmtap` | 46 |
 | `qa-edge` | 13 | `speed-pitch` | 10 |
 | `passthrough` | 16 | `embed-state` | 224 |
 | `pitch` | 23 | `pitchbank` | 28 |
@@ -215,14 +215,16 @@ rings, the mixer, the OLA planes, the scheduler — *and* it is this Host's
 conformance suite. Its `group('host')` installs a Chrome platform
 (`globalThis.chrome = { runtime: { … } }`) and asserts that
 `extension/offscreen/host.js` and `extension/ui/host.js` really behave the way
-`shared/host.js` declares: 122 of the file's assertions, 27 of them naming an
+`shared/host.js` declares: 125 of the file's assertions, 28 of them naming an
 `extension/{ui,offscreen}/host.js` entry point explicitly.
 
 Replace the two holes with your own — which you must; they are holes — and those
-122 assertions become claims about a platform that is no longer there. Measured,
-in #11's review: swapping `offscreen/host.js`'s `send()` for a
-contract-satisfying non-Chrome implementation takes step `unit` from 612 passed
-to 610 passed, 2 failed, both reds naming `send()`.
+125 assertions become claims about a platform that is no longer there. Measured,
+in #11's review and **re-measured at v0.3.0** because the step's count has moved
+since: swapping `offscreen/host.js`'s `send()` for a contract-satisfying
+non-Chrome implementation — same envelope, same `undefined` return, same
+swallowed delivery failure, over a plain bus — takes step `unit` from 622 passed
+to 620 passed, 2 failed, both reds naming `send()`.
 
 S11 considered splitting the group into a step of its own and **did not**,
 because the honest way to do that is to carve `test.js` in two, and a mechanical
@@ -243,12 +245,38 @@ benefit is that it is written down instead of discovered.
    path. Same paths, your implementations, and the group becomes your
    conformance suite — which is what it is for.
 
+### A hole must import INERTLY — touch your platform on the first duty call
+
+**This is a rule, not a style note, and it is the one that decides whether you
+get a conformance report or a stack trace.**
+
+`group('host')` imports each hole by path. A hole that reaches for its platform
+at **module evaluation** — `window.parent`, an `ipcRenderer` off a preload
+bridge, a `document` — is the natural first shape for a Host whose platform is
+not available in Node, and it does not produce reds. Before v0.3.0 it ended the
+process: the first real second Host died at the import line after 482
+assertions, and the report the group exists to produce was replaced by a stack
+trace. `verify.mjs` then reported *RED — 0 failing assertions*, which names
+nothing and reads exactly like a broken vendored copy.
+
+Since v0.3.0 the group imports each hole in a `try`, so an evaluation-time throw
+is a **named red** carrying the hole's path and what it threw, and a throw
+anywhere else in the group turns the assertion at its foot red instead of ending
+the run. That is a repair, not a licence: a hole that throws at import still
+takes the ~120 assertions after it with it, and they are the ones you wanted.
+
+**So: hold nothing at module scope that your platform has to be present for.**
+Read the bridge, the window, the IPC channel inside the duty, on the first call.
+Both shipped holes are written that way and `ui/host.js` says so in its own
+comment — its `window.parent` question is asked at import *deliberately*, and
+the suite installs a `window` before importing it for exactly that reason.
+
 ---
 
 ## What your Host owes the unit
 
 Read [`extension/shared/host.js`](../extension/shared/host.js) for the duties.
-Four things are *not* duties and are easy to miss:
+Five things are *not* duties and are easy to miss:
 
 **You must ORIGINATE four messages.** `assertHost` cannot check for a message
 nobody sent. To the engine (`to: BUS.engine`): `CAPTURE_START { sourceToken,
@@ -258,6 +286,22 @@ source: { title, url }, deck? }`, `CAPTURE_STOP { deck? }`,
 `ARM_ERROR { code, message }` and `ARM_ERROR_CLEARED` if your product can refuse
 to arm. The addresses are `BUS` in `shared/host.js` — three strings, declared
 once, read by every context.
+
+**`ARM_ERROR.code` is a CLOSED VOCABULARY, and five of its eight members are tab
+nouns.** `ARM_CODES` in
+[`extension/ui/audio-math.js`](../extension/ui/audio-math.js) is the legal set:
+`NOT_CAPTURING`, `NOT_ARMED`, `NEEDS_GESTURE`, `TAB_GONE`, `TAB_BUSY`,
+`TAB_UNSUPPORTED`, `ARM_FAILED`, `NO_ACTIVE_TAB`. Three deck behaviours are
+gated on membership — whether the banner can be **dismissed**, whether
+**Restart** is offered, and **which sentence** is printed — so a Host that
+invents a plausible-looking code (`NO_SOURCE`, say) ships a banner the user
+cannot dismiss with a Restart control that cannot fix it. Since v0.3.0 the deck
+says so: `checkArmCode()` writes one `console.error` naming your value and the
+whole legal set, on both ways in — the live `ARM_ERROR` and the refusal you
+persisted at `ARM_ERROR_KEY`. It does not throw and it does not change the
+banner; the user still sees their own problem. **Pick a member.** If your Source
+kind genuinely needs a new one, it is a change here, behind a tag — not a string
+your Host invents.
 
 **You must wire the autoplay-next preference.** The deck writes
 `prefs.autoplayNext` through `storageSet('local', PREFS_KEY, …)`; nothing tells
@@ -284,6 +328,17 @@ flag, before `offscreen/engine.js` loads.
 where your Host says where they come from; the SHA-256 and the byte count stay
 in `shared/config.js`, and the unit checks them over whatever you hand it, every
 load. A Host that verified would be a Host that could decline to.
+
+**Announce a phase from `MODEL_SOURCES`, and remember it is three-valued.**
+`modelBytes(onProgress)` announces its phase before any bytes move, and since
+v0.3.0 that announcement is also the **provenance**: `'cache'`, `'download'`, or
+`'bundled'` for a Host that ships the weights beside its binary. It is what the
+engine words its `weights … + hash verified` line from — the one line a user
+reads to check the network claim. `fromCache` is unchanged and is **not** the
+provenance: it is the retry decision (rule 3 on `EngineHost`), and a bundled
+Host answers `'bundled'` there and `false` here, which is right on both counts.
+A Host that announces nothing is quoted as having named no source, which is
+honest and is also the only thing that will make it announce one.
 
 ---
 

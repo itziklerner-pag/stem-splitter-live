@@ -4568,6 +4568,78 @@ if (group('dual')) {
 
 // ===========================================================================
 if (group('host')) {
+  /**
+   * THIS GROUP IS A CONFORMANCE REPORT, AND A REPORT THAT CRASHES IS NOT ONE (#30).
+   *
+   * `docs/VENDORING.md` sends a second Host here: swap the two holes for your
+   * own files, run `node tools/verify.mjs --unit`, and read the reds. That only
+   * works if the group can RUN to its end. A hole module that throws at MODULE
+   * EVALUATION — the natural shape for a Host whose platform bridge lives on
+   * `window` or in a preload — used to take the whole process out at the import
+   * line: the first real second Host died here after 482 assertions and got a
+   * stack trace where the report should have been. A crash is strictly worse
+   * than a red. A red says "your `storageGet` is wrong"; a crash says nothing at
+   * all and reads as a broken vendored copy.
+   *
+   * So the body below is wrapped, and it is wrapped in TWO places for two
+   * different failures:
+   *
+   *   1. `importHole()` — an evaluation-time throw becomes ONE named red that
+   *      names the hole's path and what it threw. That is the failure the rule
+   *      "a hole must import inertly" exists to catch, and naming the file is
+   *      the whole repair instruction.
+   *   2. this `try` — a hole that imports fine and then throws on its FIRST DUTY
+   *      CALL, or any other throw between here and the last assertion, becomes
+   *      the named red at the foot of the group instead of ending the run. The
+   *      three groups after this one, and the two checks at the foot of the
+   *      file, still report.
+   *
+   * THE BODY IS DELIBERATELY NOT RE-INDENTED under this `try`. It is ~2800 lines
+   * and 122 assertions; re-indenting them would bury a four-line change in a
+   * whole-file diff and take the blame history with it.
+   *
+   * The two globals restored in the `finally` are the deck half's: `window` is
+   * installed BEFORE `ui/host.js` is imported (that is the point of it) and
+   * `chrome` is re-stubbed per block. The engine half restores its own three in
+   * its own `finally`, further down, which a throw here cannot skip.
+   */
+  let hostGroupThrew = null;
+  let realWindowDesc = null;
+  let windowStubbed = false;
+  const hostGroupAt = pass + fail;
+  /**
+   * Import one hole and ASSERT THAT IT IMPORTED, rather than letting the throw
+   * out. Returns `null` on a throw, which every assertion downstream then reads
+   * as a Host that owes nothing — a run of reds naming duties, which is the
+   * report, instead of nothing at all.
+   *
+   * THE `import()` STAYS AT THE CALL SITE, as a literal, and is handed over as a
+   * thunk rather than as a path this function imports. `tools/unit-check.mjs`
+   * scans each suite for a seam path in READ POSITION — `import(`, `from`,
+   * `new URL(`, `readFileSync(` next to a string literal — and holds the result
+   * against the `reads` this suite declares in `extension/unit.json`, both ways.
+   * A path passed in as a variable is invisible to that scan, and the first
+   * symptom is `unit` losing its declared read of `offscreen/host.js` with
+   * nothing saying why. Watched: it went red exactly that way.
+   *
+   * @param {string} where  the hole's path, extension-relative. It is in the
+   *   assertion name, because "something threw" is not a repair instruction and
+   *   "extension/ui/host.js threw while being imported" is.
+   * @param {() => Promise<object>} load  `() => import('./extension/…/host.js')`
+   */
+  const importHole = async (where, load) => {
+    let mod = null, threw = null;
+    try { mod = await load(); } catch (e) { threw = e; }
+    ok(`THE HOLE AT ${where} IMPORTS INERTLY — it touches its platform on the first DUTY CALL, not at module scope  `
+      + '[entry point: the import of this hole by the unit — offscreen/engine.js for the EngineHost, ui/embed.js for the DeckHost]',
+      threw === null,
+      threw === null
+        ? 'imported without reaching for a platform that is not here'
+        : `IT THREW WHILE BEING IMPORTED: ${String((threw && threw.message) || threw)} — nothing below this line could drive it, `
+          + 'so the rest of this report is about a module that does not exist. Move the platform touch into the duties.');
+    return mod;
+  };
+  try {
   head('host — the ENGINE half of the Host seam: a Host that cannot do the job is refused at boot');
   /**
    * WHAT THIS COVERS AND WHY IT IS WORTH A GATE.
@@ -4603,7 +4675,8 @@ if (group('host')) {
     assertHost, assertHostOption,
     ENGINE_HOST_DUTIES, BACKEND_DUTIES, DECK_HOST_DUTIES, DECK_PAGE_DUTIES, DECK_TRANSPORT_DUTIES,
   } = await import('./extension/shared/host.js');
-  const engineHost = await import('./extension/offscreen/host.js');
+  const engineHost = await importHole('extension/offscreen/host.js',
+    () => import('./extension/offscreen/host.js'));
   const duties = Object.keys(ENGINE_HOST_DUTIES);
   const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
   /** A Host that owes exactly what is declared, so each case below breaks ONE thing. */
@@ -4898,6 +4971,36 @@ if (group('host')) {
       : /\.getTracks\(\)\.forEach\(\(t\) => t\.stop\(\)\)/.test(tdBody)
         ? 'the teardown callback stops every track on every live deck'
         : `the teardown callback does not stop the tracks: ${JSON.stringify(tdBody.trim().slice(0, 90))}`);
+
+  /**
+   * #28 — THE PROVENANCE REACHES THE ONE LINE A USER WOULD CHECK, AND IT IS NOT
+   * A BOOLEAN.
+   *
+   * `engine.js` used to word this line `fromCache ? 'from cache' : 'downloaded'`.
+   * That is a two-valued answer to a three-valued question: a Host that ships
+   * the weights in its installer honestly reports `fromCache: false`, and the
+   * engine then told the user 109 MB had been downloaded about a file no request
+   * ever touched — contradicting P1 in the one place someone would go to check
+   * it. READ AS TEXT for the reason everything in this block is: `engine.js`
+   * builds an AudioContext at module scope and cannot be evaluated from Node.
+   *
+   * BOTH DIRECTIONS ARE ASSERTED. That the line quotes `modelSourceWord` is what
+   * makes the three values reach it; that it no longer mentions `fromCache` is
+   * what stops the old inference being restored beside the new one, where it
+   * would go on being wrong for the third case only — the case with no test
+   * before this one.
+   */
+  const weightsLog = (engineSrc.match(/log\(`weights[^`]*`\)/) || [null])[0];
+  ok('THE `weights …` LOG LINE IS WORDED FROM THE ANNOUNCED SOURCE AND NOT FROM THE RETRY BOOLEAN — a Host that SHIPS the weights must not be told it downloaded them  '
+    + '[entry point: extension/offscreen/engine.js loadOnce(), the line P1 is checked against]',
+    weightsLog != null && weightsLog.includes('modelSourceWord(source)') && !/fromCache/.test(weightsLog),
+    weightsLog == null
+      ? 'there is no log(`weights …`) call in extension/offscreen/engine.js at all — the line this asserts about is gone'
+      : /fromCache/.test(weightsLog)
+        ? `it is still worded off the retry boolean: ${weightsLog}`
+        : !weightsLog.includes('modelSourceWord(source)')
+          ? `it does not quote the seam\u2019s vocabulary: ${weightsLog}`
+          : weightsLog);
 
   /**
    * THE DUTIES SPELLED `MUST`, HELD AGAINST THE ONE IMPLEMENTATION THAT HAS
@@ -5571,10 +5674,12 @@ if (group('host')) {
   const deliver = (w, source, data) => {
     for (const [type, fn] of w.listeners) if (type === 'message') fn({ source, data });
   };
-  const realWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  realWindowDesc = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  windowStubbed = true;
   const framedWin = makeWindow(true);
   globalThis.window = framedWin;
-  const deckHost = (await import('./extension/ui/host.js')).host;
+  const deckHost = ((await importHole('extension/ui/host.js',
+    () => import('./extension/ui/host.js'))) || {}).host;
   const deckDuties = Object.keys(DECK_HOST_DUTIES);
   /**
    * RENDERING vs REACHABILITY: reachable by construction. Every assertion below
@@ -7390,8 +7495,35 @@ if (group('host')) {
         ? '4 refused: wrong source, wrong namespace, unrouted type, null'
         : `${heard.length} got through: ${heard.map(([k]) => k).join(',')}`);
   }
-  delete globalThis.chrome;
-  if (realWindow) Object.defineProperty(globalThis, 'window', realWindow); else delete globalThis.window;
+  } catch (e) {
+    hostGroupThrew = e;
+  } finally {
+    // The deck half's two globals. Unconditional `delete` on `chrome` is what
+    // the group did at this point before the guard; `window` is only restored if
+    // it was ever replaced, so a throw in the ENGINE half leaves the real one
+    // exactly as it found it.
+    delete globalThis.chrome;
+    if (windowStubbed) {
+      if (realWindowDesc) Object.defineProperty(globalThis, 'window', realWindowDesc);
+      else delete globalThis.window;
+    }
+  }
+  /**
+   * THE GROUP RAN TO ITS END. This is the assertion that turns "the conformance
+   * report was replaced by a stack trace" into a line someone can read, and it
+   * is the one that keeps the three groups after this one running.
+   *
+   * It counts what got through, because "it threw" and "it threw before it had
+   * asserted anything" are different findings and the count is the only thing
+   * that separates them.
+   */
+  ok('group(host) REACHED ITS LAST ASSERTION — a Host that throws anywhere in this report turns THIS red, and the report still prints  '
+    + '[entry point: test.js group(\'host\'), the conformance suite docs/VENDORING.md option 3 points a second Host at]',
+    hostGroupThrew === null,
+    hostGroupThrew === null
+      ? `${pass + fail - hostGroupAt} assertions, none of them a crash`
+      : `IT THREW after ${pass + fail - hostGroupAt} assertions, so the rest of the report never ran: `
+        + String((hostGroupThrew && hostGroupThrew.stack) || hostGroupThrew));
 }
 
 // ===========================================================================
@@ -7430,6 +7562,7 @@ if (group('verifyModel')) {
    * alone says the split holds; together they do.
    */
   const { verifyModel, loadModel } = await import('./extension/shared/modelcache.js');
+  const { MODEL_SOURCES, modelSourceWord } = await import('./extension/shared/host.js');
   const sha256 = async (b) => [...new Uint8Array(await crypto.subtle.digest('SHA-256', b))]
     .map((v) => v.toString(16).padStart(2, '0')).join('');
   const threwAsync = (p) => p.then(() => null, (e) => String((e && e.message) || e));
@@ -7491,15 +7624,25 @@ if (group('verifyModel')) {
         // A Host announces its own phase before the bytes move — see the
         // `EngineHost.modelBytes` typedef. Reported here so the ordering claim
         // below has something to order against.
-        onProgress(next.fromCache ? 'cache' : 'download', next.bytes.length, next.bytes.length);
+        //
+        // THE PHASE IS THE ROW'S OWN, NOT DERIVED FROM `fromCache` (#28). The
+        // whole finding is that the boolean does not partition the three
+        // answers, so a fixture that computed one from the other could not build
+        // the case that exposed it: a `bundled` Host, `fromCache: false`, no
+        // network.
+        if (next.source !== null) onProgress(next.source, next.bytes.length, next.bytes.length);
         return { bytes: next.bytes, fromCache: next.fromCache };
       },
       clearModel: async () => { h.clears++; },
     };
     return h;
   };
-  const stored = (bytes) => ({ bytes, fromCache: true });
-  const wire = (bytes) => ({ bytes, fromCache: false });
+  const stored = (bytes) => ({ bytes, fromCache: true, source: 'cache' });
+  const wire = (bytes) => ({ bytes, fromCache: false, source: 'download' });
+  /** A Host that SHIPS the weights: no cache to drop, no request made. */
+  const shipped = (bytes) => ({ bytes, fromCache: false, source: 'bundled' });
+  /** A Host that announces no phase at all — the case the wording must not guess at. */
+  const silent = (bytes) => ({ bytes, fromCache: false, source: null });
 
   const clean = fakeHost(stored(weights));
   const cleanOut = await loadModel(clean, () => {}, PIN).then((v) => v, (e) => e);
@@ -7543,6 +7686,119 @@ if (group('verifyModel')) {
     rottenOut == null
       ? `corrupt bytes were ACCEPTED on the retry (${rotten.asks} asks)`
       : `${rotten.asks} asks, ${rotten.clears} clears — ${rottenOut}`);
+
+  /**
+   * #28 — THE PROVENANCE, ALL THREE VALUES OF IT, ACROSS THE SEAM.
+   *
+   * `fromCache` is a two-valued answer to a three-valued question. It stays what
+   * it always was — the retry decision, rule 3 of `EngineHost` — and the SOURCE
+   * now travels beside it, taken off the phase the Host announces before any
+   * bytes move. The case that matters is the third one: a Host that ships the
+   * weights in its installer reports `fromCache: false` honestly, and every
+   * consumer that read the boolean as provenance said "downloaded" about a file
+   * no request ever touched.
+   *
+   * THREE HOSTS, THREE ANSWERS, DRIVEN THROUGH THE SHIPPED `loadModel`. The
+   * counts ride along because a source that arrived by spending a retry would
+   * be the wrong finding reported as the right one.
+   */
+  const sources = {};
+  for (const [name, row] of [['cache', stored], ['download', wire], ['bundled', shipped]]) {
+    const h = fakeHost(row(weights));
+    const out = await loadModel(h, () => {}, PIN).then((v) => v, (e) => e);
+    sources[name] = { out, asks: h.asks };
+  }
+  const eachRight = Object.entries(sources).every(([name, r]) => !(r.out instanceof Error)
+    && r.out.source === name && r.asks === 1);
+  ok('ALL THREE PROVENANCE VALUES CROSS THE SEAM — a Host cache, the network, and weights that SHIPPED WITH THE HOST, each reported as itself in 1 ask  '
+    + '[entry point: shared/modelcache.js loadModel(), reached from engine.js loadOnce()]',
+    eachRight,
+    eachRight
+      ? Object.entries(sources).map(([n, r]) => `${n} -> ${JSON.stringify(r.out.source)} (${r.asks} ask)`).join(', ')
+      : Object.entries(sources).map(([n, r]) => `${n} -> ${r.out instanceof Error
+        ? `REJECTED ${r.out.message}` : `${JSON.stringify(r.out.source)} in ${r.asks} ask(s)`}`).join(', '));
+
+  /**
+   * ...AND THE BUNDLED CASE IS THE ONE THE OLD BOOLEAN GOT WRONG, so it gets its
+   * own assertion rather than being one row of the loop above. It is the whole
+   * of issue #28: `fromCache` is honestly `false`, and every reading of that as
+   * "then it was downloaded" contradicts P1 in the one place a user checks it.
+   */
+  const bundledOut = sources.bundled.out;
+  const bundledWords = bundledOut instanceof Error ? '' : modelSourceWord(bundledOut.source);
+  ok('...and the SHIPPED-WITH-THE-HOST case reports `fromCache: false` AND is not worded as a download — the two facts that used to be one boolean  '
+    + '[entry point: shared/host.js modelSourceWord(), quoted by engine.js loadOnce()]',
+    !(bundledOut instanceof Error) && bundledOut.fromCache === false && bundledOut.source === 'bundled'
+      && bundledWords === MODEL_SOURCES.bundled && !/download/i.test(bundledWords),
+    bundledOut instanceof Error
+      ? `loadModel rejected a bundled Host: ${bundledOut.message}`
+      : /download/i.test(bundledWords)
+        ? `a Host that shipped its weights is told: "weights ${bundledWords}" — that is the defect, in the words of the fix`
+        : `fromCache=${bundledOut.fromCache}, source=${JSON.stringify(bundledOut.source)}, worded "weights ${bundledWords}"`);
+
+  /**
+   * THE THREE WORDS ARE THREE WORDS. A vocabulary whose members read alike is a
+   * vocabulary that partitions nothing: the assertion above would pass over a
+   * `MODEL_SOURCES` in which `bundled` and `cache` were the same sentence, and
+   * the user would be no better off than with the boolean.
+   */
+  const words = Object.keys(MODEL_SOURCES).map((k) => modelSourceWord(k));
+  ok('...and the three READ differently, so the partition survives contact with a reader  '
+    + '[entry point: shared/host.js MODEL_SOURCES, the vocabulary a Host picks its phase out of]',
+    words.length === 3 && new Set(words).size === 3 && words.every((w) => typeof w === 'string' && w.length > 0),
+    `${words.length} member(s), ${new Set(words).size} distinct: ${words.map((w) => JSON.stringify(w)).join(', ')}`);
+
+  /**
+   * A HOST THAT ANNOUNCES NOTHING IS SAID TO HAVE ANNOUNCED NOTHING. The defect
+   * being fixed was a GUESS — "not a cache hit, therefore downloaded" — and
+   * answering an unannounced source with any of the three real ones is the same
+   * guess with a longer vocabulary. This is also the one case the loop above
+   * cannot reach, because every row in it announces.
+   */
+  const mute = fakeHost(silent(weights));
+  const muteOut = await loadModel(mute, () => {}, PIN).then((v) => v, (e) => e);
+  const muteWords = muteOut instanceof Error ? '' : modelSourceWord(muteOut.source);
+  ok('A HOST THAT ANNOUNCES NO PHASE IS QUOTED AS NAMING NO SOURCE, not as having downloaded 109 MB',
+    !(muteOut instanceof Error) && muteOut.source === null
+      && muteWords.length > 0 && !/download/i.test(muteWords) && !Object.values(MODEL_SOURCES).includes(muteWords),
+    muteOut instanceof Error
+      ? `loadModel rejected a Host that announced nothing: ${muteOut.message}`
+      : `source=${JSON.stringify(muteOut.source)}, worded "weights ${muteWords}"`);
+
+  /**
+   * A HEAL REPORTS THE SOURCE THAT ACTUALLY SERVED, not the one that was thrown
+   * away: the bad `cache` copy is dropped and the good bytes come off the wire,
+   * and wording the line "from this Host's store" would name the copy that just
+   * failed.
+   */
+  const healSrc = fakeHost(stored(wrongContent), wire(weights));
+  const healSrcOut = await loadModel(healSrc, () => {}, PIN).then((v) => v, (e) => e);
+  ok('...and a HEAL reports the attempt that SERVED, not the one that was dropped  '
+    + '[entry point: shared/modelcache.js loadModel(), the retry loop]',
+    !(healSrcOut instanceof Error) && healSrc.asks === 2 && healSrcOut.source === 'download'
+      && healSrcOut.fromCache === false,
+    healSrcOut instanceof Error
+      ? `the heal failed: ${healSrcOut.message}`
+      : `${healSrc.asks} asks, source=${JSON.stringify(healSrcOut.source)}, fromCache=${healSrcOut.fromCache}`);
+
+  /**
+   * ...AND IT DOES NOT INHERIT ONE EITHER, which is the case the assertion above
+   * cannot see: when the second ask announces a phase, that announcement
+   * overwrites the first whether or not anything was reset, so a `loadModel`
+   * with no per-attempt reset passes it. The discriminating fixture is a heal
+   * whose SECOND ask announces NOTHING — then a kept `source` reports `'cache'`,
+   * naming the copy that was just deleted for failing its hash.
+   */
+  const healQuiet = fakeHost(stored(wrongContent), silent(weights));
+  const healQuietOut = await loadModel(healQuiet, () => {}, PIN).then((v) => v, (e) => e);
+  ok('...and it never INHERITS the dropped attempt\u2019s phase — `source` is reset per attempt, so an ask that announces nothing reports nothing  '
+    + '[entry point: shared/modelcache.js loadModel(), the top of the retry loop]',
+    !(healQuietOut instanceof Error) && healQuiet.asks === 2 && healQuietOut.source === null,
+    healQuietOut instanceof Error
+      ? `the heal failed: ${healQuietOut.message}`
+      : healQuietOut.source === 'cache'
+        ? 'the load reports `cache` — that is the copy it just deleted for failing its hash'
+        : `${healQuiet.asks} asks, source=${JSON.stringify(healQuietOut.source)}`);
 
   /**
    * WHAT THE HOST HANDED OVER MUST BE WHAT THE WORKER GETS — rule 2 of

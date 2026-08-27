@@ -188,6 +188,62 @@ export const BUS = Object.freeze({
 });
 
 /**
+ * WHERE THE MODEL BYTES CAME FROM — the phases `modelBytes(onProgress)` may
+ * announce, and the words the unit says about each. Declared here, next to
+ * `BUS`, for the reason `BUS` is: it is a vocabulary the SEAM owns, a Host has
+ * to pick a member out of it, and a Host should not have to grep the engine to
+ * learn what the members are.
+ *
+ * THREE ANSWERS, NOT TWO, AND THAT IS THE WHOLE POINT (#28). Until v0.3.0 the
+ * engine worded this line off `fromCache`, a boolean, and said "downloaded"
+ * about everything that was not a cache hit. A Host that ships the weights in
+ * its installer honestly reports `fromCache: false` — nothing was served from a
+ * cache — and the engine then told the user 109 MB had been downloaded, about a
+ * file that has been on disk since install and that no network request ever
+ * touched. That is not a typo: `P1` is this product's whole network story, and
+ * the console is the one place a user would go to check it.
+ *
+ * `bundled` IS NOT A SYNONYM FOR `cache`. A cache is something `clearModel()`
+ * can empty and a later call re-fills from source; bundled bytes are immutable
+ * and `clearModel()` is honestly a no-op over them. The two differ in what the
+ * user is owed as much as in what the unit may do next.
+ *
+ * `fromCache` SURVIVES ALONGSIDE THIS and is not superseded by it, because the
+ * two answer different questions: this one is what the user is told, and
+ * `fromCache` is whether a failed integrity check is worth one retry (rule 3
+ * below). A `bundled` Host answers `bundled` here and `false` there, which is
+ * right on both counts — there is nothing to drop, so there is nothing to
+ * re-ask for.
+ */
+export const MODEL_SOURCES = Object.freeze({
+  /** This Host's own store answered — `clearModel()` can empty it. */
+  cache: 'from this Host\u2019s store',
+  /** The network was touched. Under P1 this happens at most once per store. */
+  download: 'downloaded',
+  /** Already on disk because this Host ships them. No cache, no request. */
+  bundled: 'already here — shipped with this Host',
+});
+
+/**
+ * The words for a source, for whoever is wording a line about it.
+ *
+ * A SOURCE THIS HOST NEVER ANNOUNCED IS SAID OUT LOUD RATHER THAN GUESSED. The
+ * defect this replaces was a guess — "not a cache hit, so it must have been
+ * downloaded" — and answering an unannounced source with either of the three
+ * real ones would be the same mistake with a longer vocabulary. A Host that
+ * announces nothing gets a sentence saying so, which is true and is also the
+ * only thing that will make it announce something.
+ *
+ * @param {string|null|undefined} source  a key of `MODEL_SOURCES`
+ * @returns {string} a phrase that fits after "weights "
+ */
+export function modelSourceWord(source) {
+  return Object.prototype.hasOwnProperty.call(MODEL_SOURCES, source)
+    ? MODEL_SOURCES[source]
+    : `from a source this Host did not name (${JSON.stringify(source)})`;
+}
+
+/**
  * @typedef {object} EngineHost
  *
  * @property {(msg: object) => void} send
@@ -291,7 +347,7 @@ export const BUS = Object.freeze({
  *   the one thing that cannot wait — stopping the capture tracks, which is what
  *   holds the user's tab muted (R5).
  *
- * @property {(onProgress?: (phase:'cache'|'download', got:number, total:number)=>void)
+ * @property {(onProgress?: (phase:'cache'|'download'|'bundled', got:number, total:number)=>void)
  *   => Promise<{bytes: Uint8Array, fromCache: boolean}>} modelBytes
  *   Hand over the model weights, from wherever this Host keeps or gets them.
  *   A BYTE SOURCE AND NOTHING MORE — see the three rules below.
@@ -303,6 +359,13 @@ export const BUS = Object.freeze({
  *   move: `fromCache` in the result arrives ~2 minutes too late to choose the
  *   wording on a progress card, and `ui/welcome.js` reads the phase to decide
  *   whether the card may quote a percentage at all.
+ *   THE PHASE IS ALSO THE PROVENANCE, AND IT HAS THREE VALUES — `MODEL_SOURCES`
+ *   above, and the reason it is not two is written there. ANNOUNCE ONE: it is
+ *   what the unit words its "weights ... + hash verified" line from, and a Host
+ *   that announces none of them is quoted as having named no source rather than
+ *   having downloaded anything. A Host that ships the weights announces
+ *   `'bundled'` and reports `fromCache: false`; both are true, and rule 3 is
+ *   why the second one still matters.
  *
  * @property {() => Promise<boolean>} modelCached
  *   Would `modelBytes()` cost a download? Answered WITHOUT reading the bytes:
@@ -424,6 +487,11 @@ export const BUS = Object.freeze({
  *    asking twice. A Host that always reports `true` turns every corrupt
  *    download into a second corrupt download; one that always reports `false`
  *    turns a corrupt stored copy into a permanent failure.
+ *    IT IS NOT THE PROVENANCE, AND SINCE v0.3.0 IT IS NOT ASKED TO BE. What the
+ *    user is TOLD comes from the announced phase (`MODEL_SOURCES`); what the
+ *    unit DOES about a bad copy comes from this boolean. Reading one off the
+ *    other is what #28 was: a two-valued answer to a three-valued question,
+ *    contradicting P1 in the one place a user would check it.
  */
 
 /**
@@ -867,6 +935,17 @@ export function serialiseBackend(backend, what = 'Backend') {
  *   still loading while this message goes to nobody. The durable copy at
  *   `ARM_ERROR_KEY` in the `'session'` area is what the deck reads at boot —
  *   see `storageGet` below, which carries the record's shape.
+ *   `ARM_ERROR.code` IS A CLOSED VOCABULARY THE UNIT OWNS, and this is the one
+ *   thing on this interface a Host must get right that `assertHost` structurally
+ *   cannot check — it checks duties, and this is a message nobody sent yet. The
+ *   legal set is `ARM_CODES` in `ui/audio-math.js`, eight members, FIVE OF THEM
+ *   TAB NOUNS. Three deck behaviours are gated on membership: whether the banner
+ *   can be dismissed, whether Restart is offered, and which sentence is printed.
+ *   A Host that invents a code gets an undismissable banner with a Restart
+ *   control that cannot fix it, so since v0.3.0 the deck writes ONE
+ *   `console.error` naming the offending value and the whole legal set, on both
+ *   ways in (`checkArmCode`, #29). It does not throw and it does not change what
+ *   is painted. Pick a member; a new one is a change here, behind a tag.
  *   `ARM_ERROR_CLEARED` retires a refusal the Host has decided no longer
  *   applies. A Host that never sends it leaves a stale banner up until its TTL.
  *

@@ -22,6 +22,7 @@
  */
 
 import { MODEL } from './config.js';
+import { MODEL_SOURCES } from './host.js';
 
 function hex(buf) {
   const b = new Uint8Array(buf);
@@ -145,25 +146,46 @@ function requireWholeBuffer(bytes) {
  * IPC or off a vendored file — would hand back a detached array on the second
  * load. `requireWholeBuffer` above is what says so, in those words.
  *
+ * WHERE THE BYTES CAME FROM IS TAKEN OFF THE PHASE, NOT INFERRED FROM
+ * `fromCache` (#28). The Host announces its phase before any bytes move, and
+ * that announcement is the only three-valued thing on this path: `cache`,
+ * `download`, or `bundled` for a Host that ships the weights beside its binary.
+ * `fromCache` stays what it always was — the retry decision — and is not asked
+ * to double as the provenance, which is how the engine came to say "downloaded"
+ * about a file no request ever touched. See `MODEL_SOURCES` in `./host.js`.
+ *
+ * IT IS THE SUCCESSFUL ATTEMPT'S SOURCE, so `source` is reset per pass: a heal
+ * is a bad `cache` followed by a good `download`, and reporting the first would
+ * word the log line about bytes that were thrown away.
+ *
  * @param {{modelBytes: Function, clearModel: Function}} host the EngineHost
- * @param {(phase:'cache'|'download'|'verify', got:number, total:number)=>void} onProgress
+ * @param {(phase:'cache'|'download'|'bundled'|'verify', got:number, total:number)=>void} onProgress
  * @param {{sha256: string, bytes: number}} pin  see `verifyModel`
- * @returns {Promise<{buffer: ArrayBuffer, fromCache: boolean, ms: number}>}
+ * @returns {Promise<{buffer: ArrayBuffer, fromCache: boolean, source: string|null, ms: number}>}
  */
 export async function loadModel(host, onProgress = () => {}, pin = MODEL) {
   const t0 = performance.now();
+  let source = null;
   // TWO ATTEMPTS AT MOST, and that ceiling is structural rather than a comment:
   // the loop cannot reach a third pass, so a Host that keeps handing over the
   // same corrupt bytes fails rather than downloading them for ever.
   for (let attempt = 1; ; attempt++) {
-    const got = await host.modelBytes(onProgress);
+    source = null;
+    // The Host's progress passes through unchanged; the only thing added is the
+    // ONE READ that records which source it announced. Filtered to the declared
+    // vocabulary so that `'verify'` — which this function announces itself, a
+    // few lines down — can never be mistaken for a provenance.
+    const got = await host.modelBytes((phase, ...rest) => {
+      if (Object.prototype.hasOwnProperty.call(MODEL_SOURCES, phase)) source = phase;
+      onProgress(phase, ...rest);
+    });
     requireWholeBuffer(got.bytes);
     // `got.bytes.length` and not the pin's: a short buffer reports the length it
     // actually has on its way to failing, rather than one it never had.
     onProgress('verify', got.bytes.length, got.bytes.length);
     try {
       await verifyModel(got.bytes, pin);
-      return { buffer: got.bytes.buffer, fromCache: got.fromCache, ms: performance.now() - t0 };
+      return { buffer: got.bytes.buffer, fromCache: got.fromCache, source, ms: performance.now() - t0 };
     } catch (bad) {
       // A clear that itself fails must not become the error the user is shown:
       // `bad` is why we are here, and the ceiling copes with a clear that did
