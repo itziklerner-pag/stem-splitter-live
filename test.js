@@ -8012,8 +8012,18 @@ if (group('offline')) {
        + 'and leave audio no window covers',
       threw(() => makeOfflinePlan(1000, { stride: SEGMENT })) !== null
       && threw(() => makeOfflinePlan(1000, { stride: SEGMENT + 1 })) !== null);
+    /**
+     * THE CONTROL, AND IT IS GUARDED SO IT REDS RATHER THAN KILLING THE BLOCK.
+     * Make the refusal blanket and the bare form throws INSIDE ok()'s argument,
+     * which takes the whole block down: the group guard then reports one red and
+     * 64 assertions never run. A control that can only fail by crashing is a
+     * control that tells you less than it looks like it does.
+     */
+    const insideOk = (() => {
+      try { return makeOfflinePlan(1000, { stride: SEGMENT - 1 }).windows >= 1; } catch { return false; }
+    })();
     ok('...but a stride inside the segment is accepted, so that refusal is not blanket',
-      makeOfflinePlan(1000, { stride: SEGMENT - 1 }).windows >= 1);
+      insideOk);
     ok('a window index outside the plan is refused rather than reading past the track',
       threw(() => windowPlan(3, makeOfflinePlan(1000))) !== null
       && threw(() => windowPlan(-1, makeOfflinePlan(1000))) !== null);
@@ -8233,7 +8243,14 @@ if (group('offline')) {
          * the comparison keeps this an equality — a tolerance here would also
          * accept a neighbouring plane's constant if the two were ever close.
          */
-        const got = STEMS.map((s) => [back.stems[s][0][0], back.stems[s][1][0]]);
+        /**
+         * `back` CAN BE NULL HERE — a tier that wrote its stems into the wrong
+         * directory, or under the wrong names, leaves `get()` with nothing to
+         * return. Read through a stand-in so those defects RED these assertions
+         * instead of throwing and taking the other 20 in this block with them.
+         */
+        const chan = (st, c) => (back && back.stems && back.stems[st] ? back.stems[st][c] : new Float32Array(0));
+        const got = STEMS.map((s) => [chan(s, 0)[0], chan(s, 1)[0]]);
         const want = STEMS.map((s, k) => [Math.fround(planeConst(k * 2)), Math.fround(planeConst(k * 2 + 1))]);
         ok('the twelve planes land as six stereo stems in STEMS order, L before R — a fan-out '
            + 'or an L/R collapse would show here and reconstructs perfectly under an identity '
@@ -8254,7 +8271,7 @@ if (group('offline')) {
         STEMS.forEach((s, k) => {
           [0, 1].forEach((c) => {
             const wantC = Math.fround(planeConst(k * 2 + c));
-            for (const v of back.stems[s][c]) {
+            for (const v of chan(s, c)) {
               const d = Math.abs(v - wantC);
               if (d > worst) worst = d;
               if (v === 0) holes++;
@@ -8607,19 +8624,26 @@ if (group('offline')) {
     const slot = new SeparationSlot();
     const a = slot.claim('A');
     const b = slot.claim('B');
+    /**
+     * READ THROUGH A STAND-IN, so that a slot which stops refusing REDS rather
+     * than throwing on `b.refusal.code` and taking the block with it. The
+     * stand-in's code is deliberately not a member of the vocabulary, so it
+     * cannot accidentally satisfy anything below.
+     */
+    const bRef = b.refusal || { code: 'NO_REFUSAL_AT_ALL', message: '' };
     ok('ONE ahead-of-time run per engine: the second claim is refused BUSY, naming the deck '
        + 'already running, and hands back no job  [entry point: SeparationSlot.claim]',
       a.refusal === null && a.job !== null && slot.deck === 'A'
-      && b.job === null && b.refusal !== null && b.refusal.code === 'BUSY'
-      && /deck A is already separating/.test(b.refusal.message),
-      b.refusal ? `${b.refusal.code}: ${b.refusal.message.slice(0, 48)}...` : 'ACCEPTED TWO RUNS');
+      && b.job === null && b.refusal !== null && bRef.code === 'BUSY'
+      && /deck A is already separating/.test(bRef.message),
+      b.refusal ? `${bRef.code}: ${bRef.message.slice(0, 48)}...` : 'ACCEPTED TWO RUNS');
     /**
      * THROUGH `separateError`, WHICH IS THE ENVELOPE THE ENGINE SENDS. Recording
      * the code off a hand-written literal would prove nothing about the raise
      * site; building the envelope the shipping `case` builds is what puts these
      * two on the same footing as the nine the runner raises.
      */
-    const busyWire = separateError('B', b.refusal.code, b.refusal.message);
+    const busyWire = separateError('B', bRef.code, bRef.message);
     codesSeen.add(busyWire.code);
     ok('...and BUSY reaches the wire as a SEPARATE_ERROR through the one envelope builder, '
        + 'because two runs make the capacity question unanswerable — neither run’s future entry '

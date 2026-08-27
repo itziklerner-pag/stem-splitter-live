@@ -532,12 +532,27 @@ try {
   }
 } finally { restore(); }
 
+/**
+ * THE SHORTEST PREFIX OF THIS ASSERTION'S LINE THAT NAMES ONE ASSERTION AND NO
+ * OTHER. A key has to be a prefix of the NAME rather than of the whole printed
+ * line, because the detail text differs between a PASS and a FAIL of the same
+ * assertion — matching on the printed line would silently stop matching the
+ * moment an assertion started failing, which is the only moment it matters.
+ */
+function uniqueKey(name, all) {
+  for (const len of [40, 58, 80, 110, 150, 220, 400]) {
+    const k = name.slice(0, len);
+    if (all.filter((n) => n.includes(k)).length === 1) return k;
+  }
+  return name;
+}
+
 if (measure) {
   console.log('\n  --measure: the OBSERVED red set per case, as pasteable declarations\n');
   for (const r of rows) {
     if (!r.match) { console.log(`  // ${r.id}: NO MATCH (${r.hits})`); continue; }
-    const keys = r.r.names.fail.map((n) => `'${n.split('  ')[0].slice(0, 58).replace(/'/g, "\\'")}'`);
-    console.log(`  ${r.id}: expect: [${keys.join(', ')}]${r.ran < baseRan ? `, truncates: true // ${r.ran}/${baseRan} ran` : ''}`);
+    const keys = r.r.names.fail.map((n) => `'${uniqueKey(n, baseNames).replace(/'/g, "\\'")}'`);
+    console.log(`  ${r.id}: expect: [${keys.join(', ')}]${r.ran < baseRan ? `, truncates: true, // ${r.ran}/${baseRan} ran` : ','}`);
   }
   process.exit(0);
 }
@@ -573,29 +588,31 @@ for (const r of rows) {
     continue;
   }
   matched++;
-  const observed = new Set(r.r.names.fail);
-  const want = new Set();
-  for (const key of (m.expect || [])) {
-    const { hits } = resolve(key, baseNames);
-    if (hits.length === 1) want.add(hits[0]);
-  }
-  const missing = [...want].filter((n) => !observed.has(n));
-  const extra = [...observed].filter((n) => !want.has(n));
-  if (observed.size) red++;
-  const okSet = !missing.length && !extra.length && want.size > 0;
+  /**
+   * MATCHED BY KEY, IN BOTH DIRECTIONS. A declared key with no red is coverage
+   * that was lost; a red no key claims is coverage that MOVED HERE from
+   * somewhere else — and an aggregate cannot tell the second from nothing at
+   * all, because the union is unchanged either way.
+   */
+  const observed = r.r.names.fail;
+  const keys = m.expect || [];
+  const missing = keys.filter((k) => !observed.some((n) => n.includes(k)));
+  const extra = observed.filter((n) => !keys.some((k) => n.includes(k)));
+  if (observed.length) red++;
+  const okSet = !missing.length && !extra.length && keys.length > 0;
   if (okSet) asDeclared++;
-  if (!observed.size) problems.push(`${r.id}: MATCHES but NO LONGER REDS — decay OR a real coverage loss; find out which`);
-  else if (!want.size) problems.push(`${r.id}: reds ${observed.size} assertion(s) but DECLARES NONE — add an expect set`);
+  if (!observed.length) problems.push(`${r.id}: MATCHES but NO LONGER REDS — decay OR a real coverage loss; find out which`);
+  else if (!keys.length) problems.push(`${r.id}: reds ${observed.length} assertion(s) but DECLARES NONE — add an expect set`);
   else {
-    for (const n of missing) problems.push(`${r.id}: DECLARED red did NOT fail — "${n.split('  ')[0].slice(0, 60)}"`);
-    for (const n of extra) problems.push(`${r.id}: UNDECLARED red — "${n.split('  ')[0].slice(0, 60)}"`);
+    for (const k of missing) problems.push(`${r.id}: DECLARED red did NOT fail — "${k.slice(0, 60)}"`);
+    for (const n of extra) problems.push(`${r.id}: UNDECLARED red — "${n.slice(0, 60)}"`);
   }
   const truncated = r.ran < baseRan;
   if (truncated && !m.truncates) problems.push(`${r.id}: TRUNCATES the suite (${r.ran} of ${baseRan} ran) and does not declare it`);
   if (!truncated && m.truncates) problems.push(`${r.id}: declares truncates:true but all ${r.ran} assertions ran`);
   const where = (r.at || '-').replace('extension/engine/', 'e/').replace('extension/shared/', 's/');
   console.log(`  ${r.id.padEnd(4)}  ${'MATCHES'.padEnd(12)}  `
-    + `${`${observed.size} red${okSet ? '' : ' !'}`.padEnd(12)}  `
+    + `${`${observed.length} red${okSet ? '' : ' !'}`.padEnd(12)}  `
     + `${`${r.ran}/${baseRan}${truncated ? '*' : ''}`.padEnd(6)}  ${where.padEnd(24)}  ${m.what.slice(0, 38)}`);
 }
 
