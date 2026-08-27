@@ -132,7 +132,7 @@
 import { encodeWav, decodeWav, WavStreamEncoder, WavSyncWriter, WavWindowReader } from './extension/shared/wav.js';
 import { pipelineVersion, cacheKey, bytesForSeconds, CacheWriter, planEviction,
   videoIdFromUrl, primeRefusal, commitRefusal, StemCache, CACHE_DIR,
-  CACHE_DIR_32F, separationRefusal,
+  CACHE_DIR_32F, separationRefusal, PRIME_TAIL_MAX_SEC,
   fileIdFromBytes, fileIdentity, fileRefusal, fileCommitRefusal } from './extension/shared/stemcache.js';
 import { CachedDeck, resumeSeek } from './extension/offscreen/cacheddeck.js';
 import {
@@ -163,7 +163,7 @@ import {
 } from './extension/engine/mixer.js';
 import { GpuScheduler, demotionDecision } from './extension/engine/scheduler.js';
 import {
-  LIVE_HOPS, SEAM_XFADE_LAW, STEM_RING_HEADER_BYTES, RING_PLANES, TAU,
+  LIVE_HOPS, SEAM_XFADE_LAW, SEAM_XFADE_MS, STEM_RING_HEADER_BYTES, RING_PLANES, TAU,
   LIVE_CUSHION_SEC, LIVE_LOW_WATER_SEC, MARGINAL_P95_FRACTION, MARGINAL_DROP_RATE, LIVE_HOP_DEFAULT,
   HEALTH_HZ, XF_CURVES, XF_CURVE_DEFAULT, XF_CUT_EDGE, XF_TARGETS, XF_ASSIGN_DEFAULT,
   XF_POSITION_DEFAULT, DECKS, MODEL, STEM_CACHE_MAX_BYTES, STEM_CACHE_32F_MAX_BYTES,
@@ -2128,6 +2128,314 @@ if (group('live')) {
           'recorded so the choice of law is a number, not an opinion');
       }
     }
+  }
+
+  head('live — the drain publishes the tail no chunk can reach (U7, #44)');
+  /**
+   * WHAT THIS IS FOR. `chunk(k)` publishes `[emitFrom, inputEnd - X)`: the last
+   * `X` frames of every model output are held back as one half of a crossfade
+   * whose other half is the next chunk. Publishing frame F therefore needs a
+   * model pass ending at `F + X`, and for a live source that audio does not
+   * exist. Combined with chunks only firing on the hop grid, a recording ends
+   * `F - commit` frames short — under `H + X`, which is 2.05 s at hop 1.95 and
+   * 3.95 s at hop 3.9. `shared/stemcache.js` sized `PRIME_TAIL_MAX_SEC` to
+   * tolerate exactly that and named the fix; `finish()` is the fix.
+   *
+   * WHICH KIND OF TEST — the RENDERING vs REACHABILITY rule at the head of this
+   * file. Reachable by construction on the arithmetic, rendering-only on the
+   * pipeline: this drives the real `LiveEmitter` through the real chunk grid and
+   * the real `finish()`, and the model is replaced by the identity, so it is the
+   * DSP claim in full. It does NOT prove `offscreen/live.js` calls `finish()` at
+   * stop — that is asserted separately, against the pipeline source, below.
+   *
+   * THE ESTIMATOR IS A RESIDUAL AND A COUNT, never a duration: `residualDb`
+   * against the identity model is model-independent by construction, and the
+   * frame count is exact rather than approximately right.
+   */
+  /**
+   * TWO STOP POINTS PER HOP, and the second one is the whole point of the pair.
+   *
+   * The first draft of this block used one arbitrary mid-hop stop, `6*H + 7777`.
+   * Every hop then reported a shortfall of 9982 frames — `7777 + X`, the same
+   * number three times — because the offset, not the hop, was setting it. The
+   * bound `shortBy <= H + X` passed trivially and the claim in the assertion's
+   * own name, "one hop plus the crossfade", was measured nowhere. An estimator
+   * that cannot vary with the quantity it is about is not measuring it
+   * (`AGENTS.md`: never write an assertion whose estimator saturates before the
+   * claim range begins).
+   *
+   *   'mid-hop'    an ordinary stop, somewhere inside a hop
+   *   'worst case' one frame before the next chunk would have fired — the
+   *                largest shortfall the geometry admits, `H + X - 1`, and the
+   *                one `PRIME_TAIL_MAX_SEC` had to be sized against
+   */
+  for (const hop of [1.0, 1.95, 3.9]) {
+   for (const [when, at] of [['mid-hop', 7777], ['worst case', null]]) {
+    const p = makeLivePlan(hop);
+    const em = new LiveEmitter(p, 'linear');
+    const nChunks = 6;
+    /**
+     * Not on the hop grid: a fixture that stopped exactly at `(k+1)*H` would
+     * have `len === X` every time and could not tell the crossfade being
+     * republished from the whole tail being published.
+     */
+    const stopAt = at === null ? (nChunks + 1) * p.H - 1 : nChunks * p.H + at;
+    const x = noise(stopAt + SEGMENT, 31);
+    const src = Array.from({ length: STEM_PLANES }, () => new Float32Array(SEGMENT));
+    const zero = new Float32Array(p.H + p.X);
+    /** the identity "model": hand back exactly the window ending at `inputEnd` */
+    const separate = (inputEnd) => {
+      for (let q = 0; q < STEM_PLANES; q++) {
+        for (let i = 0; i < SEGMENT; i++) {
+          const t = inputEnd - SEGMENT + i;
+          src[q][i] = t < 0 || t >= x.length ? 0 : x[t];
+        }
+      }
+    };
+    const out = new Float32Array(stopAt);
+    for (let k = 0; k < nChunks; k++) {
+      separate((k + 1) * p.H);
+      const e = em.chunk(k, src, zero, zero);
+      out.set(e.planes[0].subarray(0, e.len), e.from);
+    }
+    const shortBy = stopAt - em.commit;
+    /**
+     * The worst case is EXACT, not bounded: `H + X - 1`. Asserting only
+     * `<= H + X` there would be the saturating estimator this pair exists to
+     * replace — it would pass on a shortfall of one frame.
+     */
+    const wantH = Math.round(hop * SR), wantX = Math.round((SEAM_XFADE_MS / 1000) * SR);
+    const want = at === null ? wantH + wantX - 1 : at + wantX;
+    ok(`hop ${hop}s, ${when}: WITHOUT the drain a recording ends ${shortBy} frames (${(shortBy / SR).toFixed(2)} s) short  `
+      + '[entry point: engine/live.js LiveEmitter.chunk(), whose emitTo is inputEnd - X by definition]',
+      shortBy === want,
+      shortBy === want
+        ? `${shortBy} = ${at === null ? `H ${p.H} + X ${p.X} - 1, the largest the geometry admits` : `${at} into the hop + X ${p.X}`}`
+        : `expected ${want}, got ${shortBy} — the shortfall is not the one the geometry predicts`);
+
+    separate(stopAt);
+    const fin = em.finish(src, zero, zero, stopAt);
+    out.set(fin.planes[0].subarray(0, fin.len), fin.from);
+    ok(`hop ${hop}s, ${when}: THE DRAIN RECOVERS THE LAST BUFFER — published frames equal captured frames EXACTLY  `
+      + '[entry point: engine/live.js LiveEmitter.finish(), reached from offscreen/live.js at stop]',
+      em.commit === stopAt && fin.from + fin.len === stopAt && fin.len === shortBy,
+      em.commit === stopAt
+        ? `${stopAt} captured, ${stopAt} published, the drain carrying ${fin.len}`
+        : `${em.commit} published against ${stopAt} captured — still ${stopAt - em.commit} short`);
+
+    const db = residualDb(out, x.subarray(0, stopAt));
+    ok(`hop ${hop}s, ${when}: ...and the recovered tail is THE AUDIO, at the right offset — identity residual `
+      + `${db === -Infinity ? '-inf' : db.toFixed(1)} dB over the WHOLE recording (gate < -120)`,
+      db < -120,
+      'this catches a drain that reads the wrong part of the model output, or publishes at the wrong frame. '
+      + 'IT CANNOT SEE THE CROSSFADE: under an identity model the two overlapping passes are the SAME '
+      + 'samples, so complementary linear ramps sum back to the signal and a butt splice reconstructs '
+      + 'just as perfectly. The join is asserted separately, below, on passes that DIFFER');
+   }
+  }
+
+  /**
+   * ...AND THE CONSTANT THAT WAS SIZED AGAINST THAT SHORTFALL IS STILL BIG
+   * ENOUGH FOR IT. `PRIME_TAIL_MAX_SEC` is the tolerance `commitRefusal` applies
+   * to a prime that ends early, and its comment says the ceiling is "one
+   * output-buffer depth (2.4-4 s at the shipping hops)" — which is `H + X`,
+   * computed here from the real ladder rather than re-typed. Adding a hop to
+   * `LIVE_HOPS` longer than `PRIME_TAIL_MAX_SEC - X` would make every prime at
+   * that hop refuse, with nothing else in the tree to say why. Over the ladder
+   * as it stands the worst case is 3.95 s against a 6.0 s tolerance.
+   */
+  {
+    const worst = LIVE_HOPS.map((h) => { const p = makeLivePlan(h); return { h, sec: (p.H + p.X) / SR }; });
+    const over = worst.filter((w) => w.sec > PRIME_TAIL_MAX_SEC);
+    ok('every hop in LIVE_HOPS leaves a tail PRIME_TAIL_MAX_SEC can still tolerate — the constant and the ladder agree  '
+      + '[entry point: shared/stemcache.js commitRefusal(), against engine/live.js makeLivePlan() over shared/config.js LIVE_HOPS]',
+      LIVE_HOPS.length > 0 && over.length === 0,
+      over.length
+        ? `hop ${over.map((w) => `${w.h}s needs ${w.sec.toFixed(2)}s`).join(', ')} against PRIME_TAIL_MAX_SEC ${PRIME_TAIL_MAX_SEC}s — `
+          + 'every prime at that hop would refuse for a reason nothing names'
+        : `worst is hop ${worst.reduce((a, w) => (w.sec > a.sec ? w : a)).h}s at `
+          + `${Math.max(...worst.map((w) => w.sec)).toFixed(2)}s against ${PRIME_TAIL_MAX_SEC}s`);
+  }
+
+  /**
+   * THE DRAIN'S JOIN IS A CROSSFADE, MEASURED ON PASSES THAT DIFFER.
+   *
+   * WHY THIS EXISTS AND THE RESIDUAL ABOVE DOES NOT COVER IT — found by
+   * mutation, which is the only reason it is here. Setting `xf = 0` in
+   * `finish()` — a butt splice, the exact defect the crossfade prevents — left
+   * the identity residual at `-inf` and every assertion above green. Under an
+   * identity model the held tail and the final pass are the SAME samples over
+   * the overlap, and complementary linear ramps sum to 1, so the crossfade is
+   * arithmetically a no-op and its absence is invisible. An assertion that
+   * cannot distinguish the hypothesis from its negation is not an assertion.
+   *
+   * THE INSTRUMENT: two passes that DIFFER by a known constant, over a SILENT
+   * input, so the only thing in the output is the difference. The model returns
+   * `DELTA * passIndex`. The held tail then carries `DELTA*(n-1)` and the final
+   * pass carries `DELTA*n` over the same frames, and the two readings are:
+   *
+   *   crossfaded : the output RAMPS between them across X frames
+   *                -> largest sample-to-sample step is about DELTA / X
+   *   butt splice: the output STEPS between them in one sample
+   *                -> largest step is DELTA
+   *
+   * A ratio of X — 2205 at the shipping crossfade — which is dynamic range, not
+   * a threshold picked to pass. It is a count and a ratio, never a clock.
+   */
+  {
+    const p = makeLivePlan(1.95);
+    const em = new LiveEmitter(p, 'linear');
+    const DELTA = 1.0;
+    const src = Array.from({ length: STEM_PLANES }, () => new Float32Array(SEGMENT));
+    const zero = new Float32Array(p.H + p.X);
+    const pass = (n) => { for (let q = 0; q < STEM_PLANES; q++) src[q].fill(DELTA * n); };
+    const nChunks = 3;
+    const stopAt = nChunks * p.H + 5000;
+    const out = new Float32Array(stopAt);
+    for (let k = 0; k < nChunks; k++) {
+      pass(k);
+      const e = em.chunk(k, src, zero, zero);
+      out.set(e.planes[0].subarray(0, e.len), e.from);
+    }
+    const joinAt = em.commit;      // the first frame the drain publishes
+    pass(nChunks);
+    const fin = em.finish(src, zero, zero, stopAt);
+    out.set(fin.planes[0].subarray(0, fin.len), fin.from);
+
+    /** Largest single-sample step anywhere in a window straddling the join. */
+    let maxStep = 0;
+    for (let i = Math.max(1, joinAt - 8); i < Math.min(stopAt, joinAt + p.X + 8); i++) {
+      maxStep = Math.max(maxStep, Math.abs(out[i] - out[i - 1]));
+    }
+    const ramped = DELTA / p.X;
+    ok('THE DRAIN JOINS WITH A CROSSFADE, NOT A BUTT SPLICE — the step across the join is the ramp\u2019s, '
+      + `not the whole discontinuity (${maxStep.toExponential(2)} against a spliced ${DELTA.toFixed(1)}, ramp ${ramped.toExponential(2)})  `
+      + '[entry point: engine/live.js LiveEmitter.finish(), the xf branch that reads this.tail]',
+      maxStep < ramped * 4 && maxStep > 0,
+      maxStep >= ramped * 4
+        ? `a step of ${maxStep.toExponential(2)} across the join — the held tail was not faded against, `
+          + 'so the recording ends on an audible click'
+        : maxStep === 0
+          ? 'the two passes did not differ at all, so this measured nothing'
+          : `${maxStep.toExponential(2)}, within 4x the ${ramped.toExponential(2)} a correct ramp produces`);
+
+    /**
+     * THE CONTROL, and it is not optional: the assertion above passes trivially
+     * if the fixture never created a discontinuity to smooth. This asserts the
+     * two passes really do differ by DELTA where they overlap, measured on the
+     * published output on either side of the join.
+     */
+    const before = out[joinAt - 1], after = out[Math.min(stopAt - 1, joinAt + p.X + 4)];
+    ok('...and THE CONTROL: the two passes really differ across that join, so the assertion above had a step to smooth',
+      Math.abs(after - before) > DELTA * 0.5,
+      `${before.toFixed(4)} before the join, ${after.toFixed(4)} after — a difference of ${Math.abs(after - before).toFixed(4)} `
+      + `against the ${DELTA.toFixed(1)} the passes were built to differ by`);
+  }
+
+  /**
+   * THE REFUSALS. Every one of them is a stop path being called twice or late,
+   * which is what stop paths do. A drain that quietly published again would
+   * append audio to a file the user was told was finished.
+   */
+  {
+    const p = makeLivePlan(1.95);
+    const zero = new Float32Array(p.H + p.X);
+    const src = Array.from({ length: STEM_PLANES }, () => new Float32Array(SEGMENT));
+    /** A fresh emitter that has published chunk 0, i.e. is mid-recording. */
+    const primed = () => {
+      const em = new LiveEmitter(p, 'linear');
+      em.chunk(0, src, zero, zero);
+      return em;
+    };
+    const threw = (fn) => { try { fn(); return null; } catch (e) { return String((e && e.message) || e); } };
+
+    const a = primed();
+    a.finish(src, zero, zero, p.H + 1000);
+    const twice = threw(() => a.finish(src, zero, zero, p.H + 2000));
+    ok('finish() TWICE is refused, and the refusal names the frame the recording ended at  '
+      + '[entry point: engine/live.js LiveEmitter.finish(), the double-call a stop path produces]',
+      twice != null && twice.includes('twice') && twice.includes(String(p.H + 1000)),
+      twice == null
+        ? 'a second finish() published again — audio captured after the recording ended, appended to it'
+        : twice);
+
+    const b = primed();
+    b.finish(src, zero, zero, p.H + 1000);
+    const late = threw(() => b.chunk(1, src, zero, zero));
+    ok('...and a chunk after finish() is refused BY NAME, not as a non-contiguity error  '
+      + '[entry point: LiveEmitter.chunk(); after finish() the commit point is off the hop grid]',
+      late != null && /after finish\(\)/.test(late) && !/expected/.test(late),
+      late == null ? 'a chunk was published into a finished recording'
+        : /expected/.test(late) ? `it reported non-contiguity, which sends a reader hunting a dropped chunk: ${late}` : late);
+
+    const c = primed();
+    c.finish(src, zero, zero, p.H + 1000);
+    const lateGap = threw(() => c.gap(1000, zero, zero));
+    ok('...and so is a gap, which has no contiguity check of its own and would otherwise append unseparated audio',
+      lateGap != null && /after finish\(\)/.test(lateGap),
+      lateGap == null ? 'a passthrough span was appended to a finished recording' : lateGap);
+
+    const d = primed();
+    const back = threw(() => d.finish(src, zero, zero, d.commit));
+    ok('finish() AT the commit point is refused rather than publishing zero frames',
+      back != null && back.includes('already published'),
+      back == null ? 'it published a zero-length span and marked the recording finished' : back);
+
+    const e = primed();
+    const far = threw(() => e.finish(src, zero, zero, e.commit + p.H + p.X + 1));
+    ok('finish() BEYOND one hop plus the crossfade is refused and points at gap() — a span that long means chunks were skipped  '
+      + '[entry point: LiveEmitter.finish(); the bound is structural, chunk k fires only once the capture passes (k+1)*H]',
+      far != null && far.includes('gap()'),
+      far == null
+        ? `it drained ${p.H + p.X + 1} frames out of a ${p.L}-frame model output, separating the span with `
+          + 'whatever context happened to be left'
+        : far);
+
+    /**
+     * A DRAIN SHORTER THAN THE CROSSFADE ENDS MID-FADE, and mid-fade is the
+     * right answer rather than an edge case to special-case away.
+     *
+     * The recording stops inside what would have been a join. Those frames
+     * genuinely are the blend at that point of the ramp — mostly the previous
+     * pass, tipping towards the new one — so `finish()` uses the SAME
+     * length-`X` ramps a full join would and simply stops early. The tempting
+     * "fix" is `makeFades(len)`, compressing a whole crossfade into the
+     * remaining span, which would race the ramp to completion and end the
+     * recording on the new pass at full level after 2 ms.
+     *
+     * WHAT THIS DOES NOT ASSERT, said plainly because the first version of it
+     * did and was wrong: it is NOT about the `Math.min(X, len)` clamp. Watched —
+     * removing that clamp changes nothing observable, because an out-of-bounds
+     * typed-array write is silently dropped and the reads that go past the model
+     * output land only in frames that are dropped anyway. The clamp stays as
+     * bounds hygiene; it is not what this measures, and an assertion that named
+     * it would be one that cannot fail.
+     *
+     * WHICH KIND — a contract claim on `finish()` as a pure method. Today's pump
+     * cannot produce a drain this short (chunk k fires only once the capture
+     * clock passes `(k+1)*H`, so the leftover is always at least `X`); a future
+     * caller — U11, or a second Host's own stop path — can.
+     */
+    const f = primed();
+    const DELTA = 1.0;
+    for (let q = 0; q < STEM_PLANES; q++) src[q].fill(DELTA);   // the new pass, 1.0 everywhere
+    const shortLen = 100;
+    const shortDrain = f.finish(src, zero, zero, f.commit + shortLen);
+    // The held tail is 0 (chunk 0 ran over silence), so the output IS the fade-in
+    // ramp: fi[i] = (i+0.5)/X. Ending mid-fade means the last sample is at about
+    // shortLen/X of full, not at full.
+    const last = shortDrain.planes[0][shortLen - 1];
+    const partial = (shortLen - 0.5) / p.X;
+    ok(`a drain SHORTER than the crossfade ENDS MID-FADE rather than racing the ramp to completion `
+      + `(last sample ${last.toExponential(2)} of ${DELTA.toFixed(1)}, the ramp\u2019s ${partial.toExponential(2)})  `
+      + '[entry point: LiveEmitter.finish() as a pure method — today\u2019s pump cannot reach this, a future caller can]',
+      shortDrain.len === shortLen && Math.abs(last - partial) < partial * 0.05,
+      shortDrain.len !== shortLen
+        ? `it published ${shortDrain.len} frames for a ${shortLen}-frame span`
+        : last > partial * 4
+          ? `the last sample is ${last.toExponential(2)} — the ramp was compressed into the remaining span, `
+            + 'so a recording that stops 2 ms into a join ends at full level on the new pass'
+          : `${shortDrain.len} frames, ending at ${last.toExponential(2)} against the ${partial.toExponential(2)} the length-X ramp gives`);
   }
 
   head('live — all twelve stem planes are sample-aligned (Δ must be 0, AUDIO.md §8.1)');

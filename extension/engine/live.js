@@ -141,6 +141,8 @@ export class LiveEmitter {
     /** scratch: RING_PLANES planes of H frames (the largest publication) */
     this.planes = Array.from({ length: RING_PLANES }, () => new Float32Array(plan.H));
     this.commit = 0;   // next absolute frame to publish
+    /** set by `finish()`; nothing may be published after the last publication */
+    this.finished = false;
   }
 
   /**
@@ -153,6 +155,12 @@ export class LiveEmitter {
    */
   chunk(k, src, mixL, mixR) {
     const p = this.p, c = chunkPlan(k, p), X = p.X, len = c.emitLen;
+    // After `finish()` the commit point is off the hop grid, so this would throw
+    // the non-contiguity error below and send a reader hunting for a dropped
+    // chunk. Name the real cause instead: the recording is over.
+    if (this.finished) {
+      throw new Error(`live: chunk ${k} after finish() — this recording ended at frame ${this.commit}`);
+    }
     if (c.emitFrom !== this.commit) {
       throw new Error(`live: chunk ${k} starts at ${c.emitFrom}, expected ${this.commit}`);
     }
@@ -202,6 +210,12 @@ export class LiveEmitter {
    */
   gap(len, mixL, mixR) {
     const p = this.p, X = p.X;
+    // `gap()` has no contiguity check of its own — it publishes from `commit`
+    // wherever that is — so unlike `chunk()` it would silently append
+    // unseparated audio to a finished recording.
+    if (this.finished) {
+      throw new Error(`live: gap after finish() — this recording ended at frame ${this.commit}`);
+    }
     if (len > p.H) throw new Error(`live: gap ${len} exceeds one hop ${p.H}`);
     const entering = !this.passActive;
     const xf = entering && this.haveTail ? Math.min(X, len) : 0;
@@ -219,6 +233,131 @@ export class LiveEmitter {
     const from = this.commit;
     this.commit += len;
     return { from, len, planes: this.planes };
+  }
+
+  /**
+   * THE LAST PUBLICATION. Everything captured that no `chunk()` can ever reach.
+   *
+   * WHY A RECORDING IS SYSTEMATICALLY SHORT WITHOUT THIS, in the geometry's own
+   * terms rather than as a symptom. `chunk(k)` publishes `[emitFrom, emitTo)`
+   * with `emitTo = inputEnd - X`: the last `X` frames of every model output are
+   * HELD BACK, because they are one half of a crossfade whose other half is the
+   * next chunk. So publishing frame F needs a model pass ending at `F + X` —
+   * audio from AFTER F, which for a live source does not exist yet. The
+   * shortfall is therefore structural and it is not the crossfade alone:
+   * `chunk(k)` only fires once the capture clock passes `(k+1)*H`, so at the
+   * moment capture stops at frame F the unpublished span is
+   *
+   *     F - commit  =  F - ((k+1)*H - X)   <   H + X
+   *
+   * — one hop plus the crossfade. 2.05 s at hop 1.95 and 3.95 s at hop 3.9,
+   * which is what `shared/stemcache.js`'s `PRIME_TAIL_MAX_SEC` was sized to
+   * tolerate and what its "upgrade path: drain the pipeline's ring after the
+   * capture ends" names. For a cache entry that tail is an outro. For a
+   * RECORDING it is the thing the user pressed stop after.
+   *
+   * WHAT MAKES THE FINAL PASS LEGAL where a chunk is not: there is no next
+   * chunk, so there is nothing to hold a tail back FOR. The input window still
+   * ends at real captured audio — this invents no samples and reads nothing
+   * beyond `inputEnd` — it simply publishes the whole of what it separated
+   * instead of all but the last `X` frames.
+   *
+   * IT IS NOT A `chunk()` WITH A FLAG. The joins are identical and deliberately
+   * so — the same crossfade against the same held tail, the same passthrough
+   * fade-out — but the exit is not: no tail is retained and `haveTail` goes
+   * false, so a second call cannot publish the join twice. That is enforced
+   * below rather than left to the caller, because the caller is a stop path and
+   * stop paths get called twice.
+   *
+   * ONE-SHOT SCRATCH, ALLOCATED HERE. `this.planes` is `H` frames because that
+   * is the largest a chunk can publish; this can publish `H + X`. The
+   * allocation is per RECORDING, not per hop, which is the distinction the
+   * retained-buffer count asserts — growing the steady-state scratch by `X` on
+   * every deck for a buffer used once at stop would be the wrong trade.
+   *
+   * @param {Float32Array[]} src STEM_PLANES planes of length L, one model pass
+   *   whose input window ENDS at `inputEnd`
+   * @param {Float32Array} mixL absolute `[commit, inputEnd)` of the captured mix
+   * @param {Float32Array} mixR same
+   * @param {number} inputEnd absolute frame the capture actually stopped at
+   * @returns {{from:number, len:number, planes:Float32Array[]}}
+   */
+  finish(src, mixL, mixR, inputEnd) {
+    const p = this.p, X = p.X;
+    const from = this.commit, len = inputEnd - from;
+    /**
+     * ONCE, AND THE SECOND CALL IS NAMED. A repeat with the same `inputEnd`
+     * would fall out below as "not past the commit point", but a repeat with a
+     * LATER one would not: it would separate audio captured after the recording
+     * ended and append it to a file the user was told was finished. The stop
+     * path is exactly where a double call comes from, so the guard is the state,
+     * not the arithmetic.
+     */
+    if (this.finished) {
+      throw new Error(`live: finish() twice — this recording already ended at frame ${from}`);
+    }
+    /**
+     * FOUR REFUSALS, AND EACH ONE IS A DIFFERENT MISTAKE. They are named
+     * separately because "finish failed" tells a caller nothing, and this
+     * function's caller is a stop path where the alternative to a named throw is
+     * a file that is quietly the wrong length.
+     */
+    if (!this.haveTail && !this.passActive && this.commit === 0 && len <= 0) {
+      throw new Error('live: finish() with nothing captured — there is no recording to end');
+    }
+    if (len <= 0) {
+      throw new Error(`live: finish() at ${inputEnd} is not past the commit point ${from} — `
+        + 'every frame up to there is already published');
+    }
+    if (len > p.H + X) {
+      throw new Error(`live: finish() asked for ${len} frames, more than one hop plus the crossfade `
+        + `(${p.H + X}) — a span that long means chunks were skipped, and a skipped span is gap()'s, `
+        + 'not a drain\u2019s');
+    }
+    /**
+     * WHERE THE PUBLISHED SPAN SITS INSIDE THE MODEL OUTPUT. The window ends at
+     * `inputEnd` and covers `[inputEnd - L, inputEnd)`, and the span ends at
+     * `inputEnd` too — so it is the LAST `len` frames of the output, at offset
+     * `L - len`. `chunk()` computes the same thing through `chunkPlan`, which
+     * cannot be reused here: its `emitTo` is `inputEnd - X` by definition, and
+     * that `- X` is the whole of what this exists to undo.
+     */
+    const o = p.L - len;
+    /**
+     * The join, identical to `chunk()`'s by construction: crossfade the first
+     * `xf` frames against whatever precedes them, then straight copy. `xf` is
+     * clamped to `len` because a drain can be SHORTER than the crossfade — stop
+     * pressed 10 ms after a chunk landed — and a fade longer than the span it is
+     * fading would read past the end of both ramps.
+     */
+    const xf = (this.haveTail || this.passActive) ? Math.min(X, len) : 0;
+    const fi = this.passActive ? this.li : this.fi;
+    const fo = this.fo;
+    const planes = Array.from({ length: RING_PLANES }, () => new Float32Array(len));
+    for (let q = 0; q < STEM_PLANES; q++) {
+      const s = src[q], d = planes[q], t = this.tail[q];
+      if (xf === 0) {
+        for (let i = 0; i < len; i++) d[i] = s[o + i];
+      } else if (this.passActive) {
+        for (let i = 0; i < xf; i++) d[i] = s[o + i] * fi[i];
+        for (let i = xf; i < len; i++) d[i] = s[o + i];
+      } else {
+        for (let i = 0; i < xf; i++) d[i] = t[i] * fo[i] + s[o + i] * fi[i];
+        for (let i = xf; i < len; i++) d[i] = s[o + i];
+      }
+    }
+    const pl = planes[PASS_PLANE_L], pr = planes[PASS_PLANE_R];
+    if (this.passActive) {
+      for (let i = 0; i < xf; i++) { pl[i] = mixL[i] * this.lo[i]; pr[i] = mixR[i] * this.lo[i]; }
+      this.passActive = false;
+    }
+    // NOTHING IS HELD BACK, and `haveTail` says so: the tail this would have
+    // kept has just been published, and a second finish() must not join against
+    // a fade that is already in the file.
+    this.haveTail = false;
+    this.finished = true;
+    this.commit = inputEnd;
+    return { from, len, planes };
   }
 }
 
