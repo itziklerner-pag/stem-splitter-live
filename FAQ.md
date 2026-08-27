@@ -24,6 +24,21 @@ version that can see the future. What you *can* do is pick a shorter hop if your
 machine is fast enough — the deck offers the choice and tells you when it cannot
 keep up.
 
+### What about a file? Is it just as far behind?
+
+No — and the reason is the same one as above, which is exactly why the two paths
+run different windows.
+
+The delay exists because the model can only separate sound it has already
+heard, so a **live capture** (a tab, a microphone) must run a *causal* window
+that only ever looks back. A **file** cannot be captured, but it also cannot
+disappear: the model may look at any part of it in any order, because the whole
+of it is already there. The ahead-of-time path uses that freedom — it runs the
+*symmetric* window, advancing by a fixed stride and crossfading the overlaps, so
+there is no "behind" at all and nothing needs to be predicted. The live delay is
+not a limitation carried over to files; it is the price of not seeing the
+future, and a file can always see the future.
+
 ### Why does the first few seconds of a track sound rough?
 
 For roughly the first 8 seconds the model has no history to work with — its

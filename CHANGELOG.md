@@ -78,6 +78,31 @@ baked in. This extension's own Host still refuses every destination.
   if the observed set differs in either direction. A pass count cannot see
   coverage migrating from one mutation to another, because the union it reports
   is unchanged.
+### Added — for anyone building on this
+
+None of this is visible in the browser. It is here because the tag is what a
+second product pins.
+
+- **An ahead-of-time separation runner for a File source.** `SEPARATE_START`
+  drives a whole run to a 32f entry: `sourceBytes` → `decodeAudioData` at the
+  model's clock → STRIDE-advanced symmetric windows → `Deck.infer()` → weighted
+  overlap-add with linear fades and edge normalisation → `CacheWriter` → commit.
+  The runner refuses a second run, refuses a geometry that is not the tier's,
+  reports a decode failure as a named error rather than a throw, and cancels
+  between windows so a cancelled run commits nothing
+  ([#41](https://github.com/itziklerner-pag/stem-splitter-live/issues/41)).
+- **The geometry note, in `FAQ.md` and here: the File source runs the symmetric
+  offline geometry; Live runs causal, and why.** Live capture cannot see the
+  future, so the causal window is the price of not seeing it; a file always can
+  — the whole of it is already there — so the ahead-of-time path uses a
+  symmetric window advanced by a fixed stride, crossfaded at the overlaps, with
+  no "behind" at all.
+- **C4 — the L-rule is ratified rather than tolerated.** A File source is
+  decoded at the model's clock, on the engine's single 44 100 Hz
+  `AudioContext`; Blink resamples a file that is not already at 44 100, with no
+  capture clock in the path and no JS resampler anywhere. `CONTRIBUTING.md` and
+  ADR 0001 amendment A5 carry the sentence, so it ships inside the tag instead
+  of in a review.
 
 ## [0.3.1] — 2026-08-27
 
