@@ -237,13 +237,18 @@ export const PRIME_START_MAX_SEC = 1.0;
  * How much of the tail a prime may be missing and still commit.
  *
  * The live pipeline is causal: when the video reaches the end, the last output
- * buffer's worth of captured audio has not been separated yet and never will be,
- * because the capture stops with it. Every prime is about one buffer short.
+ * buffer's worth of captured audio has not been separated yet, because
+ * `chunk(k)` holds back the crossfade its successor will need and no successor
+ * is coming. Every prime is up to one hop plus the crossfade short.
  *
  * ponytail: the cached track ends up to this much before the video does. Ceiling
  * is one output-buffer depth (2.4-4 s at the shipping hops), which on music is an
- * outro tail rather than a downbeat. Upgrade path: drain the pipeline's ring
- * after the capture ends — `LivePipeline` has no drain path today.
+ * outro tail rather than a downbeat. THE UPGRADE PATH THIS ONCE NAMED HAS LANDED
+ * (U7, #44): `LivePipeline.drain()` runs one last pass at stop, so the tolerance
+ * is now for a drain that was ABANDONED — the inference failed, was demoted, or
+ * a teardown could not wait for it — rather than for a shortfall that is
+ * structural. `test.js` group('live') gates the two against each other: every
+ * hop in `LIVE_HOPS` must leave a tail this constant can still tolerate.
  */
 export const PRIME_TAIL_MAX_SEC = 6.0;
 

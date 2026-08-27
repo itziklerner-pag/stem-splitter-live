@@ -91,7 +91,7 @@ const BASE = '5993d32';
 const SUBJECTS = {
   E: { path: 'extension/engine/live.js',      sha: 'cbf3c2498172454630d3eb4037442f888f723523e2afa57cd37832af73f8e33c' },
   L: { path: 'extension/offscreen/live.js',   sha: '5d61e4e324827eb77e84076f6bf770f1ab9c189d569ea6a8f03531583e45a833' },
-  S: { path: 'extension/shared/stemcache.js', sha: '8ba52e76bd21fa607df841589c84eb2bc9adfcc2308804dacdcebbf18764357a' },
+  S: { path: 'extension/shared/stemcache.js', sha: 'd5f49c9ac81d0fcd5679fb22d9db92e7c05164a9a5356217a5c9f1cfb8a2746c' },
   D: { path: 'extension/offscreen/deck.js',   sha: '5330c458b77bc26f70738f0f0d0845517c715aca842a3ef1ad59a5f2cbeb896b' },
   /**
    * THE FIXTURE IS A SUBJECT TOO, for the CONTROL assertions and only for them.
@@ -101,7 +101,7 @@ const SUBJECTS = {
    * every row that uses it, because a fixture mutation is evidence about the
    * control and about nothing else.
    */
-  F: { path: 'test.js', sha: 'ffe8decdf1b0fb7b1339b2d20b79870a1ac9730d74b829f82438f6ba66d015f6' },
+  F: { path: 'test.js', sha: '440fddd6851f61d123946b1e51d3ca1c8cce671f8ae3ca517befa1b776b93b04' },
 };
 
 /**

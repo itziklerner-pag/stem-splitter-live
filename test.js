@@ -2125,23 +2125,23 @@ if (group('live')) {
    *                                 -> bufcount
    *   M24  offscreen/deck.js:508    dispose() awaits a full drain — a teardown blocks on one more inference
    *                                 -> dispose
-   *   M25  shared/stemcache.js:557  recordingRefusal() refuses a drop-ended pass instead of delivering what it captured
+   *   M25  shared/stemcache.js:562  recordingRefusal() refuses a drop-ended pass instead of delivering what it captured
    *                                 -> deliver, refuse
-   *   M26  shared/stemcache.js:557  recordingRefusal() delivers a pass that captured NOTHING
+   *   M26  shared/stemcache.js:562  recordingRefusal() delivers a pass that captured NOTHING
    *                                 -> refuse
-   *   M27  shared/stemcache.js:533  a seek and a drop are worded ALIKE — the shared mechanism flattens the difference
+   *   M27  shared/stemcache.js:538  a seek and a drop are worded ALIKE — the shared mechanism flattens the difference
    *                                 -> distinct
-   *   M28  shared/stemcache.js:566  an end reason this unit has no wording for is ACCEPTED
+   *   M28  shared/stemcache.js:571  an end reason this unit has no wording for is ACCEPTED
    *                                 -> invented
-   *   M29  shared/stemcache.js:584  passEndNote() builds a sentence with a hole in it for an unknown reason
+   *   M29  shared/stemcache.js:589  passEndNote() builds a sentence with a hole in it for an unknown reason
    *                                 -> note0
-   *   M30  shared/stemcache.js:586  passEndNote() drops the count, so a drop-ended pass cannot say how many
+   *   M30  shared/stemcache.js:591  passEndNote() drops the count, so a drop-ended pass cannot say how many
    *                                 -> howmany, english
-   *   M31  shared/stemcache.js:586  passEndNote() prints "(0 dropped chunks)" on a clean pass — a fault report where there is no fault
+   *   M31  shared/stemcache.js:591  passEndNote() prints "(0 dropped chunks)" on a clean pass — a fault report where there is no fault
    *                                 -> clean
-   *   M32  shared/stemcache.js:587  passEndNote() does not pluralise — "1 dropped chunks"
+   *   M32  shared/stemcache.js:592  passEndNote() does not pluralise — "1 dropped chunks"
    *                                 -> english
-   *   M33  shared/stemcache.js:248  PRIME_TAIL_MAX_SEC is cut below the tail the shipping ladder leaves (6.0 -> 2.0 s)
+   *   M33  shared/stemcache.js:253  PRIME_TAIL_MAX_SEC is cut below the tail the shipping ladder leaves (6.0 -> 2.0 s)
    *                                 -> tailconst
    *   M35  offscreen/live.js:855    endPass() silently ignores an ordinary stop, so a clean pass records no reason at all
    *                                 -> plain
