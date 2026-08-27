@@ -109,13 +109,13 @@ const SUITE = 'test.js';
  * message that you did.
  */
 const CUT = {
-  base: '5993d32',
+  base: 'd0ab7fc',
   slice: 'U5a — the ahead-of-time separation runner (#41)',
   files: {
     'extension/engine/offline.js': '443bd355019ec2b3bcce6c8725e5696e5a8c93a26db9fa2e8069309f48ed5688',
-    'extension/shared/stemcache.js': '37cba4c8ddd7ef6e8a106a9eeca6adb45b4febc9b66039ccfb994c77f8c71a30',
+    'extension/shared/stemcache.js': 'a234f2e4b1060f832a1d10e934a97272beb134e97b24dc8eebb90df9eda69f40',
     'extension/engine/live.js': '7965f8b6d0b4809d49cd5c919616e597e9fea65f7956fbeafdd1a05689522a53',
-    'test.js': '9e802662e1e39b9612bc8f527da09755c408a3c36a7223087b91190c4562987d',
+    'test.js': 'ff241e4808fb9fdb100101e334d1253f08e1aa60f6649ce86ae144ec371ca97f',
   },
 };
 
