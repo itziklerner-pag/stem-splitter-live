@@ -117,7 +117,7 @@ export const ANCHORED_AT = {
     [EXPORT]: 'b6c953f2ca7d409efc4178a22dd52209049aa9331202eae7932f810796c7b758',
     [WAV]: 'd9e06b208d4b1051ced3a0b46991b83a3bab397fd21b56dc4b78d1275ae531ac',
     [ENGINE]: '84660beb44179ba0c98ad6adc1fce6c2e322f2b67ae48344fcfddca3d15184b5',
-    [SUITE]: 'e5745bef2ffa9894a10a7f629e1753f2f4f731937027b87f6f19264c0a8278c8',
+    [SUITE]: 'fda301b09bf882aded149724e20b6b662bc7479c7c5d01b180f331217c3194eb',
     [CACHE]: 'afa77f527575a0e48a401cb2618417d963d879c88996a6932e7c34109ff6f578',
   },
 };
@@ -424,6 +424,7 @@ export const MUTATIONS = [
     why: 'the window is read one byte late — plausible audio from the wrong place',
     aims: 'a window in the MIDDLE of the file is the same samples decodeWav reads there; the bit-identity assertions',
     reds: [
+      "THE PLAN THE HOST RECEIVES IS A COPY — a Host that rewri",
       "THE RUN COMPLETES over a real StemCache in the 32f tier ",
       "...EXPORT_DONE reports exactly the names the Host was gi",
       "...and EXPORT_DONE.bytes IS the number of bytes that rea",
@@ -750,6 +751,17 @@ export const MUTATIONS = [
     ],
     find: '    if (!Number.isInteger(frames) || frames <= 0) {',
     to: '    if (false) {',
+  },
+  {
+    id: 'M49',
+    file: EXPORT,
+    why: 'the live names array is handed to the Host instead of a copy, so a Host that sorts or de-duplicates `plan.files` rewrites the run\'s own names',
+    aims: 'THE PLAN THE HOST RECEIVES IS A COPY',
+    reds: [
+      "THE PLAN THE HOST RECEIVES IS A COPY — a Host that rewri",
+    ],
+    find: '      sinks = await this.exportSink({ title, files: names.slice() });',
+    to: '      sinks = await this.exportSink({ title, files: names });',
   },
   {
     id: 'M48',

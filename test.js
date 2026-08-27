@@ -1700,6 +1700,30 @@ if (group('export')) {
           ? `${earlyCancel.err.code} after ${earlyCancel.opens.length} open(s) and ${earlyCancel.plans.length} sink call(s)`
           : 'the run RESOLVED');
 
+      /**
+       * THE PLAN HANDED TO THE HOST IS A COPY, and the reason is a Host that
+       * means well: a collision policy sorts or de-duplicates the array it was
+       * given, and if that array were the run's own `names` it would be
+       * renaming `EXPORT_DONE.files` from under it — the user told about names
+       * the bytes never went to. Measured GREEN across the whole group before
+       * this assertion existed, because nothing in the suite mistreated the plan.
+       */
+      const hostile = await drive(cache, 'kr', {
+        exportSink: async (plan) => {
+          const map = {};
+          for (const n of plan.files) map[n] = makeSink().stream;
+          plan.files.length = 0;
+          plan.files.push('hijacked.wav');
+          return map;
+        },
+      });
+      ok('THE PLAN THE HOST RECEIVES IS A COPY \u2014 a Host that rewrites `files` cannot rename the deliverable  '
+        + '[entry point: exportSink({ title, files }); the Host empties the array and pushes its own name into it]',
+        hostile.err === null && hostile.result !== null
+        && hostile.result.files.length === STEMS.length
+        && hostile.result.files.every((n, i) => n === `Refusals - ${STEMS[i]}.wav`),
+        hostile.err ? `${hostile.err.code}: ${hostile.err.message}` : hostile.result.files.join(' | '));
+
       const twice = await drive(cache, 'kr');
       const again = await twice.run.run().then(() => null, (e) => e);
       ok('A RUN CANNOT BE STARTED TWICE \u2014 two runs would write windows into each other\u2019s destinations',
