@@ -461,7 +461,20 @@ export class Deck {
   /** Stop the capture graph and release the tab. Live playback is stopped first. */
   async detach() {
     if (this.status !== 'recording') return;
-    await this.live.stop();
+    /**
+     * R5 — THE TRACKS MUST BE STOPPED EVEN IF THE STOP PATH REJECTS, and this
+     * `.catch` is the asymmetry with `dispose()` below closed. `stop()` awaits
+     * one more inference and publishes it through a HOST-SUPPLIED writer, so it
+     * is a path that can reject for reasons the capture graph has nothing to do
+     * with. Before `drain()` existed, `stop()` contained no `await` at all and
+     * could not reject; it can now, and an unhandled rejection here skips
+     * `getTracks().forEach((t) => t.stop())` seven lines down — the tab stays
+     * captured, the recording indicator stays lit, and only a reload releases
+     * it. Swallowed but NAMED: `drain()` counts its own abandonment, so this
+     * log is for a failure that came from somewhere else in `stop()`.
+     */
+    await this.live.stop().catch((e) => this.s.log(
+      `deck ${this.id} live stop failed, releasing the capture anyway: ${(e && e.message) || e}`));
     if (this.node) { this.node.port.postMessage('stop'); this.node.port.onmessage = null; }
     this.onTick();
     if (this.stream) this.stream.getTracks().forEach((t) => t.stop());   // restores the tab's own audio

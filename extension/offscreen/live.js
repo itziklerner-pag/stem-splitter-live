@@ -1296,79 +1296,131 @@ export class LivePipeline {
     // Nothing to drain, and nothing to count: these are states where no
     // recording is in progress at all.
     if (!p || !this.out || !this.emitter || this.emitter.finished) return;
-    const ring = this.d.ring();
-    if (!ring) { this.drainAbandoned++; this.drainWhy = 'the capture ring is already gone'; return; }
-    const F = ring.writeFrames() - this.baseFrame;
-    const len = F - this.emitter.commit;
-    // The chunk grid already covers everything captured. Not an abandonment:
-    // there is genuinely nothing left, which is the best case.
-    if (len <= 0) return;
-    if (len > p.H + p.X) {
-      // Chunks were skipped and the ladder never filled the span. `finish()`
-      // would refuse this and it would be right to: a span this long is gap()'s
-      // work, not a drain's, and separating it with one pass would publish
-      // audio the model saw almost no context for.
-      this.drainAbandoned++;
-      this.drainWhy = `${len} frames outstanding, more than one hop plus the crossfade (${p.H + p.X})`;
-      return;
-    }
     /**
-     * ONE-SHOT BUFFERS. `passL`/`passR` are `H` frames and the drain can publish
-     * `H + X`, so those cannot be borrowed either — a `subarray(0, len)` on a
-     * short array silently under-reads and would publish the passthrough for
-     * part of the span and stale scratch for the rest.
+     * NOTHING BELOW MAY THROW OUT OF HERE, because `stop()` awaits this and a
+     * REJECTED `stop()` IS A TEARDOWN THAT DID NOT HAPPEN. Measured, not
+     * anticipated: three of the calls below can reject for a reason that is not
+     * this pipeline's — `StemRingWriter.write()` throws on a non-contiguous
+     * `from`, which is reachable after any REFUSED write and a refused write is
+     * a counted, expected condition; `CacheWriter.append()` throws by name on a
+     * short plane array or a length its planes cannot honour; and `recWriter`
+     * is HOST-SUPPLIED, so its failure modes are not this unit's to enumerate.
+     * A throw used to propagate through `stop()` — past `this.recOpen = false`,
+     * past `this.plan = null`, past both `clearTimeout`s and `out.play(false)`
+     * — and on out of `Deck.detach()`, which then never reached
+     * `getTracks().forEach((t) => t.stop())`: the tab stayed captured with its
+     * recording indicator lit and only a reload released it (R5).
+     *
+     * So it is COUNTED here instead, which is also what makes this function's
+     * own headline sentence true rather than aspirational: EVERY exit either
+     * recovers frames or counts the abandonment. A `finally` cannot do this
+     * job — the count has to name what failed.
      */
-    const mixBuf = new ArrayBuffer(2 * SEGMENT * 4);
-    const outBuf = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
-    const passL = new Float32Array(len), passR = new Float32Array(len);
-    const mix = new Float32Array(mixBuf);
-    readWindow(ring, this.baseFrame + F - SEGMENT, SEGMENT,
-      mix.subarray(0, SEGMENT), mix.subarray(SEGMENT, 2 * SEGMENT));
-    readWindow(ring, this.baseFrame + this.emitter.commit, len, passL, passR);
+    const gen = this.gen;
+    try {
+      const ring = this.d.ring();
+      if (!ring) { this.drainAbandoned++; this.drainWhy = 'the capture ring is already gone'; return; }
+      const F = ring.writeFrames() - this.baseFrame;
+      const len = F - this.emitter.commit;
+      // The chunk grid already covers everything captured. Not an abandonment:
+      // there is genuinely nothing left, which is the best case.
+      if (len <= 0) return;
+      if (len > p.H + p.X) {
+        // Chunks were skipped and the ladder never filled the span. `finish()`
+        // would refuse this and it would be right to: a span this long is gap()'s
+        // work, not a drain's, and separating it with one pass would publish
+        // audio the model saw almost no context for.
+        this.drainAbandoned++;
+        this.drainWhy = `${len} frames outstanding, more than one hop plus the crossfade (${p.H + p.X})`;
+        return;
+      }
+      /**
+       * ONE-SHOT BUFFERS. `passL`/`passR` are `H` frames and the drain can publish
+       * `H + X`, so those cannot be borrowed either — a `subarray(0, len)` on a
+       * short array silently under-reads and would publish the passthrough for
+       * part of the span and stale scratch for the rest.
+       */
+      const mixBuf = new ArrayBuffer(2 * SEGMENT * 4);
+      const outBuf = new ArrayBuffer(STEMS.length * 2 * SEGMENT * 4);
+      const passL = new Float32Array(len), passR = new Float32Array(len);
+      const mix = new Float32Array(mixBuf);
+      readWindow(ring, this.baseFrame + F - SEGMENT, SEGMENT,
+        mix.subarray(0, SEGMENT), mix.subarray(SEGMENT, 2 * SEGMENT));
+      readWindow(ring, this.baseFrame + this.emitter.commit, len, passL, passR);
 
-    let res;
-    try {
-      res = await this.d.infer(mixBuf, outBuf, this.budgetMs(), this.deck);
-    } catch (e) {
-      this.drainAbandoned++;
-      this.drainWhy = `the final inference failed: ${String((e && e.message) || e)}`;
-      return;
-    }
-    if (!res || res.demoted) {
-      // The scheduler refused it. There is no later chunk to recover on, so
-      // this is the end of the recording either way.
-      this.drainAbandoned++;
-      this.drainWhy = `the final inference was demoted: ${(res && res.why) || 'no result'}`;
-      return;
-    }
-    // The emitter may have been torn down while the inference was running.
-    if (!this.emitter || this.emitter.finished || !this.out) {
-      this.drainAbandoned++;
-      this.drainWhy = 'the session was disposed while the final inference was running';
-      return;
-    }
-    const flat = new Float32Array(res.stems);
-    const src = [];
-    for (let q = 0; q < STEM_PLANES; q++) src.push(flat.subarray(q * SEGMENT, (q + 1) * SEGMENT));
-    let e;
-    try {
-      e = this.emitter.finish(src, passL, passR, F);
+      let res;
+      try {
+        res = await this.d.infer(mixBuf, outBuf, this.budgetMs(), this.deck);
+      } catch (e) {
+        this.drainAbandoned++;
+        this.drainWhy = `the final inference failed: ${String((e && e.message) || e)}`;
+        return;
+      }
+      /**
+       * A NEW SESSION MAY HAVE STARTED UNDER THAT AWAIT, and the drain was the
+       * one awaiting path in this class that did not check. `runChunk` checks
+       * `gen !== this.gen` three times around its own await for exactly this:
+       * `start()` bumps `gen` and replaces `emitter`, `out`, `plan` and
+       * `baseFrame` wholesale, so a drain landing afterwards would hand the NEW
+       * session's emitter a span computed from the OLD capture clock.
+       */
+      if (gen !== this.gen) {
+        this.drainAbandoned++;
+        this.drainWhy = 'a new session started while the final inference was running';
+        return;
+      }
+      if (!res || res.demoted) {
+        // The scheduler refused it. There is no later chunk to recover on, so
+        // this is the end of the recording either way.
+        this.drainAbandoned++;
+        this.drainWhy = `the final inference was demoted: ${(res && res.why) || 'no result'}`;
+        return;
+      }
+      // The emitter may have been torn down while the inference was running.
+      if (!this.emitter || this.emitter.finished || !this.out) {
+        this.drainAbandoned++;
+        this.drainWhy = 'the session was disposed while the final inference was running';
+        return;
+      }
+      const flat = new Float32Array(res.stems);
+      const src = [];
+      for (let q = 0; q < STEM_PLANES; q++) src.push(flat.subarray(q * SEGMENT, (q + 1) * SEGMENT));
+      let e;
+      try {
+        e = this.emitter.finish(src, passL, passR, F);
+      } catch (err) {
+        // `finish()` refuses by name; carry the name rather than the fact.
+        this.drainAbandoned++;
+        this.drainWhy = String((err && err.message) || err);
+        return;
+      }
+      if (!this.out.write(e.from, e.planes, e.len)) this.overruns++;
+      /**
+       * THE RECOVERY IS RECORDED ON THE LINE THAT MAKES IT TRUE, before the two
+       * appends below rather than after them. The ring write is the publication;
+       * the appends are two consumers of it, either of which can throw (see the
+       * header). Recording the count last meant a Host writer rejecting an append
+       * erased the fact that the audio had reached the deck.
+       */
+      this.drainedFrames = e.len;
+      // The same structural rule `runChunk` states: this is MODEL OUTPUT, so it
+      // may be cached. A drain never publishes passthrough — if it could not
+      // separate, it abandoned above rather than appending unseparated audio.
+      if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
+      // AND IT BELONGS TO THE RECORDING, when the recording is still open. It is
+      // not on a drop-ended pass: `endPass('drop')` closed `recOpen` at the
+      // boundary, and these frames are after it.
+      if (this.recWriter && this.recOpen) this.recWriter.append(e.planes, e.len);
     } catch (err) {
-      // `finish()` refuses by name; carry the name rather than the fact.
+      /**
+       * `drainedFrames` is NOT reset. If the ring write landed and a writer
+       * then threw, the deck really did get those frames and the recording
+       * really did not: both halves are true at once and the stats line says
+       * so, rather than picking the tidier of the two.
+       */
       this.drainAbandoned++;
-      this.drainWhy = String((err && err.message) || err);
-      return;
+      this.drainWhy = `the drain could not publish: ${String((err && err.message) || err)}`;
     }
-    if (!this.out.write(e.from, e.planes, e.len)) this.overruns++;
-    // The same structural rule `runChunk` states: this is MODEL OUTPUT, so it
-    // may be cached. A drain never publishes passthrough — if it could not
-    // separate, it abandoned above rather than appending unseparated audio.
-    if (this.cacheWriter) this.cacheWriter.append(e.planes, e.len);
-    // AND IT BELONGS TO THE RECORDING, when the recording is still open. It is
-    // not on a drop-ended pass: `endPass('drop')` closed `recOpen` at the
-    // boundary, and these frames are after it.
-    if (this.recWriter && this.recOpen) this.recWriter.append(e.planes, e.len);
-    this.drainedFrames = e.len;
   }
 
   /** Passthrough fill for a skipped span. `len` may exceed one hop. */

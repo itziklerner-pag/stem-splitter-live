@@ -2055,8 +2055,9 @@ if (group('live')) {
    *
    * ---- U7, LIVE RECORDING: EVERY ASSERTION ADDED HERE, WATCHED RED ----------
    * AGENTS.md: "An assertion never observed failing is one whose ability to fail
-   * is an assumption." The 53 assertions U7 adds to this group are each reddened
-   * by at least one of the 38 mutations below. The battery is IN THE REPOSITORY
+   * is an assumption." The 83 assertions U7 adds to this group — 270 now against
+   * 187 at the branch base, a count the battery pins both ways — are each
+   * reddened by at least one of the 59 mutations below. The battery is IN THE REPOSITORY
    * — `qa/mutations-u7-live-recording.mjs` — because a table is a claim about a
    * TREE and the tree moves. Two earlier batteries in this phase existed only in
    * an agent transcript and could not be re-run at all; a third scored 51/51 at
@@ -2078,11 +2079,11 @@ if (group('live')) {
    *
    * >>> U7 MUTATION TABLE — GENERATED, DO NOT EDIT BY HAND >>>
    *   M1   engine/live.js:325       finish() reads the WRONG PART of the model output (offset off by the crossfade)
-   *                                 -> audio x6
+   *                                 -> audio x6, passfi, drainaudio x2, drainring x2
    *   M2   engine/live.js:359       finish() leaves the commit point one frame short of the capture
    *                                 -> exact x6, twice
    *   M3   engine/live.js:333       finish() BUTT-SPLICES: no crossfade against the held tail (xf = 0)
-   *                                 -> join, midfade
+   *                                 -> join, midfade, passfi, passfade
    *   M4   engine/live.js:296       finish() may be called twice — the second call publishes again
    *                                 -> twice
    *   M5   engine/live.js:161       chunk() after finish() reports non-contiguity instead of naming the real cause
@@ -2099,31 +2100,31 @@ if (group('live')) {
    *                                 -> NOTHING — recorded as a negative result
    *   M11  offscreen/live.js:892    stop() drains BEFORE it raises the flag, so the pump can fire underneath the drain
    *                                 -> order
-   *   M12  offscreen/live.js:1321   drain() borrows the pipeline’s in-flight mixBuf instead of allocating its own
-   *                                 -> ownbufs
+   *   M12  offscreen/live.js:1343   drain() borrows the pipeline’s in-flight mixBuf instead of allocating its own
+   *                                 -> ownbufs, drainown x2, drainflight
    *   M13  offscreen/live.js:854    endPass() is LAST-writer-wins, so the stop() after a drop overwrites its reason
    *                                 -> firstwin
    *   M14  offscreen/live.js:1229   skipOne() abandons the prime WITHOUT ending the pass — the recording runs on past the gap
-   *                                 -> skipends, recclosed, afterbound
+   *                                 -> skipends, recclosed, afterbound, recline
    *   M15  offscreen/live.js:1236   skipOne() aborts the prime without COUNTING the drop
-   *                                 -> primeabort, skipcount
+   *                                 -> skipcount, primeabort
    *   M16  offscreen/live.js:1243   a drop ABORTS THE RECORDING as well as the prime — one writer, both rules
    *                                 -> notabort, handback
    *   M17  offscreen/live.js:1243   a drop does not COUNT on the recording, so its refusal cannot say how many
-   *                                 -> reccount
+   *                                 -> reccount, recline
    *   M18  offscreen/live.js:867    endPass('drop') does not CLOSE the recording, so audio after the gap is appended to it
-   *                                 -> recclosed, afterbound
+   *                                 -> recclosed, afterbound, recline
    *   M19  offscreen/live.js:1155   runChunk() ignores recOpen — the boundary closes nothing
    *                                 -> afterbound
    *   M20  offscreen/live.js:1155   runChunk() never appends to the recording — nothing is ever recorded
-   *                                 -> accum, afterbound, handback, bufctl
-   *   M21  offscreen/live.js:2414   attachRecWriter() attaches the writer but leaves the recording CLOSED
-   *                                 -> open, accum, afterbound, handback, bufctl
-   *   M22  offscreen/live.js:2415   detachRecWriter() DISCARDS the writer instead of handing it back
+   *                                 -> accum, afterbound, handback, bufctl, drivectl x2, drainrec x2, drainflight
+   *   M21  offscreen/live.js:2466   attachRecWriter() attaches the writer but leaves the recording CLOSED
+   *                                 -> open, accum, afterbound, handback, bufctl, drivectl x2, drainrec x2, drainaudio x2, drainflight
+   *   M22  offscreen/live.js:2467   detachRecWriter() DISCARDS the writer instead of handing it back
    *                                 -> handback
    *   M23  offscreen/live.js:1155   the pipeline RETAINS every published buffer instead of streaming it — RAM grows with duration
    *                                 -> bufcount
-   *   M24  offscreen/deck.js:508    dispose() awaits a full drain — a teardown blocks on one more inference
+   *   M24  offscreen/deck.js:521    dispose() awaits a full drain — a teardown blocks on one more inference
    *                                 -> dispose
    *   M25  shared/stemcache.js:562  recordingRefusal() refuses a drop-ended pass instead of delivering what it captured
    *                                 -> deliver, refuse
@@ -2146,13 +2147,55 @@ if (group('live')) {
    *   M35  offscreen/live.js:855    endPass() silently ignores an ordinary stop, so a clean pass records no reason at all
    *                                 -> plain
    *   M36  offscreen/live.js:1236   skipOne() counts the drop but never ABANDONS the prime — a gap is cached as a track
-   *                                 -> skipends, skipcount, primeabort
+   *                                 -> skipends, skipcount, primeabort, recline
    *   M37  engine/live.js:56        makeLivePlan() holds back ONE FRAME MORE than the crossfade, so the shortfall stops being the one the geometry predicts
    *                                 -> short x6
-   *   M38  test.js:1240             THE JOIN FIXTURE DEGENERATES: both passes carry the same constant, so there is no step to smooth
+   *   M38  test.js:1463             THE JOIN FIXTURE DEGENERATES: both passes carry the same constant, so there is no step to smooth
    *                                 -> join, joinctl
+   *   M39  offscreen/live.js:897    THE FEATURE IS SWITCHED OFF: stop() never calls drain() at all
+   *                                 -> drainran x2, drainrec x2, drainaudio x2, draincache x2, drainring x2, drainpass x2, drainflight
+   *   M40  offscreen/live.js:1412   drain() never appends its publication to the RECORDING — this slice’s headline claim, deleted
+   *                                 -> drainrec x2, drainaudio x2, drainflight
+   *   M41  offscreen/live.js:1409   drain() never appends its publication to the PRIME
+   *                                 -> draincache x2
+   *   M42  offscreen/live.js:1344   drain() borrows the pipeline’s outBuf — `infer` DETACHES it and every later session throws
+   *                                 -> drainown x2, drainflight
+   *   M43  offscreen/live.js:1345   drain() borrows the H-frame chunk scratch for the passthrough span it can publish H + X of
+   *                                 -> drainran of 2, drainrec of 2, drainaudio of 2, draincache of 2, drainring of 2, drainpass of 2
+   *   M44  offscreen/live.js:1405   drain() does not record drainedFrames — a drain that did nothing looks identical
+   *                                 -> drainran x2, drainflight
+   *   M45  offscreen/live.js:1397   drain() files the tail but never PUBLISHES it — the deck never plays what it recorded
+   *                                 -> drainring x2
+   *   M46  offscreen/live.js:897    stop() closes the recording BEFORE the drain, so the drain’s publication never reaches it
+   *                                 -> drainrec x2, drainaudio x2, drainflight
+   *   M47  offscreen/live.js:1347   drain() reads the model window one hop early — the recorded tail is plausible and wrong
+   *                                 -> drainaudio x2, drainring x2
    *   M34  engine/live.js:296       THE GROUP GUARD: finish() throws unconditionally, so group(live) never reaches its end
    *                                 -> guard
+   *   M48  engine/live.js:338       finish() separates every stem from STEM PLANE 0 — twelve planes, one stem’s audio
+   *                                 -> drainaudio x2, perplane x6
+   *   M49  engine/live.js:345       finish() crossfades EVERY stem against tail plane 0, so eleven planes join against the wrong tail
+   *                                 -> drainaudio x2, perplane x6
+   *   M50  engine/live.js:337       finish() publishes ONLY the first stem plane — the other eleven go out as silence
+   *                                 -> drainaudio x2, perplane x6
+   *   M51  engine/live.js:333       finish() fades the stems in on the equalPower ramp even through a passthrough exit
+   *                                 -> passfi
+   *   M52  engine/live.js:349       finish() publishes SILENCE in the passthrough planes — the mix that was playing just dies
+   *                                 -> passfade
+   *   M53  engine/live.js:352       finish() does not END the passthrough state — a finished emitter is still in pass
+   *                                 -> passend
+   *   M54  offscreen/live.js:2466   attachRecWriter(null) re-OPENS the recording — a pass the drop boundary closed takes appends again
+   *                                 -> reopen
+   *   M55  offscreen/live.js:2480   stats() does not report the recording on its own line — the two artefacts collapse into one
+   *                                 -> recline
+   *   M56  offscreen/live.js:800    start() keeps the previous session’s passEnd — a new pass inherits the old end reason
+   *                                 -> passreset
+   *   M57  offscreen/live.js:1155   the pipeline retains every publication ON THE EMITTER — a class instance the old walk never entered
+   *                                 -> bufcount
+   *   M58  offscreen/live.js:1155   the pipeline retains every publication IN A MAP — a shape the old walk could not enter
+   *                                 -> bufcount
+   *   M59  engine/live.js:132       the passthrough join uses the seam law — li and fi are one ramp, and the passActive choice is unobservable
+   *                                 -> passctl
    * <<< END U7 MUTATION TABLE <<<
    *
    * THREE ROWS ARE WORTH READING TWICE.
@@ -2336,12 +2379,29 @@ if (group('live')) {
     const x = noise(stopAt + SEGMENT, 31);
     const src = Array.from({ length: STEM_PLANES }, () => new Float32Array(SEGMENT));
     const zero = new Float32Array(p.H + p.X);
+    /**
+     * THE TWELVE PLANES ARE NOT THE SAME SIGNAL, and until review measured it
+     * they were. Every fixture that drove `finish()` filled all twelve planes
+     * with the SAME samples and every assertion read `planes[0]`, so three
+     * separate defects in the publish loop were green at 240 passed / 0 failed:
+     * `src[0]` for every stem (six copies of one thing), `this.tail[0]` for
+     * every stem (every stem crossfaded against drums' tail), and `q < 1` — THE
+     * DRAIN PUBLISHING SILENCE ON ELEVEN OF TWELVE PLANES for the last H + X of
+     * every recording. The per-plane instrument for exactly this already exists
+     * in this group, in the alignment block below; it stopped at `chunk()`.
+     *
+     * THE BIAS IS ZERO ON PLANE 0 on purpose, so the residual assertion below —
+     * which reads plane 0 against the input — measures the same thing it did
+     * before, and the two instruments do not have to be traded off against each
+     * other.
+     */
+    const PLANE_BIAS = 3.0;
     /** the identity "model": hand back exactly the window ending at `inputEnd` */
     const separate = (inputEnd) => {
       for (let q = 0; q < STEM_PLANES; q++) {
         for (let i = 0; i < SEGMENT; i++) {
           const t = inputEnd - SEGMENT + i;
-          src[q][i] = t < 0 || t >= x.length ? 0 : x[t];
+          src[q][i] = (t < 0 || t >= x.length ? 0 : x[t]) + q * PLANE_BIAS;
         }
       }
     };
@@ -2384,7 +2444,138 @@ if (group('live')) {
       + 'IT CANNOT SEE THE CROSSFADE: under an identity model the two overlapping passes are the SAME '
       + 'samples, so complementary linear ramps sum back to the signal and a butt splice reconstructs '
       + 'just as perfectly. The join is asserted separately, below, on passes that DIFFER');
+
+    /**
+     * ...AND IT PUBLISHED TWELVE STEMS, NOT PLANE 0 TWELVE TIMES.
+     *
+     * Read across the WHOLE published span, crossfade region included, because
+     * that is where the three defects differ from each other: `src[0]` for every
+     * stem leaves plane q at `v + q*BIAS*fo[i]` over the fade, `tail[0]` for
+     * every stem leaves it at `v + q*BIAS*fi[i]`, and `q < 1` leaves it at zero.
+     * The expectation is the same for all of them — plane q is plane 0 plus its
+     * own bias, exactly, everywhere — so one comparison catches all three.
+     *
+     * IT ALSO PINS THE WIDTH. `finish()` allocates `RING_PLANES`, not
+     * `STEM_PLANES`: the two passthrough planes are part of every publication
+     * and a 12-plane return is rejected by `StemRingWriter.write()` at runtime,
+     * where the suite could not see it because nothing drove the ring.
+     */
+    let planeWorst = 0, planeAt = -1;
+    for (let q = 1; q < STEM_PLANES; q++) {
+      for (let i = 0; i < fin.len; i++) {
+        const d = Math.abs(fin.planes[q][i] - (fin.planes[0][i] + q * PLANE_BIAS));
+        if (d > planeWorst) { planeWorst = d; planeAt = q; }
+      }
+    }
+    ok(`hop ${hop}s, ${when}: ...and it published ALL ${STEM_PLANES} STEMS plus the passthrough pair \u2014 `
+      + `each plane its own, worst deviation ${planeWorst.toExponential(2)}  `
+      + '[entry point: engine/live.js LiveEmitter.finish(), the per-plane publish loop and its RING_PLANES allocation]',
+      fin.planes.length === RING_PLANES && planeWorst < 1e-3,
+      fin.planes.length !== RING_PLANES
+        ? `it returned ${fin.planes.length} planes, not ${RING_PLANES} \u2014 the passthrough pair is missing and `
+          + 'StemRingWriter.write() rejects the publication at runtime'
+        : planeWorst >= 1e-3
+          ? `plane ${planeAt} is off by ${planeWorst.toExponential(2)} \u2014 the planes are not independent: `
+            + 'a stem is carrying another stem\u2019s audio, another stem\u2019s tail, or nothing at all'
+          : `${fin.planes.length} planes, every stem within ${planeWorst.toExponential(2)} of its own signal`);
    }
+  }
+
+  /**
+   * ...AND THE PASSTHROUGH EXIT — finish() AFTER A gap(), THE BRANCH NOTHING
+   * DROVE (U7, MINOR 6).
+   *
+   * A gap() leaves `passActive` true, and the drain's finish() must then fade
+   * the stems IN against the passthrough fading OUT. Three defects in that
+   * branch were green at 240 passed / 0 failed because no fixture ever entered
+   * it: the fi choice, the passthrough fade, and the state clear. This block
+   * enters it, and it does so on purpose under 'equalPower'.
+   *
+   * THE LAW IS equalPower BECAUSE 'linear' HIDES THE CHOICE. finish() picks
+   * `this.passActive ? this.li : this.fi`, and under the default law the two
+   * ARE THE SAME ARRAY — the passthrough transition is always linear, so the
+   * ternary is unobservable by construction, whatever the subject does with it.
+   * Under 'equalPower' the stems' join ramp differs from the passthrough's, and
+   * the CONTROL assertion below proves the fixture can see that difference:
+   * `max|li - fi|` over the ramp is required non-trivial, so a fixture that
+   * degenerates into two identical ramps turns RED instead of silently passing
+   * on a choice it can no longer observe.
+   *
+   * THE GEOMETRY: chunks 0..3 (commit = 4H - X), a gap of 3000 frames
+   * (passActive, commit += 3000), then finish() at 4H + 7777 — a drain of
+   * X + 4777 frames, longer than the fade, so both the faded region and the
+   * straight copy are asserted. The mix on the exit is the captured input at
+   * the drain span, exactly as the real pipeline reads its ring.
+   */
+  {
+    const p = makeLivePlan(1.95);
+    const em = new LiveEmitter(p, 'equalPower');
+    const X = em.li.length;
+    let rampWorst = 0;
+    for (let i = 0; i < X; i++) rampWorst = Math.max(rampWorst, Math.abs(em.li[i] - em.fi[i]));
+    ok('the passthrough exit’s CONTROL — under equalPower the linear and equal-power ramps really differ, so the fi choice is observable  '
+      + '[entry point: engine/live.js makeFades(n, law), the constructor’s li/fi pair]',
+      rampWorst > 1e-3,
+      `max|li - fi| = ${rampWorst.toExponential(2)} over the ${X}-frame ramp — the fixture has degenerated into `
+      + 'two identical ramps and cannot see the defect it exists to catch');
+
+    const nChunks = 4, gapLen = 3000, stopAt = nChunks * p.H + 7777;
+    const x = noise(stopAt + SEGMENT, 41);
+    const src = Array.from({ length: STEM_PLANES }, () => new Float32Array(SEGMENT));
+    const zero = new Float32Array(p.H + p.X);
+    const separate = (inputEnd) => {
+      for (let q = 0; q < STEM_PLANES; q++) {
+        for (let i = 0; i < SEGMENT; i++) {
+          const t = inputEnd - SEGMENT + i;
+          src[q][i] = (t < 0 || t >= x.length ? 0 : x[t]);
+        }
+      }
+    };
+    for (let k = 0; k < nChunks; k++) { separate((k + 1) * p.H); em.chunk(k, src, zero, zero); }
+    // the gap: the captured input at the gap span, passthrough published
+    const gapMix = new Float32Array(gapLen);
+    for (let i = 0; i < gapLen; i++) gapMix[i] = x[em.commit + i];
+    em.gap(gapLen, gapMix, gapMix);
+    // the finish: the captured input at the drain span
+    const len = stopAt - em.commit, xf = Math.min(X, len), o = p.L - len;
+    const mixL = new Float32Array(len), mixR = new Float32Array(len);
+    for (let i = 0; i < len; i++) { mixL[i] = x[em.commit + i]; mixR[i] = x[em.commit + i]; }
+    separate(stopAt);
+    const fin = em.finish(src, mixL, mixR, stopAt);
+    const s0 = src[0], d0 = fin.planes[0], pl = fin.planes[PASS_PLANE_L];
+
+    let stemWorst = 0, stemAt = -1;
+    for (let i = 0; i < len; i++) {
+      const want = i < xf ? s0[o + i] * em.li[i] : s0[o + i];
+      const d = Math.abs(d0[i] - want);
+      if (d > stemWorst) { stemWorst = d; stemAt = i; }
+    }
+    ok('...and through the passthrough exit the STEMS fade in on the LINEAR ramp — a passActive finish picks li, not fi  '
+      + '[entry point: engine/live.js LiveEmitter.finish(), the passActive branch of the publish loop]',
+      stemWorst < 1e-6 && xf > 0 && xf < len,
+      stemWorst < 1e-6 ? `xf ${xf} of ${len} — the fade region ${xf > 0 && xf < len ? '' : 'DID NOT cover both regions, so this assertion does not either'}`
+        : `stem plane 0 is off by ${stemWorst.toExponential(2)} at frame ${stemAt} — the fade-in ramp is not the linear one `
+          + '(the tolerance is 1e-6, ~8 ulp of float32: the engine stores one rounding of the multiply)');
+
+    let passWorst = 0, passAt = -1, afterFade = 0;
+    for (let i = 0; i < len; i++) {
+      const want = i < xf ? mixL[i] * em.lo[i] : 0;
+      if (want === 0) afterFade += Math.abs(pl[i]);
+      const d = Math.abs(pl[i] - want);
+      if (d > passWorst) { passWorst = d; passAt = i; }
+    }
+    ok('...and the PASSTHROUGH fades out on the linear lo ramp, then silence — the mix that was playing leaves through the exit  '
+      + '[entry point: engine/live.js LiveEmitter.finish(), the passthrough planes of the same branch]',
+      passWorst < 1e-6 && afterFade === 0,
+      passWorst < 1e-6 ? 'passthrough matches the fade within float32 rounding'
+        : passAt < xf ? `passthrough is off by ${passWorst.toExponential(2)} at frame ${passAt} over the fade `
+          + '(the tolerance is 1e-6, ~8 ulp of float32: the engine stores one rounding of the multiply)'
+          : `passthrough carries ${passWorst.toExponential(2)} after the fade — the exit does not end the mix`);
+
+    ok('finish() ENDS the passthrough state — a finished emitter is no longer mid-gap  '
+      + '[entry point: engine/live.js LiveEmitter.finish(), the passActive = false state clear]',
+      em.passActive === false,
+      `passActive ${em.passActive} after finish() — the passthrough state survives the last publication`);
   }
 
   /**
@@ -2607,12 +2798,13 @@ if (group('live')) {
             : planAt < drainAt ? 'the plan is dropped before the drain, which needs the geometry'
               : `stopped@${flagAt} -> drain@${drainAt} -> plan=null@${planAt}`);
 
-    ok('...and the drain never borrows the in-flight scratch — it allocates its own, because `infer` detaches mixBuf/outBuf  '
-      + '[entry point: extension/offscreen/live.js drain()]',
+    ok('...and the drain ALLOCATES its own scratch — `const mixBuf = new ArrayBuffer` sits inside drain()\'s body  '
+      + '(read as text, comments stripped; the BYTELENGTHS are asserted behaviorally, in the driven block below)  '
+      + '[entry point: extension/offscreen/live.js drain(), the one-shot mixBuf/outBuf allocation]',
       /async drain\(\)/.test(liveSrc)
       && /const mixBuf = new ArrayBuffer/.test(liveSrc.split(/async drain\(\)/)[1].slice(0, 3000)),
       /async drain\(\)/.test(liveSrc)
-        ? 'drain() allocates its own mixBuf/outBuf'
+        ? 'drain() still allocates its own mixBuf'
         : 'there is no drain() in the pipeline at all');
 
     ok('...and a DISPOSE stops WITHOUT draining — a teardown has a budget the browser can cut, and may not wait for an inference  '
@@ -3390,6 +3582,20 @@ if (group('live')) {
               + 'separated audio on both sides of a gap it does not contain, which is the silently-wrong file ruling 29 forbids'
             : `${rec.appends} appends and ${rec.frames} frames, unchanged across a chunk published after the drop`);
 
+      const stRec = lp.stats();
+      ok('...and stats() reports the recording on its OWN line — a drop shows here as a closed pass with its frames '
+        + 'intact, and in `caching` above as an abandoned prime; one line for both would hide the ruling  '
+        + '[entry point: extension/offscreen/live.js stats(), the recording: member]',
+        stRec !== null && stRec.recording
+        && stRec.recording.open === false && stRec.recording.frames === rec.frames
+        && stRec.recording.drops === 1 && stRec.recording.endedBy === 'drop'
+        && stRec.caching !== null && stRec.caching.active === false,
+        stRec === null ? 'stats() threw'
+          : !stRec.recording ? 'the recording: member is missing — the two artefacts read as one'
+            : stRec.recording.endedBy !== 'drop' ? `endedBy ${JSON.stringify(stRec.recording.endedBy)}`
+              : `recording open: ${stRec.recording.open}, frames ${stRec.recording.frames} of ${rec.frames}, `
+                + `caching active: ${stRec.caching && stRec.caching.active}`);
+
       const handed = lp.detachRecWriter();
       ok('...and detaching still HANDS IT BACK, drop and all — ending is not discarding  '
         + '[entry point: extension/offscreen/live.js detachRecWriter()]',
@@ -3397,6 +3603,12 @@ if (group('live')) {
         handed !== rec ? 'it returned something else'
           : handed.frames === 0 ? 'it came back empty — ending WAS discarding'
             : `returned with ${handed.frames} frames and ${handed.drops} drop(s)`);
+
+      lp.attachRecWriter(null);
+      ok('...and attaching NULL keeps the pass CLOSED — a recording that ended on a drop does not reopen  '
+        + '[entry point: extension/offscreen/live.js attachRecWriter(), the recOpen ruling]',
+        lp.recWriter === null && lp.recOpen === false,
+        `recWriter ${lp.recWriter === null ? 'null' : 'set again'}, recOpen ${lp.recOpen}`);
 
       lp.detachCacheWriter();
       lp.dispose();
@@ -3443,18 +3655,30 @@ if (group('live')) {
        * Every buffer the instance still holds, found by walking its own fields
        * rather than by listing the ones we remember. A list would be a second
        * place to forget the field somebody adds; the walk cannot miss it.
-       * One level into plain arrays and objects, which is where this class keeps
-       * its scratch (`tail`, `planes`, the pass buffers).
+       *
+       * THE WALK ENTERS ANY OBJECT — class instances, Maps, Sets — and not only
+       * plain arrays and plain objects, and that is D4's repair, measured: this
+       * pipeline keeps real state in a LiveEmitter instance, a StemRingWriter
+       * instance, a Map (`reportWaiters`) and arrays of numbers; a walk that
+       * recognised only `{...}` literals could not see a future pipeline that
+       * retained publications ON THE EMITTER or IN A MAP, and the count would
+       * stay flat while RAM grew. Mutations M57 and M58 put the accumulation in
+       * exactly those two shapes; both must still redden this assertion.
+       * SharedArrayBuffers count too — `out.sab` is one, and it is the deck's
+       * only such handle. Depth is still capped at three levels of nesting: the
+       * graph is finite, and beyond that the walk would be counting the inside
+       * of a buffer, not buffers.
        */
       const heldBuffers = (o, seen = new Set(), depth = 0) => {
         let n = 0;
         if (!o || typeof o !== 'object' || seen.has(o) || depth > 3) return n;
         seen.add(o);
-        for (const v of Object.values(o)) {
-          if (v instanceof ArrayBuffer || ArrayBuffer.isView(v)) n++;
-          else if (Array.isArray(v) || (v && typeof v === 'object' && v.constructor === Object)) {
-            n += heldBuffers(v, seen, depth + 1);
-          }
+        const values = o instanceof Map ? o.values()
+          : o instanceof Set ? o.values()
+            : Object.values(o);
+        for (const v of values) {
+          if (v instanceof ArrayBuffer || v instanceof SharedArrayBuffer || ArrayBuffer.isView(v)) n++;
+          else if (v && typeof v === 'object') n += heldBuffers(v, seen, depth + 1);
         }
         return n;
       };
@@ -3524,6 +3748,289 @@ if (group('live')) {
       lp.pump = realPump;
       lp.detachRecWriter();
       lp.dispose();
+    }
+
+    head('live — THE PIPELINE’S DRAIN, DRIVEN: LivePipeline.drain() runs its body (U7, #44)');
+    /**
+     * WHY THIS BLOCK EXISTS, AND WHAT IT REPLACES.
+     *
+     * `LiveEmitter.finish()` is asserted at length above, and `stop()`'s call
+     * ORDER is read out of the source below. Neither of them watches
+     * `LivePipeline.drain()` — the sixty lines BETWEEN the two that read the
+     * capture ring, run the final inference, publish to the stem ring, and
+     * append to the prime and to the recording.
+     *
+     * MEASURED BY REVIEW, NOT SUSPECTED. Over a whole `node test.js live` the
+     * drain was ENTERED twice and its body past the guards executed ZERO times:
+     * both entries were bare `stop()` calls on pipelines with nothing
+     * outstanding, so both returned at `len <= 0` or at the one-hop bound. NINE
+     * mutations of that body then left the suite at 240 passed / 0 failed —
+     * among them `if (false) await this.drain()`, which switches the feature off
+     * outright, and deleting the recording append, which is this slice's
+     * headline claim.
+     *
+     * A SCAN FOR SOURCE TEXT IS NOT A TEST OF BEHAVIOUR. The two regex
+     * assertions below say those lines are PRESENT. They cannot say the function
+     * works, and `AGENTS.md`'s "an assertion never observed failing is one whose
+     * ability to fail is an assumption" is at its sharpest over a body that has
+     * never run at all.
+     *
+     * WHAT MAKES IT DRIVABLE — and this corrects the claim the source-reading
+     * block below used to justify itself with. `LivePipeline` does NOT build an
+     * AudioContext in its constructor; `build()` does, and nothing here calls
+     * it. So the real class runs under Node against a real `StemRingWriter`, a
+     * real `RingConsumer`, and a fake worker that DETACHES its two arguments
+     * exactly as `postMessage` with transferables does.
+     *
+     * THE CAPTURE RING IS THE SHIPPING SIZE, and that is not a detail. A drain
+     * reads a whole SEGMENT — 7.8 s — of history for its model window, so the
+     * 1<<17-frame ring the blocks above use would have handed it a zero-filled
+     * window and every content assertion here would have been measuring silence
+     * while looking exactly like this.
+     *
+     * THE MODEL IS THE IDENTITY, PER PLANE AND SCALED: plane q comes back as
+     * `mix * (q + 1)`. The twelve planes therefore DIFFER — a fixture whose
+     * planes all carried one signal is blind to a drain that published plane 0
+     * twelve times — and plane 0 is the input EXACTLY, which is what turns a
+     * read at the wrong offset into a content mismatch rather than a plausible
+     * number.
+     */
+    {
+      /** 23.8 s, the shipping ring: the drain's model window reaches SEGMENT back. */
+      const DCAP = 1 << 20;
+      const dsab = new SharedArrayBuffer(ringByteLength(DCAP));
+      const dring = new RingConsumer(dsab, DCAP);
+      const audio = noise(DCAP, 4242);
+      dring.l.set(audio); dring.r.set(audio);
+      const HOP = 1.95;
+      const dplan = makeLivePlan(HOP);
+      const N_CHUNKS = 4;
+      const OUTBYTES = STEMS.length * 2 * SEGMENT * 4;
+
+      /**
+       * The fake worker. It transfers first — exactly the ordering `postMessage`
+       * has, and the ordering that makes a borrowed buffer fatal — then fills
+       * the identity. `hold` is the deferred the in-flight case gates on.
+       */
+      let hold = null;
+      const infer = async (mixBuf, outBuf) => {
+        const mix = structuredClone(mixBuf, { transfer: [mixBuf] });
+        const stems = structuredClone(outBuf, { transfer: [outBuf] });
+        if (hold) { const h = hold; hold = null; await h; } else await Promise.resolve();
+        const m = new Float32Array(mix, 0, SEGMENT);
+        const s = new Float32Array(stems);
+        for (let q = 0; q < STEM_PLANES; q++) {
+          const o = q * SEGMENT, g = q + 1;
+          for (let i = 0; i < SEGMENT; i++) s[o + i] = m[i] * g;
+        }
+        return { mix, stems, prepMs: 0, inferMs: 0, postMs: 0 };
+      };
+
+      const dsent = [];
+      const mountDrain = () => {
+        const lp = new LivePipeline({
+          ctx: () => null, ring: () => dring, infer,
+          ensureModel: async () => {}, send: (m) => dsent.push(m), log: () => {},
+          assetUrl: (relPath) => `stub://unit/${relPath}`,
+          master: () => ({
+            busPeak: () => 0, probeState: () => ({ built: true }),
+            probeTerminal: () => ({ terminalIsDestination: true, why: 'edge present' }),
+            input: () => null, pre: null, shaper: null, post: null, probe: null,
+          }),
+        });
+        lp.plan = makeLivePlan(HOP);
+        lp.emitter = new LiveEmitter(lp.plan, 'linear');
+        lp.passL = new Float32Array(lp.plan.H);
+        lp.passR = new Float32Array(lp.plan.H);
+        lp.lowWaterFrames = Math.round(LIVE_LOW_WATER_SEC * SR);
+        lp.out = new StemRingWriter(new SharedArrayBuffer(stemRingByteLength(STEM_RING_FRAMES)), STEM_RING_FRAMES);
+        lp.baseFrame = 0; lp.stopped = false; lp.status = 'running';
+        /**
+         * THE LADDER IS STUBBED OUT, for the reason the retained-buffer block
+         * above gives: `pump()` decides between a chunk and a passthrough span
+         * from the capture clock, and an interleaved skip makes the chunk
+         * indices non-contiguous. The ladder is asserted at length elsewhere in
+         * this group; the subject HERE is the drain.
+         */
+        lp.pump = () => {};
+        return lp;
+      };
+      const spyWriter = () => ({
+        frames: 0, appends: 0, drops: 0, aborted: false, last: null,
+        append(planes, len) {
+          this.appends++; this.frames += len;
+          this.last = planes.map((q) => q.slice(0, len));
+        },
+        noteDrop(n = 1) { this.drops += n; },
+        abort() { this.aborted = true; },
+      });
+      /** absolute frames straight out of the stem ring the worklet would read */
+      const fromStemRing = (lp, q, from, len) => {
+        const out = new Float32Array(len);
+        for (let i = 0; i < len; i++) out[i] = lp.out.planes[q][(from + i) & lp.out.mask];
+        return out;
+      };
+      /** what plane q must carry over [from, from+len) under the scaled identity */
+      const wanted = (q, from, len) => {
+        const w = new Float32Array(len);
+        for (let i = 0; i < len; i++) w[i] = audio[from + i] * (q + 1);
+        return w;
+      };
+
+      /**
+       * Drive one recording: N_CHUNKS real chunks, then a real `stop()`.
+       *
+       * `inFlight` runs the same drive with chunk N_CHUNKS still awaiting the
+       * worker when `stop()` lands — the state in which the pipeline's own
+       * `mixBuf`/`outBuf` are DETACHED, and the one that turns "the drain
+       * borrows the in-flight scratch" from a wrong number into a throw.
+       */
+      const drive = async ({ stopAt, inFlight = false }) => {
+        const lp = mountDrain();
+        const rec = spyWriter(), cache = spyWriter();
+        lp.attachCacheWriter(cache);
+        lp.attachRecWriter(rec);
+        /**
+         * A SPY ON THE REAL CALL, not on the source: it records the ARGUMENT the
+         * drain actually passed and then calls through to the real `finish()`.
+         * `mixL.length` is the only way to see, at runtime, that the drain gave
+         * `finish()` a passthrough buffer long enough for the span it is about
+         * to publish — the chunk scratch is `H` frames and a drain can publish
+         * `H + X`.
+         */
+        const seenFinish = [];
+        const realFinish = lp.emitter.finish.bind(lp.emitter);
+        lp.emitter.finish = (src, mixL, mixR, inputEnd) => {
+          seenFinish.push({ passLen: Math.min(mixL.length, mixR.length), inputEnd });
+          return realFinish(src, mixL, mixR, inputEnd);
+        };
+
+        for (let k = 0; k < N_CHUNKS; k++) {
+          const c = chunkPlan(k, lp.plan);
+          Atomics.store(dring.hdr, 0, c.inputEnd);
+          await lp.runChunk(c);
+          // the playhead, consuming what was just published, so the stem ring
+          // never refuses a write for lapping a consumer that never reads
+          Atomics.store(lp.out.hdr, H_READ, lp.emitter.commit);
+        }
+        const before = { recAppends: rec.appends, cacheAppends: cache.appends, commit: lp.emitter.commit };
+        Atomics.store(dring.hdr, 0, stopAt);
+
+        let pending = null, releaseIt = null;
+        if (inFlight) {
+          hold = new Promise((r) => { releaseIt = r; });
+          lp.inFlight = true;
+          pending = lp.runChunk(chunkPlan(N_CHUNKS, lp.plan));
+          // let runChunk reach the await inside `infer`
+          await Promise.resolve(); await Promise.resolve();
+        }
+        let threw = null;
+        try { await lp.stop(); } catch (e) { threw = e; }
+        const after = { mix: lp.mixBuf.byteLength, out: lp.outBuf.byteLength };
+        if (pending) { releaseIt(); try { await pending; } catch { /* the stale chunk's own business */ } }
+        clearTimeout(lp.startTimer); clearInterval(lp.pushTimer);
+        return { lp, rec, cache, seenFinish, before, after, threw, len: stopAt - before.commit };
+      };
+
+      // ---- an ordinary mid-hop stop, and the worst case the geometry admits.
+      // TWO STOP POINTS, for the reason the emitter fixture above gives: at one
+      // arbitrary offset the drained span is set by the offset and not by the
+      // hop, and `H + X - 1` is the only span that can see a passthrough buffer
+      // one hop long being too short.
+      for (const [when, stopAt] of [
+        ['mid-hop', N_CHUNKS * dplan.H + 7777],
+        ['worst case', (N_CHUNKS + 1) * dplan.H - 1],
+      ]) {
+        const r = await drive({ stopAt });
+        const { lp, rec, cache, before, len } = r;
+
+        ok(`${when}: THE DRIVE’S CONTROL — real chunks really published before the drain, so the rows below are about a TAIL  `
+          + '[entry point: extension/offscreen/live.js runChunk(), driven for 4 hops against the real StemRingWriter]',
+          before.recAppends === N_CHUNKS && before.cacheAppends === N_CHUNKS
+          && before.commit === N_CHUNKS * dplan.H - dplan.X && len > 0 && len <= dplan.H + dplan.X,
+          before.recAppends === N_CHUNKS
+            ? `${N_CHUNKS} chunks published, commit ${before.commit}, ${len} frames outstanding of a possible ${dplan.H + dplan.X}`
+            : `${before.recAppends} appends and commit ${before.commit} — the drive did not publish the chunks this block is a tail of`);
+
+        ok(`${when}: THE DRAIN RAN ITS BODY — drainedFrames is the span the chunk grid could not reach, and nothing was abandoned  `
+          + '[entry point: extension/offscreen/live.js drain(), reached from stop()]',
+          r.threw === null && lp.drainedFrames === len && lp.drainAbandoned === 0 && lp.drainWhy === null,
+          r.threw !== null ? `stop() THREW: ${String(r.threw && r.threw.message)}`
+            : lp.drainedFrames === len && lp.drainAbandoned === 0
+              ? `drained ${lp.drainedFrames} frames`
+              : `drainedFrames ${lp.drainedFrames} against ${len} outstanding, `
+                + `${lp.drainAbandoned} abandoned (${lp.drainWhy || 'no reason recorded'})`);
+
+        ok(`${when}: THE RECORDING GETS THE DRAIN’S PUBLICATION — recorded frames equal captured frames EXACTLY  `
+          + '[entry point: extension/offscreen/live.js drain(), the recWriter append after out.write()]',
+          rec.appends === before.recAppends + 1 && rec.frames === stopAt,
+          rec.appends === before.recAppends + 1
+            ? `${rec.appends} appends, ${rec.frames} frames recorded of ${stopAt} captured`
+            : `${rec.appends} appends against ${before.recAppends + 1} expected — the recording is ${stopAt - rec.frames} `
+              + 'frames short and nothing in the file says so');
+
+        ok(`${when}: ...AND IT IS THE AUDIO — the drained span reconstructs the capture, on plane 0 and on a plane that is not plane 0  `
+          + '[entry point: engine/live.js finish() through offscreen/live.js drain(), identity model, per-plane scale]',
+          !!rec.last && rec.last.length === RING_PLANES
+          && residualDb(rec.last[0], wanted(0, before.commit, len)) < -120
+          && residualDb(rec.last[5], wanted(5, before.commit, len)) < -120,
+          !rec.last ? 'the recording received nothing at all, so this assertion could not look'
+            : `plane 0 ${residualDb(rec.last[0], wanted(0, before.commit, len)).toFixed(1)} dB, `
+              + `plane 5 ${residualDb(rec.last[5], wanted(5, before.commit, len)).toFixed(1)} dB `
+              + `over [${before.commit}, ${stopAt}) (gate < -120)`);
+
+        ok(`${when}: THE PRIME’S CACHE WRITER GETS IT TOO — a drain publishes MODEL OUTPUT, so it may be cached  `
+          + '[entry point: extension/offscreen/live.js drain(), the cacheWriter append]',
+          cache.appends === before.cacheAppends + 1 && cache.frames === stopAt && cache.aborted === false,
+          cache.appends === before.cacheAppends + 1
+            ? `${cache.appends} appends, ${cache.frames} frames primed of ${stopAt} captured`
+            : `${cache.appends} appends against ${before.cacheAppends + 1} expected — the cached entry ends `
+              + `${stopAt - cache.frames} frames before the capture did`);
+
+        ok(`${when}: AND THE STEM RING GETS IT, so the deck PLAYS the drained tail rather than only filing it  `
+          + '[entry point: extension/offscreen/live.js drain(), out.write() before either writer]',
+          lp.out.writeFrames() === stopAt && lp.overruns === 0
+          && residualDb(fromStemRing(lp, 0, before.commit, len), wanted(0, before.commit, len)) < -120,
+          lp.out.writeFrames() !== stopAt
+            ? `the stem ring holds ${lp.out.writeFrames()} frames of ${stopAt} captured — the tail was recorded but never played`
+            : `${lp.out.writeFrames()} frames, ${lp.overruns} overruns, plane 0 `
+              + `${residualDb(fromStemRing(lp, 0, before.commit, len), wanted(0, before.commit, len)).toFixed(1)} dB`);
+
+        ok(`${when}: THE DRAIN’S SCRATCH IS ITS OWN — \`infer\` DETACHES what it is handed, and the pipeline’s pair survives the stop  `
+          + '[entry point: extension/offscreen/live.js drain(), its own mixBuf/outBuf; 0 B = detached]',
+          r.after.mix === 2 * SEGMENT * 4 && r.after.out === OUTBYTES,
+          r.after.mix === 2 * SEGMENT * 4 && r.after.out === OUTBYTES
+            ? `mixBuf ${r.after.mix} B, outBuf ${r.after.out} B, both still attached`
+            : `mixBuf ${r.after.mix} B, outBuf ${r.after.out} B of ${OUTBYTES} — the drain sent the pipeline’s own `
+              + 'scratch to the worker, and every later session throws on a detached ArrayBuffer');
+
+        ok(`${when}: THE PASSTHROUGH PLANES ARE LONG ENOUGH FOR THE SPAN — finish() is not handed the H-frame chunk scratch  `
+          + '[entry point: extension/offscreen/live.js drain(), the mixL/mixR it passes to engine/live.js finish()]',
+          r.seenFinish.length === 1 && r.seenFinish[0].inputEnd === stopAt && r.seenFinish[0].passLen >= len,
+          r.seenFinish.length !== 1
+            ? `finish() was called ${r.seenFinish.length} times, so this assertion could not look`
+            : r.seenFinish[0].passLen >= len
+              ? `${r.seenFinish[0].passLen} frames of passthrough for a ${len}-frame span`
+              : `${r.seenFinish[0].passLen} frames of passthrough for a ${len}-frame span — the last `
+                + `${len - r.seenFinish[0].passLen} frames were never read out of the ring, and a gap-exiting `
+                + 'drain would fade out of stale scratch');
+      }
+
+      // ---- and the case the ONE-SHOT BUFFERS comment is actually about.
+      {
+        const r = await drive({ stopAt: N_CHUNKS * dplan.H + 7777, inFlight: true });
+        ok('A STOP WITH A CHUNK STILL IN FLIGHT STILL DRAINS — the pipeline’s own scratch is DETACHED at that '
+          + 'moment, so a drain that borrowed it recovers NOTHING  '
+          + '[entry point: extension/offscreen/live.js stop() -> drain(), with runChunk awaiting the worker]',
+          r.threw === null && r.lp.drainedFrames === r.len && r.lp.drainAbandoned === 0
+          && r.rec.frames === N_CHUNKS * dplan.H + 7777,
+          r.threw !== null
+            ? `stop() THREW: ${String(r.threw && r.threw.message)} — a rejected stop() is a teardown that did not happen`
+            : r.lp.drainAbandoned
+              ? `the drain abandoned: ${r.lp.drainWhy} — with a chunk in flight the borrowed buffer is already `
+                + 'detached, which is why the drain allocates its own'
+              : `drained ${r.lp.drainedFrames} frames with a chunk in flight, ${r.rec.frames} frames recorded`);
+      }
     }
 
     head('live — the output watchdog: "green and silent" has to be self-reporting');
@@ -3704,6 +4211,22 @@ if (group('live')) {
       ok('and both priming phases actually reach the wire',
         primingMsgs.map((m) => m.phase).join(',') === 'model,ring',
         primingMsgs.map((m) => m.phase).join(',') || 'none');
+
+      // MINOR 8: a NEW session must not inherit the previous one's end reason.
+      // The reset is part of start()'s session-state block — a restarted deck
+      // must not report the OLD pass's 'drop'/'stopped' as this one's end.
+      const lp3 = mount();
+      lp3.build = async () => {};
+      lp3.node = { port: { postMessage: () => {} } };
+      lp3.d.ensureModel = async () => {};
+      lp3.status = 'idle';
+      lp3.passEnd = 'drop';   // the previous session ended on a drop
+      await lp3.start();
+      quiesce(lp3);
+      ok('start() resets the previous session’s passEnd — a new pass is not a continuation of the old one  '
+        + '[entry point: extension/offscreen/live.js start(), the session-state reset]',
+        lp3.passEnd === null,
+        `passEnd ${JSON.stringify(lp3.passEnd)}`);
     }
 
     /**
