@@ -1,6 +1,6 @@
 {
   "name": "stem-splitter-live",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "private": true,
   "type": "module",
   "description": "Split any YouTube video into six stems, live and on your own machine.",

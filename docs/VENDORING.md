@@ -174,28 +174,29 @@ node tools/verify.mjs --unit
 Expect, verbatim on the last line:
 
 ```
-GREEN (partial — the vendored unit's suites only; 12 of 23 steps)
+GREEN (partial — the vendored unit's suites only; 13 of 24 steps)
 ```
 
-exit 0, 12 of 12 steps PASS, **1327 assertions**, about 74 s. Per step:
+exit 0, 13 of 13 steps PASS, **1666 assertions**, about 82 s. Per step:
 
-> These twelve numbers are this repository's own `--unit` counts, **measured at
-> `b9dc537` (v0.3.0)** — not a floor and not a target. They move whenever a
+> These thirteen numbers are this repository's own `--unit` counts, **measured
+> at `f1285c0` (v0.4.0)** — not a floor and not a target. They move whenever a
 > suite gains an assertion, so they are a fact about a tag rather than about
 > the code in general. **If yours differ, compare against the figure in the
-> annotated tag you pinned** (`git cat-file -p v0.3.0`), which is immutable and
+> annotated tag you pinned** (`git cat-file -p v0.4.0`), which is immutable and
 > was measured at that commit; this table is a convenience for finding WHICH
 > step differs. A mismatch here with the tag body's total means this table is
 > stale — please report it rather than editing your copy.
 
 | step | count | step | count |
 |---|---|---|---|
-| `unit` (`test.js`) | 766 | `chroma` | 37 |
+| `unit` (`test.js`) | 1032 | `chroma` | 37 |
 | `seam` | 17 | `keytap` | 23 |
 | `ui` | 124 | `bpmtap` | 46 |
-| `qa-edge` | 13 | `speed-pitch` | 10 |
+| `qa-edge` | 14 | `speed-pitch` | 10 |
 | `passthrough` | 16 | `embed-state` | 224 |
 | `pitch` | 23 | `pitchbank` | 28 |
+| `bounce` | 72 | | |
 
 **No `npm install`, no `node_modules`, no `package.json`, no git.** The dry run
 had none of them; `--unit` is the plain-Node plan and spawns nothing that is not

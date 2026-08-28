@@ -9,7 +9,41 @@ Because [`PRIVACY.md`](PRIVACY.md) promises that any change to data handling is
 disclosed, **any such change gets its own entry here**, at the top of the
 release, whether or not it is otherwise notable.
 
-## [Unreleased]
+## [0.4.0] — 2026-08-27
+
+The v0.4.0 repair wave: five slices landed on top of v0.3.1, each with its
+mutation battery verified at the merged tree, both directions — E1 export
+(U11), Bounce, the deck as transport master (U6), live-export recording (U7),
+and the ahead-of-time separation runner (U5a). The full gate went from 1925 to
+2116 assertions across 24 steps (+191), GREEN end to end; every battery printed
+its anchors MATCHING and every mutation reddening EXACTLY its declared set at
+the tree this tag points at.
+
+### The six stems go through a Host's writables (U11)
+
+`extension/engine/export.js` writes the six untouched model outputs into the
+writables a Host's `exportSink` provides — escaping `<device>.<anything>` and
+aborting the sinks the writers never took — and `qa/u11-export-mutations.mjs`
+watches all 57 export assertions red.
+
+### The deck is the transport master for a File source (U6)
+
+A File source's deck owns the transport over the engine's playback clock:
+`transportRateRefusals` counts the rates a transport drive asks for that the
+deck cannot play, `isDeckClock` declares whose clock the deck runs on so the
+video lock cannot take the deck it IS, and `assertDeclared` watches a Host's
+announcements. `tools/mutations/u6-transport-master.mjs` (33 mutations) is in
+the tree beside it. Deliberately left as design decisions, with reasons, per
+the review: D6/D9/D10 and the latent TDZ in the transport code.
+
+### Live-export recording (U7)
+
+`extension/offscreen/live.js` gives a recording its own writer so a dropped
+chunk cannot abort it, ends the contiguous pass when a chunk drops the way a
+seek does, drains the pipeline at stop and counts what it could not recover,
+and publishes the last buffer so a recording is never one buffer short.
+`qa/mutations-u7-live-recording.mjs` (59 mutations, CONTROL 270/0) is in the
+tree beside it.
 
 Nothing about what the extension does changes. This is for the second
 product: a deck can be rendered offline, as one file, with its own settings
@@ -103,6 +137,12 @@ second product pins.
   capture clock in the path and no JS resampler anywhere. `CONTRIBUTING.md` and
   ADR 0001 amendment A5 carry the sentence, so it ships inside the tag instead
   of in a review.
+
+Deliberately left, in writing rather than quietly: the two mutation-battery
+conventions (u5a vs u8) stay un-unified for a later release; and the desktop
+product's issue [#28](https://github.com/itziklerner-pag/stem-splitter-live/issues/28)
+filed-not-fixed caveat lives in stem-workbench — nothing about it is claimed
+here.
 
 ## [0.3.1] — 2026-08-27
 
@@ -405,7 +445,8 @@ First public release.
 - No `downloads` permission, and an automated gate asserts its continued
   absence.
 
-[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/itziklerner-pag/stem-splitter-live/compare/v0.1.0...v0.2.0
