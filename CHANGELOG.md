@@ -15,9 +15,15 @@ The v0.4.0 repair wave: five slices landed on top of v0.3.1, each with its
 mutation battery verified at the merged tree, both directions — E1 export
 (U11), Bounce, the deck as transport master (U6), live-export recording (U7),
 and the ahead-of-time separation runner (U5a). The full gate went from 1925 to
-2116 assertions across 24 steps (+191), GREEN end to end; every battery printed
+2126 assertions across 24 steps (+201), GREEN end to end; every battery printed
 its anchors MATCHING and every mutation reddening EXACTLY its declared set at
 the tree this tag points at.
+
+The full-gate count above was corrected by measurement: the initially recorded
+total (2116, +191) quoted the quick gate's delta where the full gate's belonged,
+and re-summing every per-step line of the release gate's own log gives 2126
+(+201). Corrected baseline — quick 1953, unit 1666, full 2126, unit step 1032,
+tree 21.
 
 ### The six stems go through a Host's writables (U11)
 
