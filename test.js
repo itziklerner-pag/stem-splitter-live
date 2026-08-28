@@ -2150,7 +2150,7 @@ if (group('live')) {
    *                                 -> skipends, skipcount, primeabort, recline
    *   M37  engine/live.js:56        makeLivePlan() holds back ONE FRAME MORE than the crossfade, so the shortfall stops being the one the geometry predicts
    *                                 -> short x6
-   *   M38  test.js:1463             THE JOIN FIXTURE DEGENERATES: both passes carry the same constant, so there is no step to smooth
+   *   M38  test.js:2635             THE JOIN FIXTURE DEGENERATES: both passes carry the same constant, so there is no step to smooth
    *                                 -> join, joinctl
    *   M39  offscreen/live.js:897    THE FEATURE IS SWITCHED OFF: stop() never calls drain() at all
    *                                 -> drainran x2, drainrec x2, drainaudio x2, draincache x2, drainring x2, drainpass x2, drainflight

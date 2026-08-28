@@ -118,8 +118,13 @@
  * PROVENANCE: EVERY SUBJECT FILE CARRIES THE SHA-256 IT WAS CUT AGAINST, not
  * just a commit id. A commit stamp is a proxy for "the source has not moved"; a
  * content hash IS that, and it stays checkable across a rebase — which matters
- * here because U7 was cut on a branch and rebased onto main once already. The
- * branch base, `main` at 5993d32, is a landed commit and is recorded too.
+ * here because U7 was cut on a branch and rebased onto main twice. The branch
+ * base, `main` at 5993d32, is a landed commit and is recorded too. The second
+ * rebase (onto 08c85af) moved test.js and shared/stemcache.js under the stamps;
+ * their S and F hashes above were re-cut at the rebased tree, and the table in
+ * test.js was re-derived with `--table` there — one row moved (M38: 1463 -> 2635),
+ * which is what a mechanical re-derivation is for. The full battery re-run at the
+ * rebased tree confirmed every row EXACTLY, both directions, at that tree.
  */
 
 import { readFileSync, writeFileSync } from 'node:fs';
@@ -164,7 +169,7 @@ const BASE_LIVE = 187;
 const SUBJECTS = {
   E: { path: 'extension/engine/live.js',      sha: 'cbf3c2498172454630d3eb4037442f888f723523e2afa57cd37832af73f8e33c' },
   L: { path: 'extension/offscreen/live.js',   sha: '6737e15e5b770fa1c777c678b1808f38213223568d98f4327064c9dd1bfc1d15' },
-  S: { path: 'extension/shared/stemcache.js', sha: 'd5f49c9ac81d0fcd5679fb22d9db92e7c05164a9a5356217a5c9f1cfb8a2746c' },
+  S: { path: 'extension/shared/stemcache.js', sha: '6ae3ffcec71282a5e98b91e9c03655bf889ec787905c049d5b62fdc2bf0ed3a6' },
   D: { path: 'extension/offscreen/deck.js',   sha: '1c6e7336bebe4758aa32f93a6047c25b49b11970457a8c5bd1f800f6535d01b3' },
   /**
    * THE FIXTURE IS A SUBJECT TOO, for the CONTROL assertions and only for them.
@@ -174,7 +179,7 @@ const SUBJECTS = {
    * every row that uses it, because a fixture mutation is evidence about the
    * control and about nothing else.
    */
-  F: { path: 'test.js', sha: '2f8f9be57a1e7315f785ebbf3a4f7fa6bfffb0ed518e5f02999580292f0d46c5' },
+  F: { path: 'test.js', sha: 'bec85a79643c057277bf469fdb5e79dcb95883045f46c69e2be5c57c38acb3b9' },
 };
 
 /**
